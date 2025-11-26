@@ -1,0 +1,261 @@
+"""GitHub OAuth provider implementing MCP OAuth protocol."""
+
+import logging
+import os
+import secrets
+import time
+from typing import Any
+
+import httpx
+from mcp.server.auth.provider import (
+    AccessToken,
+    AuthorizationCode,
+    AuthorizationParams,
+    AuthorizeError,
+    OAuthAuthorizationServerProvider,
+    RefreshToken,
+    TokenError,
+)
+from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
+
+logger = logging.getLogger(__name__)
+
+
+class GitHubOAuthProvider(
+    OAuthAuthorizationServerProvider[AuthorizationCode, RefreshToken, AccessToken]
+):
+    """OAuth provider that uses GitHub for authentication."""
+
+    def __init__(self):
+        self.base_url = os.getenv("BASE_URL", "https://127.0.0.1")
+        self.github_client_id = os.getenv("GITHUB_CLIENT_ID", "")
+        self.github_client_secret = os.getenv("GITHUB_CLIENT_SECRET", "")
+        self.required_repo = os.getenv("GITHUB_REQUIRED_REPO", "")  # Format: "owner/repo"
+
+        if not self.github_client_id or not self.github_client_secret:
+            logger.warning("GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET not set - OAuth will not work")
+
+        if not self.required_repo:
+            logger.warning("GITHUB_REQUIRED_REPO not set - all GitHub users will be allowed")
+        else:
+            logger.info(f"Access restricted to users with access to: {self.required_repo}")
+
+        # Storage
+        self.clients: dict[str, OAuthClientInformationFull] = {}
+        self.pending_auth: dict[str, tuple[OAuthClientInformationFull, AuthorizationParams]] = {}
+        self.auth_codes: dict[str, AuthorizationCode] = {}
+        self.access_tokens: dict[str, AccessToken] = {}
+        self.github_tokens: dict[str, str] = {}  # session_id -> github_token
+        self.token_users: dict[str, str] = {}  # access_token -> github_username
+
+    async def get_client(self, client_id: str) -> OAuthClientInformationFull | None:
+        """Get registered MCP client."""
+        return self.clients.get(client_id)
+
+    async def register_client(self, client_info: OAuthClientInformationFull) -> None:
+        """Register MCP client."""
+        self.clients[client_info.client_id] = client_info
+        logger.info(f"Registered MCP client: {client_info.client_id}, redirect_uris={client_info.redirect_uris}")
+
+    async def authorize(
+        self, client: OAuthClientInformationFull, params: AuthorizationParams
+    ) -> str:
+        """
+        Start OAuth flow by redirecting to GitHub.
+        MCP client will open this URL in a browser.
+        """
+        logger.info(f"Authorization requested by client: {client.client_id}")
+        logger.debug(f"Auth params: redirect_uri={params.redirect_uri}, state={params.state}")
+
+        # Generate state to track this authorization request
+        state = secrets.token_urlsafe(32)
+        self.pending_auth[state] = (client, params)
+
+        # Build GitHub OAuth URL
+        # We'll redirect back to our server's callback, which will then redirect to the MCP client
+        github_auth_url = (
+            f"https://github.com/login/oauth/authorize"
+            f"?client_id={self.github_client_id}"
+            f"&redirect_uri={self.base_url}/oauth/github/callback"
+            f"&state={state}"
+            f"&scope=read:user repo" # we could add read:org if we want to check org membership
+        )
+
+        logger.debug(f"Redirecting to GitHub OAuth: {github_auth_url[:100]}...")
+
+        return github_auth_url
+
+    async def handle_github_callback(self, code: str, state: str) -> str:
+        """
+        Handle GitHub callback:
+        1. Exchange GitHub code for GitHub access token
+        2. Generate our MCP authorization code
+        3. Redirect back to MCP client
+        """
+        if state not in self.pending_auth:
+            raise AuthorizeError("invalid_request", "Invalid state parameter")
+
+        client, params = self.pending_auth.pop(state)
+
+        # Exchange code for GitHub access token
+        async with httpx.AsyncClient() as http_client:
+            response = await http_client.post(
+                "https://github.com/login/oauth/access_token",
+                headers={"Accept": "application/json"},
+                data={
+                    "client_id": self.github_client_id,
+                    "client_secret": self.github_client_secret,
+                    "code": code,
+                },
+            )
+            github_data = response.json()
+
+        if "error" in github_data:
+            raise AuthorizeError("access_denied", github_data.get("error_description"))
+
+        github_token = github_data["access_token"]
+
+        # Generate MCP authorization code
+        auth_code = secrets.token_urlsafe(32)
+        self.auth_codes[auth_code] = AuthorizationCode(
+            code=auth_code,
+            scopes=params.scopes or [],
+            expires_at=time.time() + 600,  # 10 minutes
+            client_id=client.client_id,
+            code_challenge=params.code_challenge,
+            redirect_uri=params.redirect_uri,
+            redirect_uri_provided_explicitly=params.redirect_uri_provided_explicitly,
+            resource=params.resource,
+        )
+
+        # Store GitHub token linked to this auth code
+        self.github_tokens[auth_code] = github_token
+
+        # Redirect back to MCP client
+        redirect_url = str(params.redirect_uri)
+        separator = "&" if "?" in redirect_url else "?"
+        redirect_url += f"{separator}code={auth_code}"
+        if params.state:
+            redirect_url += f"&state={params.state}"
+
+        return redirect_url
+
+    async def load_authorization_code(
+        self, client: OAuthClientInformationFull, authorization_code: str
+    ) -> AuthorizationCode | None:
+        """Load MCP authorization code."""
+        code = self.auth_codes.get(authorization_code)
+        if code and code.client_id == client.client_id:
+            if time.time() < code.expires_at:
+                return code
+        return None
+
+    async def exchange_authorization_code(
+        self, client: OAuthClientInformationFull, authorization_code: AuthorizationCode
+    ) -> OAuthToken:
+        """Exchange MCP authorization code for MCP access token."""
+        code_str = authorization_code.code
+
+        # Get GitHub token
+        github_token = self.github_tokens.get(code_str)
+        if not github_token:
+            raise TokenError("invalid_grant", "Authorization code not found")
+
+        # Clean up used code
+        if code_str in self.auth_codes:
+            del self.auth_codes[code_str]
+            del self.github_tokens[code_str]
+
+        # Generate MCP access token
+        access_token_str = secrets.token_urlsafe(32)
+        expires_in = 3600  # 1 hour
+
+        access_token = AccessToken(
+            token=access_token_str,
+            client_id=client.client_id,
+            scopes=authorization_code.scopes,
+            expires_at=int(time.time() + expires_in),
+            resource=authorization_code.resource,
+        )
+
+        self.access_tokens[access_token_str] = access_token
+        self.github_tokens[access_token_str] = github_token
+
+        logger.info(f"Issued access token for client {client.client_id}")
+        logger.debug(f"Token: {access_token_str[:20]}..., total tokens: {len(self.access_tokens)}")
+
+        return OAuthToken(
+            access_token=access_token_str,
+            token_type="Bearer",
+            expires_in=expires_in,
+            scope=" ".join(authorization_code.scopes) if authorization_code.scopes else None,
+        )
+
+    async def exchange_refresh_token(
+        self, client: OAuthClientInformationFull, refresh_token_str: str
+    ) -> OAuthToken:
+        """Refresh tokens not implemented."""
+        raise TokenError("unsupported_grant_type", "Refresh tokens not supported")
+
+    async def load_access_token(self, token: str) -> AccessToken | None:
+        """Load and verify MCP access token."""
+        logger.debug(f"Loading token: {token[:20]}...")
+
+        access = self.access_tokens.get(token)
+        if not access:
+            logger.warning(f"Token not found: {token[:20]}...")
+            return None
+
+        if access.expires_at and time.time() > access.expires_at:
+            logger.warning(f"Token expired: {token[:20]}...")
+            return None
+
+        # Verify with GitHub
+        github_token = self.github_tokens.get(token)
+        if not github_token:
+            logger.error(f"No GitHub token found for access token: {token[:20]}...")
+            return None
+
+        async with httpx.AsyncClient() as client:
+            # Verify user
+            response = await client.get(
+                "https://api.github.com/user",
+                headers={"Authorization": f"Bearer {github_token}"},
+            )
+            if response.status_code != 200:
+                logger.warning(f"GitHub verification failed: {response.status_code}")
+                return None
+
+            user_data = response.json()
+            username = user_data.get('login')
+            logger.info(f"GitHub user: {username} (id: {user_data.get('id')})")
+
+            # Store username for this token
+            self.token_users[token] = username
+
+            # Check repository access if required
+            if self.required_repo:
+                logger.debug(f"Checking access to repository: {self.required_repo}")
+                repo_response = await client.get(
+                    f"https://api.github.com/repos/{self.required_repo}",
+                    headers={"Authorization": f"Bearer {github_token}"},
+                )
+                if repo_response.status_code == 200:
+                    logger.info(f"User {user_data.get('login')} has access to {self.required_repo}")
+                elif repo_response.status_code == 404:
+                    logger.warning(f"User {user_data.get('login')} does NOT have access to {self.required_repo}")
+                    return None
+                else:
+                    logger.error(f"Error checking repository access: {repo_response.status_code}")
+                    return None
+
+        logger.debug(f"Token verified successfully: {token[:20]}...")
+        return access
+
+    def get_active_sessions_count(self) -> int:
+        """Get count of active sessions."""
+        return len(self.access_tokens)
+
+    def get_username_for_token(self, token: str) -> str | None:
+        """Get GitHub username for a given access token."""
+        return self.token_users.get(token)
