@@ -24,6 +24,7 @@ dev = [
 
 [project.scripts]
 test-mcp = "test_mcp.server:main"
+test-mcp-manage-keys = "test_mcp.cli.manage_keys:main"
 
 [project.urls]
 Repository = "https://github.com/corrodis/test-mcp"

@@ -71,6 +71,17 @@ Leave empty to allow all authenticated GitHub users:
 GITHUB_REQUIRED_REPO=
 ```
 
+## API Key Configuration
+
+### API_KEYS_FILE
+Path to API keys file (default: `data/api_keys.json`).
+
+```bash
+API_KEYS_FILE=data/api_keys.json
+```
+
+See [API Keys](api-keys.md) for usage details.
+
 ## Audit Logging Configuration
 
 ### AUDIT_LOG_FILE

@@ -44,17 +44,19 @@ Edit `.env` and set:
 
 ## 5. SSL Certificates
 
-Generate self-signed certificates for HTTPS:
+Install and use mkcert to create locally-trusted certificates:
 
 ```bash
-mkdir -p certs
-openssl req -x509 -newkey rsa:4096 -nodes \
-  -keyout certs/key.pem \
-  -out certs/cert.pem \
-  -days 365
-```
+# Install mkcert
+brew install mkcert
 
-Press Enter through all prompts or fill them in as desired.
+# Install local CA
+mkcert -install
+
+# Generate certificates
+mkdir -p certs
+mkcert -key-file certs/key.pem -cert-file certs/cert.pem localhost 127.0.0.1
+```
 
 ## 6. Start the Server
 

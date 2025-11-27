@@ -4,6 +4,7 @@ import logging
 import os
 import secrets
 import time
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -17,6 +18,8 @@ from mcp.server.auth.provider import (
     TokenError,
 )
 from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
+
+from .api_keys import ApiKeyManager
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +42,11 @@ class GitHubOAuthProvider(
             logger.warning("GITHUB_REQUIRED_REPO not set - all GitHub users will be allowed")
         else:
             logger.info(f"Access restricted to users with access to: {self.required_repo}")
+
+        # API key authentication - always enabled (data/ folder created automatically)
+        api_keys_file = os.getenv("API_KEYS_FILE", "data/api_keys.json")
+        self.api_key_manager = ApiKeyManager(api_keys_file)
+        logger.info(f"API key authentication enabled: {api_keys_file}")
 
         # Storage
         self.clients: dict[str, OAuthClientInformationFull] = {}
@@ -198,9 +206,28 @@ class GitHubOAuthProvider(
         raise TokenError("unsupported_grant_type", "Refresh tokens not supported")
 
     async def load_access_token(self, token: str) -> AccessToken | None:
-        """Load and verify MCP access token."""
+        """Load and verify access token (API key or OAuth token)."""
         logger.debug(f"Loading token: {token[:20]}...")
 
+        # Check if this is an API key (format: sk_live_...)
+        if token.startswith("sk_live_"):
+            username = self.api_key_manager.verify_key(token)
+            if username:
+                logger.info(f"Valid API key for user: {username}")
+                # Store username for audit logging
+                self.token_users[token] = username
+                # Return a synthetic AccessToken (API keys don't expire)
+                return AccessToken(
+                    token=token,
+                    client_id="api-key-client",  # Synthetic client ID for API keys
+                    scopes=[],  # API keys have full access
+                    expires_at=None,  # No expiration for API keys
+                )
+            else:
+                logger.warning(f"Invalid API key: {token[:20]}...")
+                return None
+
+        # Otherwise, treat as OAuth token
         access = self.access_tokens.get(token)
         if not access:
             logger.warning(f"Token not found: {token[:20]}...")

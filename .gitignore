@@ -1,6 +1,7 @@
 certs/
 .env
 logs/
+data/
 TODO.md
 
 # Python

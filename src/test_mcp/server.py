@@ -92,6 +92,12 @@ def main():
     # Audit and debug middleware
     class AuditMiddleware(BaseHTTPMiddleware):
         async def dispatch(self, request, call_next):
+            # Log all incoming requests
+            scheme = request.url.scheme.upper()  # HTTP or HTTPS
+            method = request.method
+            path = request.url.path
+            logger.info(f"[{scheme}] {method} {path}")
+
             if request.url.path == "/mcp" and request.method == "POST":
                 # Extract token and username for audit logging
                 auth_header = request.headers.get("authorization", "")
