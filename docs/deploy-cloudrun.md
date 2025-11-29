@@ -91,7 +91,7 @@ To use a custom domain instead of the auto-generated Cloud Run URL:
 
 ## Finish Setup
 
-Update your GitHub OAuth App callback URL ([at githib.com](https://github.com/settings/developers)) to match your deployment URL:
+Update your GitHub OAuth App callback URL ([at github.com](https://github.com/settings/developers)) to match your deployment URL:
 ```
 https://YOUR-SERVICE-URL/oauth/github/callback
 ```
@@ -100,3 +100,5 @@ Or if using custom domain (in this example: `mcp.scorrodi.dev`):
 ```
 https://mcp.scorrodi.dev/oauth/github/callback
 ```
+
+**Note**: This single callback URL handles both MCP OAuth (for Claude Desktop, Cline) and admin web interface login. The server automatically routes based on the OAuth state parameter.

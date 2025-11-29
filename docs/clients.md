@@ -31,7 +31,7 @@ Cursor connects to MCP servers via a local configuration file.
 
 **Authentication**: API Key (see [API Keys](api-keys.md))
 
-### Setup
+### Local Development
 
 1. Install mkcert and generate certificates (see [Installation](install.md#5-ssl-certificates))
 
@@ -63,6 +63,90 @@ Cursor connects to MCP servers via a local configuration file.
    ```
 
 5. Restart Cursor
+
+### Cloud Run Deployment
+
+To connect Cursor to your Cloud Run deployment:
+
+1. Generate an API key (run locally or via Cloud Shell):
+   ```bash
+   test-mcp-manage-keys generate your-username "Cursor IDE"
+   ```
+
+2. Add to your Cursor settings file (`.cursor/mcp.json`):
+   ```json
+   {
+     "mcpServers": {
+       "test-mcp-local": {
+         "url": "https://localhost:8443/mcp",
+         "headers": {
+           "Authorization": "Bearer YOUR_LOCAL_API_KEY"
+         }
+       },
+       "test-mcp-cloud": {
+         "url": "https://mcp.scorrodi.dev/mcp",
+         "headers": {
+           "Authorization": "Bearer YOUR_CLOUD_API_KEY"
+         }
+       }
+     }
+   }
+   ```
+
+3. Restart Cursor
+
+## Cline (VS Code Extension)
+
+Cline connects to MCP servers via VS Code settings.
+
+**Authentication**: OAuth (GitHub) or API Key
+
+### Setup
+
+1. Open VS Code Command Palette (`Cmd+Shift+P` / `Ctrl+Shift+P`)
+2. Search for "Cline: Open MCP Settings"
+3. Add your server configuration:
+
+**For Cloud Run (OAuth):**
+```json
+{
+  "mcpServers": {
+    "test-mcp": {
+      "url": "https://mcp.scorrodi.dev/mcp",
+      "type": "streamableHttp"
+    }
+  }
+}
+```
+
+**For local development or API key authentication:**
+```json
+{
+  "mcpServers": {
+    "test-mcp": {
+      "url": "https://localhost:8443/mcp",
+      "type": "streamableHttp",
+      "headers": {
+        "Authorization": "Bearer YOUR_API_KEY"
+      }
+    }
+  }
+}
+```
+
+4. Reload VS Code
+
+## MCP Inspector
+
+The official [MCP Inspector](https://github.com/modelcontextprotocol/inspector) can test your server interactively.
+
+```bash
+npx @modelcontextprotocol/inspector
+```
+
+In the Inspector UI, select **HTTP transport** and configure:
+- URL: `https://your-server-url/mcp` (Cloud Run or ngrok)
+- Authentication: Use API key with Bearer token, or proxy through OAuth-enabled client
 
 ## curl / HTTP Clients
 

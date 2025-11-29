@@ -55,6 +55,11 @@ class GitHubOAuthProvider(
         self.access_tokens: dict[str, AccessToken] = {}
         self.github_tokens: dict[str, str] = {}  # session_id -> github_token
         self.token_users: dict[str, str] = {}  # access_token -> github_username
+        self.admin_callback_handler = None  # Set by server.py after admin routes are setup
+
+    def set_admin_callback_handler(self, handler):
+        """Set the admin callback handler for multiplexing OAuth callbacks."""
+        self.admin_callback_handler = handler
 
     async def get_client(self, client_id: str) -> OAuthClientInformationFull | None:
         """Get registered MCP client."""
@@ -95,33 +100,28 @@ class GitHubOAuthProvider(
 
     async def handle_github_callback(self, code: str, state: str) -> str:
         """
-        Handle GitHub callback:
-        1. Exchange GitHub code for GitHub access token
-        2. Generate our MCP authorization code
-        3. Redirect back to MCP client
+        Handle GitHub callback (multiplexed for both MCP OAuth and admin login):
+        - If state starts with "admin_", route to admin callback handler
+        - Otherwise, handle MCP OAuth flow:
+          1. Exchange GitHub code for GitHub access token
+          2. Generate our MCP authorization code
+          3. Redirect back to MCP client
         """
+        # Check if this is an admin callback (state prefixed with "admin_")
+        if state.startswith("admin_"):
+            if self.admin_callback_handler:
+                return await self.admin_callback_handler(code, state)
+            else:
+                raise AuthorizeError("invalid_request", "Admin callback handler not configured")
+
+        # MCP OAuth flow
         if state not in self.pending_auth:
             raise AuthorizeError("invalid_request", "Invalid state parameter")
 
         client, params = self.pending_auth.pop(state)
 
         # Exchange code for GitHub access token
-        async with httpx.AsyncClient() as http_client:
-            response = await http_client.post(
-                "https://github.com/login/oauth/access_token",
-                headers={"Accept": "application/json"},
-                data={
-                    "client_id": self.github_client_id,
-                    "client_secret": self.github_client_secret,
-                    "code": code,
-                },
-            )
-            github_data = response.json()
-
-        if "error" in github_data:
-            raise AuthorizeError("access_denied", github_data.get("error_description"))
-
-        github_token = github_data["access_token"]
+        github_token = await self.exchange_github_code(code)
 
         # Generate MCP authorization code
         auth_code = secrets.token_urlsafe(32)
@@ -243,17 +243,9 @@ class GitHubOAuthProvider(
             logger.error(f"No GitHub token found for access token: {token[:20]}...")
             return None
 
-        async with httpx.AsyncClient() as client:
+        try:
             # Verify user
-            response = await client.get(
-                "https://api.github.com/user",
-                headers={"Authorization": f"Bearer {github_token}"},
-            )
-            if response.status_code != 200:
-                logger.warning(f"GitHub verification failed: {response.status_code}")
-                return None
-
-            user_data = response.json()
+            user_data = await self.get_github_user(github_token)
             username = user_data.get('login')
             logger.info(f"GitHub user: {username} (id: {user_data.get('id')})")
 
@@ -263,18 +255,15 @@ class GitHubOAuthProvider(
             # Check repository access if required
             if self.required_repo:
                 logger.debug(f"Checking access to repository: {self.required_repo}")
-                repo_response = await client.get(
-                    f"https://api.github.com/repos/{self.required_repo}",
-                    headers={"Authorization": f"Bearer {github_token}"},
-                )
-                if repo_response.status_code == 200:
-                    logger.info(f"User {user_data.get('login')} has access to {self.required_repo}")
-                elif repo_response.status_code == 404:
-                    logger.warning(f"User {user_data.get('login')} does NOT have access to {self.required_repo}")
-                    return None
+                has_access = await self.verify_repo_access(github_token)
+                if has_access:
+                    logger.info(f"User {username} has access to {self.required_repo}")
                 else:
-                    logger.error(f"Error checking repository access: {repo_response.status_code}")
+                    logger.warning(f"User {username} does NOT have access to {self.required_repo}")
                     return None
+        except AuthorizeError as e:
+            logger.warning(f"GitHub verification failed: {e.description}")
+            return None
 
         logger.debug(f"Token verified successfully: {token[:20]}...")
         return access
@@ -286,3 +275,94 @@ class GitHubOAuthProvider(
     def get_username_for_token(self, token: str) -> str | None:
         """Get GitHub username for a given access token."""
         return self.token_users.get(token)
+
+    # GitHub API helper methods (shared between OAuth and admin)
+    async def exchange_github_code(self, code: str, client_secret: bool = True) -> str:
+        """
+        Exchange GitHub authorization code for GitHub access token.
+
+        Args:
+            code: GitHub authorization code
+            client_secret: Whether to include client_secret (True for confidential clients,
+                          False for PKCE flows - though we always use client_secret in this app)
+
+        Returns:
+            GitHub access token
+
+        Raises:
+            AuthorizeError: If exchange fails
+        """
+        async with httpx.AsyncClient() as http_client:
+            data = {
+                "client_id": self.github_client_id,
+                "code": code,
+            }
+            if client_secret:
+                data["client_secret"] = self.github_client_secret
+
+            response = await http_client.post(
+                "https://github.com/login/oauth/access_token",
+                headers={"Accept": "application/json"},
+                data=data,
+            )
+            github_data = response.json()
+
+        if "error" in github_data:
+            raise AuthorizeError("access_denied", github_data.get("error_description", "Unknown error"))
+
+        return github_data["access_token"]
+
+    async def get_github_user(self, github_token: str) -> dict[str, Any]:
+        """
+        Get GitHub user information from access token.
+
+        Args:
+            github_token: GitHub access token
+
+        Returns:
+            GitHub user data dict with 'login', 'id', etc.
+
+        Raises:
+            AuthorizeError: If user info fetch fails
+        """
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                "https://api.github.com/user",
+                headers={"Authorization": f"Bearer {github_token}"},
+            )
+            if response.status_code != 200:
+                raise AuthorizeError("access_denied", f"Failed to get user info: {response.status_code}")
+
+            return response.json()
+
+    async def verify_repo_access(self, github_token: str, repo: str | None = None, require_admin: bool = False) -> bool:
+        """
+        Verify user has access to a GitHub repository.
+
+        Args:
+            github_token: GitHub access token
+            repo: Repository in 'owner/repo' format (defaults to self.required_repo)
+            require_admin: If True, require admin permissions on the repo
+
+        Returns:
+            True if user has access (and admin permission if required), False otherwise
+        """
+        repo = repo or self.required_repo
+        if not repo:
+            return True  # No repo restriction
+
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                f"https://api.github.com/repos/{repo}",
+                headers={"Authorization": f"Bearer {github_token}"},
+            )
+            if response.status_code != 200:
+                return False
+
+            # If admin permission is required, check permissions
+            if require_admin:
+                repo_data = response.json()
+                permissions = repo_data.get("permissions", {})
+                return permissions.get("admin", False)
+
+            return True

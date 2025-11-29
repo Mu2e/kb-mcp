@@ -12,6 +12,7 @@ from mcp.server.auth.settings import AuthSettings, ClientRegistrationOptions
 from .oauth import GitHubOAuthProvider
 from . import html_templates
 from . import audit
+from . import admin
 
 # Configure logging
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()  # Default for all libraries
@@ -79,6 +80,42 @@ def generate_html(title: str, content: str) -> str:
 </body>
 </html>"""
     return html
+
+
+@mcp.resource("status://live")
+def server_status() -> str:
+    """Get live server status with current timestamp."""
+    from datetime import datetime
+    import json
+
+    now = datetime.now()
+    return json.dumps({
+        "server": "test-mcp",
+        "timestamp": now.strftime("%Y-%m-%d %H:%M:%S"),
+        "uptime_info": "Server is running",
+        "active_sessions": oauth_provider.get_active_sessions_count(),
+        "base_url": BASE_URL,
+    }, indent=2)
+
+
+@mcp.resource("log://{name}")
+def read_log(name: str) -> str:
+    """Read a log file by name.
+
+    Args:
+        name: Log file name
+    """
+    return f"This is the content of the {name} log file.\nExample log entry: [2025-01-29 12:00:00] INFO: Sample log message"
+
+
+@mcp.prompt()
+def webpage_prompt(topic: str) -> str:
+    """Generate a prompt for creating a webpage about a topic.
+
+    Args:
+        topic: The topic for the webpage
+    """
+    return f"Create a simple HTML webpage about {topic} using the generate_html tool."
 
 
 def main():
@@ -177,6 +214,11 @@ def main():
     async def status(request):
         active_sessions = oauth_provider.get_active_sessions_count()
         return HTMLResponse(html_templates.status_page(active_sessions))
+
+    # Setup admin routes (OAuth protected web interface)
+    # Returns admin callback handler for multiplexing with MCP OAuth
+    admin_callback_handler = admin.setup_admin_routes(app, oauth_provider)
+    oauth_provider.set_admin_callback_handler(admin_callback_handler)
 
     if USE_HTTPS:
         uvicorn.run(
