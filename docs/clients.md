@@ -6,33 +6,24 @@ How to connect different MCP clients to your server.
 
 Claude Desktop connects to remote MCP servers through **Connectors**.
 
-**Important**: The OAuth flow is handled by claude.ai (not the desktop app), which means:
-- Your server must be accessible on the public internet
-- We use ngrok to create a secure tunnel to your local server
-
 **Authentication**: OAuth (GitHub)
+
+**Important**: The OAuth flow is handled by claude.ai, which means your server must be accessible on the public internet. Deploy to [Cloud Run](deploy-cloudrun.md) for production, or use ngrok for local development (see [Installation](install.md)).
 
 ### Setup
 
-1. Start server with ngrok tunnel:
-   ```bash
-   ./scripts/start.sh
-   ```
-
-2. Update `.env` with the ngrok URL shown by the start script
-
-3. Update your GitHub OAuth App settings:
-   - Homepage URL: `https://your-ngrok-url`
-   - Authorization callback URL: `https://your-ngrok-url/oauth/github/callback`
-
-4. In Claude Desktop:
+1. In Claude Desktop:
    - Go to **Connectors**
    - Click **Add custom connector**
    - Name: `test-mcp`
-   - URL: `https://your-ngrok-url/mcp`
+   - URL: `https://your-server-url/mcp`
+     - Cloud Run: `https://mcp.example.com/mcp`
+     - Local (ngrok): `https://your-ngrok-url/mcp`
    - Click **Connect**
    - Your browser will open for GitHub OAuth authentication
    - Authorize the app
+
+**Note**: For local development with ngrok, the URL changes on each restart. Update the connector URL accordingly.
 
 ## Cursor IDE
 

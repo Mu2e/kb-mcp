@@ -32,6 +32,8 @@ openssl req -x509 -newkey rsa:4096 -nodes -keyout certs/key.pem -out certs/cert.
 - [docs/configuration.md](docs/configuration.md) - Configuration options
 - [docs/api-keys.md](docs/api-keys.md) - API key authentication
 - [docs/clients.md](docs/clients.md) - Client integration (Claude Desktop, Cursor, curl)
+- [docs/docker.md](docs/docker.md) - Docker deployment
+- [docs/deploy-cloudrun.md](docs/deploy-cloudrun.md) - Google Cloud Run deployment
 
 ## Requirements
 

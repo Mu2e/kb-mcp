@@ -44,6 +44,8 @@ logger = logging.getLogger(__name__)
 # Configuration
 BASE_URL = os.getenv("BASE_URL", "https://127.0.0.1")
 PORT = int(os.getenv("PORT", "8443"))
+HOST = os.getenv("HOST", "127.0.0.1")
+USE_HTTPS = os.getenv("USE_HTTPS", "true").lower() == "true"
 
 # Create OAuth provider
 oauth_provider = GitHubOAuthProvider()
@@ -92,11 +94,12 @@ def main():
     # Audit and debug middleware
     class AuditMiddleware(BaseHTTPMiddleware):
         async def dispatch(self, request, call_next):
-            # Log all incoming requests
-            scheme = request.url.scheme.upper()  # HTTP or HTTPS
-            method = request.method
-            path = request.url.path
-            logger.info(f"[{scheme}] {method} {path}")
+            # Log all incoming requests (DEBUG level only)
+            if MCP_LOG_LEVEL == "DEBUG":
+                scheme = request.url.scheme.upper()  # HTTP or HTTPS
+                method = request.method
+                path = request.url.path
+                logger.debug(f"[{scheme}] {method} {path}")
 
             if request.url.path == "/mcp" and request.method == "POST":
                 # Extract token and username for audit logging
@@ -175,14 +178,22 @@ def main():
         active_sessions = oauth_provider.get_active_sessions_count()
         return HTMLResponse(html_templates.status_page(active_sessions))
 
-    uvicorn.run(
-        app,
-        host="127.0.0.1",
-        port=PORT,
-        ssl_keyfile="certs/key.pem",
-        ssl_certfile="certs/cert.pem",
-        log_level="debug",
-    )
+    if USE_HTTPS:
+        uvicorn.run(
+            app,
+            host=HOST,
+            port=PORT,
+            ssl_keyfile="certs/key.pem",
+            ssl_certfile="certs/cert.pem",
+            log_level="debug",
+        )
+    else:
+        uvicorn.run(
+            app,
+            host=HOST,
+            port=PORT,
+            log_level="debug",
+        )
 
 
 if __name__ == "__main__":
