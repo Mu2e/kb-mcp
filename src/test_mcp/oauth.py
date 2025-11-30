@@ -1,11 +1,11 @@
 """GitHub OAuth provider implementing MCP OAuth protocol."""
 
+import json
 import logging
 import os
 import secrets
 import time
-from pathlib import Path
-from typing import Any
+from typing import Any, Dict
 
 import httpx
 from mcp.server.auth.provider import (
@@ -20,6 +20,7 @@ from mcp.server.auth.provider import (
 from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
 
 from .api_keys import ApiKeyManager
+from .session_store import SessionStore
 
 logger = logging.getLogger(__name__)
 
@@ -43,18 +44,20 @@ class GitHubOAuthProvider(
         else:
             logger.info(f"Access restricted to users with access to: {self.required_repo}")
 
-        # API key authentication - always enabled (data/ folder created automatically)
-        api_keys_file = os.getenv("API_KEYS_FILE", "data/api_keys.json")
+        # API key authentication - always enabled
+        # Use DATA_DIR env var if set (e.g., /data for Cloud Storage mount), otherwise "data/"
+        data_dir = os.getenv("DATA_DIR", "data")
+        api_keys_file = os.getenv("API_KEYS_FILE", f"{data_dir}/api_keys.json")
         self.api_key_manager = ApiKeyManager(api_keys_file)
         logger.info(f"API key authentication enabled: {api_keys_file}")
 
-        # Storage
-        self.clients: dict[str, OAuthClientInformationFull] = {}
+        # Initialize session store for OAuth/MCP sessions
+        # SessionStore handles all persistence - disk (lazy loading) or Firestore (on-demand)
+        # File path: data/oauth_sessions.json
+        self.session_store = SessionStore(collection_name="oauth_sessions")
+
+        # Ephemeral state (not persisted - only valid during OAuth flow)
         self.pending_auth: dict[str, tuple[OAuthClientInformationFull, AuthorizationParams]] = {}
-        self.auth_codes: dict[str, AuthorizationCode] = {}
-        self.access_tokens: dict[str, AccessToken] = {}
-        self.github_tokens: dict[str, str] = {}  # session_id -> github_token
-        self.token_users: dict[str, str] = {}  # access_token -> github_username
         self.web_callback_handler = None  # Set by server.py for web interface callbacks
 
     def set_web_callback_handler(self, handler):
@@ -63,11 +66,16 @@ class GitHubOAuthProvider(
 
     async def get_client(self, client_id: str) -> OAuthClientInformationFull | None:
         """Get registered MCP client."""
-        return self.clients.get(client_id)
+        client_dict = await self.session_store.get('clients', client_id)
+        if client_dict and isinstance(client_dict, dict):
+            return OAuthClientInformationFull(**client_dict)
+        return None
 
     async def register_client(self, client_info: OAuthClientInformationFull) -> None:
         """Register MCP client."""
-        self.clients[client_info.client_id] = client_info
+        # Store client in SessionStore
+        # Use model_dump() to ensure proper serialization (AnyUrl -> string)
+        await self.session_store.set('clients', client_info.client_id, client_info.model_dump(mode='json'))
         logger.info(f"Registered MCP client: {client_info.client_id}, redirect_uris={client_info.redirect_uris}")
 
     async def authorize(
@@ -114,7 +122,7 @@ class GitHubOAuthProvider(
 
             # Generate MCP authorization code
             auth_code = secrets.token_urlsafe(32)
-            self.auth_codes[auth_code] = AuthorizationCode(
+            auth_code_obj = AuthorizationCode(
                 code=auth_code,
                 scopes=params.scopes or [],
                 expires_at=time.time() + 600,  # 10 minutes
@@ -125,8 +133,10 @@ class GitHubOAuthProvider(
                 resource=params.resource,
             )
 
-            # Store GitHub token linked to this auth code
-            self.github_tokens[auth_code] = github_token
+            # Store authorization code and GitHub token in SessionStore
+            # Use model_dump() to ensure proper serialization (AnyUrl -> string)
+            await self.session_store.set('auth_codes', auth_code, auth_code_obj.model_dump(mode='json'))
+            await self.session_store.set('github_tokens', auth_code, github_token)
 
             # Redirect back to MCP client
             redirect_url = str(params.redirect_uri)
@@ -147,10 +157,12 @@ class GitHubOAuthProvider(
         self, client: OAuthClientInformationFull, authorization_code: str
     ) -> AuthorizationCode | None:
         """Load MCP authorization code."""
-        code = self.auth_codes.get(authorization_code)
-        if code and code.client_id == client.client_id:
-            if time.time() < code.expires_at:
-                return code
+        code_dict = await self.session_store.get('auth_codes', authorization_code)
+        if code_dict and isinstance(code_dict, dict):
+            code = AuthorizationCode(**code_dict)
+            if code.client_id == client.client_id:
+                if time.time() < code.expires_at:
+                    return code
         return None
 
     async def exchange_authorization_code(
@@ -159,15 +171,14 @@ class GitHubOAuthProvider(
         """Exchange MCP authorization code for MCP access token."""
         code_str = authorization_code.code
 
-        # Get GitHub token
-        github_token = self.github_tokens.get(code_str)
+        # Get GitHub token from SessionStore
+        github_token = await self.session_store.get('github_tokens', code_str)
         if not github_token:
             raise TokenError("invalid_grant", "Authorization code not found")
 
-        # Clean up used code
-        if code_str in self.auth_codes:
-            del self.auth_codes[code_str]
-            del self.github_tokens[code_str]
+        # Clean up used code and token
+        await self.session_store.delete('auth_codes', code_str)
+        await self.session_store.delete('github_tokens', code_str)
 
         # Generate MCP access token
         access_token_str = secrets.token_urlsafe(32)
@@ -181,11 +192,12 @@ class GitHubOAuthProvider(
             resource=authorization_code.resource,
         )
 
-        self.access_tokens[access_token_str] = access_token
-        self.github_tokens[access_token_str] = github_token
+        # Store access token and GitHub token in SessionStore
+        # Use model_dump() to ensure proper serialization
+        await self.session_store.set('access_tokens', access_token_str, access_token.model_dump(mode='json'))
+        await self.session_store.set('github_tokens', access_token_str, github_token)
 
         logger.info(f"Issued access token for client {client.client_id}")
-        logger.debug(f"Token: {access_token_str[:20]}..., total tokens: {len(self.access_tokens)}")
 
         return OAuthToken(
             access_token=access_token_str,
@@ -204,13 +216,13 @@ class GitHubOAuthProvider(
         """Load and verify access token (API key or OAuth token)."""
         logger.debug(f"Loading token: {token[:20]}...")
 
-        # Check if this is an API key (format: sk_live_...)
-        if token.startswith("sk_live_"):
+        # Check if this is an API key (format: sk_...)
+        if token.startswith("sk_"):
             username = self.api_key_manager.verify_key(token)
             if username:
                 logger.info(f"Valid API key for user: {username}")
                 # Store username for audit logging
-                self.token_users[token] = username
+                await self.session_store.set('token_users', token, username)
                 # Return a synthetic AccessToken (API keys don't expire)
                 return AccessToken(
                     token=token,
@@ -222,18 +234,20 @@ class GitHubOAuthProvider(
                 logger.warning(f"Invalid API key: {token[:20]}...")
                 return None
 
-        # Otherwise, treat as OAuth token
-        access = self.access_tokens.get(token)
-        if not access:
+        # Otherwise, treat as OAuth token - get from SessionStore
+        access_dict = await self.session_store.get('access_tokens', token)
+        if not access_dict or not isinstance(access_dict, dict):
             logger.warning(f"Token not found: {token[:20]}...")
             return None
+
+        access = AccessToken(**access_dict)
 
         if access.expires_at and time.time() > access.expires_at:
             logger.warning(f"Token expired: {token[:20]}...")
             return None
 
         # Verify with GitHub
-        github_token = self.github_tokens.get(token)
+        github_token = await self.session_store.get('github_tokens', token)
         if not github_token:
             logger.error(f"No GitHub token found for access token: {token[:20]}...")
             return None
@@ -245,7 +259,7 @@ class GitHubOAuthProvider(
             logger.info(f"GitHub user: {username} (id: {user_data.get('id')})")
 
             # Store username for this token
-            self.token_users[token] = username
+            await self.session_store.set('token_users', token, username)
 
             # Check repository access if required
             if self.required_repo:
@@ -263,13 +277,13 @@ class GitHubOAuthProvider(
         logger.debug(f"Token verified successfully: {token[:20]}...")
         return access
 
-    def get_active_sessions_count(self) -> int:
+    async def get_active_sessions_count(self) -> int:
         """Get count of active sessions."""
-        return len(self.access_tokens)
+        return await self.session_store.count_items('access_tokens')
 
-    def get_username_for_token(self, token: str) -> str | None:
+    async def get_username_for_token(self, token: str) -> str | None:
         """Get GitHub username for a given access token."""
-        return self.token_users.get(token)
+        return await self.session_store.get('token_users', token)
 
     # GitHub API helper methods (shared between OAuth and admin)
     async def exchange_github_code(self, code: str, client_secret: bool = True) -> str:

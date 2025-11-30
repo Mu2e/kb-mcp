@@ -83,17 +83,18 @@ def generate_html(title: str, content: str) -> str:
 
 
 @mcp.resource("status://live")
-def server_status() -> str:
+async def server_status() -> str:
     """Get live server status with current timestamp."""
     from datetime import datetime
     import json
 
     now = datetime.now()
+    active_sessions = await oauth_provider.get_active_sessions_count()
     return json.dumps({
         "server": "test-mcp",
         "timestamp": now.strftime("%Y-%m-%d %H:%M:%S"),
         "uptime_info": "Server is running",
-        "active_sessions": oauth_provider.get_active_sessions_count(),
+        "active_sessions": active_sessions,
         "base_url": BASE_URL,
     }, indent=2)
 
@@ -128,6 +129,9 @@ def main():
 
     app = mcp.streamable_http_app()
 
+    # Note: SessionStore automatically loads data at initialization (for disk storage)
+    # No need for explicit startup event - loading happens in SessionStore.__init__
+
     # Audit and debug middleware
     class AuditMiddleware(BaseHTTPMiddleware):
         async def dispatch(self, request, call_next):
@@ -144,7 +148,7 @@ def main():
                 username = None
                 if auth_header.startswith("Bearer "):
                     token = auth_header[7:]
-                    username = oauth_provider.get_username_for_token(token)
+                    username = await oauth_provider.get_username_for_token(token)
 
                 # Read and parse JSON-RPC request for tool calls
                 if username and AUDIT_LOG_FILE:
@@ -190,7 +194,7 @@ def main():
     # Root endpoint - landing page
     @app.route("/")
     async def root(request):
-        active_sessions = oauth_provider.get_active_sessions_count()
+        active_sessions = await oauth_provider.get_active_sessions_count()
         username = await web_session_manager.get_session_username(request)
         return HTMLResponse(html_templates.root_page(active_sessions, oauth_provider.required_repo, username))
 
@@ -217,7 +221,7 @@ def main():
     # Status endpoint
     @app.route("/status")
     async def status(request):
-        active_sessions = oauth_provider.get_active_sessions_count()
+        active_sessions = await oauth_provider.get_active_sessions_count()
         return HTMLResponse(html_templates.status_page(active_sessions))
 
     # Setup shared web session manager for admin and web interfaces

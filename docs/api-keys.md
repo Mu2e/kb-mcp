@@ -19,7 +19,7 @@ Output:
 ```
 Generated API key for alice:
 
-  sk_live_a1b2c3d4e5f6...
+  sk_a1b2c3d4e5f6...
 
 IMPORTANT: Save this key now - it will not be shown again!
 
@@ -38,12 +38,12 @@ Example output:
 ```
 Found 2 API key(s):
 
-Key: sk_live_a1b2c3...d4e5f6g7
+Key: sk_a1b2c3...d4e5f6g7
   Username: alice
   Created: 2025-01-26T10:30:00.123456
   Description: CI pipeline key
 
-Key: sk_live_x9y8z7...w6v5u4t3
+Key: sk_x9y8z7...w6v5u4t3
   Username: bob
   Created: 2025-01-26T11:45:00.789012
 ```
@@ -57,7 +57,7 @@ test-mcp-manage-keys revoke <api_key>
 Example:
 
 ```bash
-test-mcp-manage-keys revoke sk_live_a1b2c3d4e5f6...
+test-mcp-manage-keys revoke sk_a1b2c3d4e5f6...
 ```
 
 ## Using API Keys
@@ -65,7 +65,7 @@ test-mcp-manage-keys revoke sk_live_a1b2c3d4e5f6...
 Include API keys in the `Authorization` header:
 
 ```
-Authorization: Bearer sk_live_your_api_key_here
+Authorization: Bearer sk_your_api_key_here
 ```
 
 ## Testing with curl

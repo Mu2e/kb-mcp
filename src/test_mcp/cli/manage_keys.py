@@ -11,7 +11,9 @@ from ..api_keys import ApiKeyManager
 def main():
     """Main CLI entry point."""
     # Get API keys file from environment or use default
-    api_keys_file = os.getenv("API_KEYS_FILE", "data/api_keys.json")
+    # Use DATA_DIR env var if set (e.g., /data for Cloud Storage mount), otherwise "data/"
+    data_dir = os.getenv("DATA_DIR", "data")
+    api_keys_file = os.getenv("API_KEYS_FILE", f"{data_dir}/api_keys.json")
     manager = ApiKeyManager(api_keys_file)
 
     if len(sys.argv) < 2:

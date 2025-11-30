@@ -42,10 +42,10 @@ class ApiKeyManager:
     def _generate_key() -> str:
         """Generate a new API key.
 
-        Format: sk_live_<48 random hex chars>
+        Format: sk_<48 random hex chars>
         """
         random_part = secrets.token_hex(24)  # 24 bytes = 48 hex chars
-        return f"sk_live_{random_part}"
+        return f"sk_{random_part}"
 
     def create_key(self, username: str, description: str = "") -> str:
         """Create a new API key.

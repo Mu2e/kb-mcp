@@ -4,8 +4,9 @@ import logging
 import os
 import secrets
 import time
-from urllib.parse import quote, unquote
 from starlette.responses import HTMLResponse, RedirectResponse
+
+from .session_store import SessionStore
 
 logger = logging.getLogger(__name__)
 
@@ -15,18 +16,24 @@ class WebSessionManager:
 
     def __init__(self, oauth_provider):
         self.oauth_provider = oauth_provider
-        # Store browser sessions (in production, use Redis or similar)
-        self.sessions = {}
+
+        # Initialize session store for persistence (local at data/web_sessions.json or firestore)
+        # Lazy loading: data loads on first access
+        self.session_store = SessionStore(collection_name="web_sessions")
+
         # Session timeout in seconds (default: 24 hours)
         self.session_timeout = int(os.getenv("WEB_SESSION_TIMEOUT", "86400"))
         # Re-verification interval in seconds (default: 1 hour)
         self.reverify_interval = int(os.getenv("WEB_REVERIFY_INTERVAL", "3600"))
+
         # Flag to disable authentication (for local development only)
         self.require_auth = os.getenv("REQUIRE_WEB_AUTH", "true").lower() == "true"
         if not self.require_auth:
             logger.warning("WEB AUTHENTICATION DISABLED - For development only! Set REQUIRE_WEB_AUTH=true for production.")
         logger.info(f"Web session timeout: {self.session_timeout} seconds ({self.session_timeout / 3600:.1f} hours)")
         logger.info(f"Web re-verification interval: {self.reverify_interval} seconds ({self.reverify_interval / 3600:.1f} hours)")
+
+
 
     async def get_session_data(self, request, force_reverify=False):
         """Get full session data from browser session cookie with re-verification.
@@ -35,15 +42,35 @@ class WebSessionManager:
             request: The request object
             force_reverify: If True, always re-verify with GitHub (used for admin pages)
         """
-        # Bypass authentication if disabled
-        if not self.require_auth:
-            return {'username': 'dev-user', 'has_admin': True}
-
         session_id = request.cookies.get("web_session")
+        
+        # If no session cookie, redirect to login (same flow for both dev and prod)
         if not session_id:
             return None
+        
+        # If auth is disabled, use dev session without GitHub verification
+        if not self.require_auth:
+            session_data = await self.session_store.get('sessions', session_id)
+            if not session_data:
+                # Session not found, return None to trigger redirect to login
+                return None
+            
+            # Check if session has expired
+            current_time = time.time()
+            expires_at = session_data.get('expires_at')
+            if expires_at and current_time > expires_at:
+                # Session expired, clean it up
+                await self.session_store.delete('sessions', session_id)
+                return None
+            
+            # Update expiration (sliding expiration)
+            session_data['expires_at'] = current_time + self.session_timeout
+            await self.session_store.set('sessions', session_id, session_data)
+            return session_data
 
-        session_data = self.sessions.get(session_id)
+        # Normal authentication flow (require_auth=True)
+
+        session_data = await self.session_store.get('sessions', session_id)
         if not session_data:
             return None
 
@@ -54,11 +81,13 @@ class WebSessionManager:
         if expires_at and current_time > expires_at:
             # Session expired, clean it up
             logger.info(f"Session expired for user: {session_data.get('username')}")
-            self.sessions.pop(session_id, None)
+            await self.session_store.delete('sessions', session_id)
             return None
 
         # Sliding expiration - extend session on each request
         session_data['expires_at'] = current_time + self.session_timeout
+        # Persist updated expiration
+        await self.session_store.set('sessions', session_id, session_data)
 
         # Periodic re-verification with GitHub (or forced for admin pages)
         last_verified = session_data.get('last_verified', 0)
@@ -69,7 +98,7 @@ class WebSessionManager:
             if not github_token:
                 # No GitHub token stored (old session), invalidate
                 logger.warning(f"No GitHub token in session for user: {session_data.get('username')}")
-                self.sessions.pop(session_id, None)
+                await self.session_store.delete('sessions', session_id)
                 return None
 
             try:
@@ -87,7 +116,7 @@ class WebSessionManager:
                     )
                     if not has_access:
                         logger.warning(f"User {username} no longer has access to {self.oauth_provider.required_repo}")
-                        self.sessions.pop(session_id, None)
+                        await self.session_store.delete('sessions', session_id)
                         return None
 
                     has_admin = await self.oauth_provider.verify_repo_access(
@@ -98,6 +127,8 @@ class WebSessionManager:
                 session_data['username'] = username
                 session_data['has_admin'] = has_admin
                 session_data['last_verified'] = current_time
+                # Persist updated session data
+                await self.session_store.set('sessions', session_id, session_data)
                 if force_reverify:
                     logger.debug(f"Re-verified admin session for {username} (has_admin={has_admin})")
                 else:
@@ -106,7 +137,7 @@ class WebSessionManager:
             except Exception as e:
                 # Re-verification failed, invalidate session
                 logger.error(f"Session re-verification failed for {session_data.get('username')}: {e}")
-                self.sessions.pop(session_id, None)
+                await self.session_store.delete('sessions', session_id)
                 return None
 
         return session_data
@@ -146,7 +177,7 @@ class WebSessionManager:
             """
         return ""
 
-    def create_oauth_login_url(self, redirect_after_login: str = "/") -> tuple[str, str]:
+    async def create_oauth_login_url(self, redirect_after_login: str = "/") -> tuple[str, str]:
         """
         Create GitHub OAuth login URL.
 
@@ -157,8 +188,13 @@ class WebSessionManager:
             Tuple of (github_auth_url, state)
         """
         state = secrets.token_urlsafe(32)
-        # Store redirect path in state mapping
-        self.sessions[f"redirect_{state}"] = redirect_after_login
+        # Store redirect path in state mapping with expiration (OAuth flows timeout after 10 minutes)
+        current_time = time.time()
+        expires_at = current_time + 600  # 10 minutes
+        await self.session_store.set('sessions', f"redirect_{state}", {
+            'value': redirect_after_login,
+            'expires_at': expires_at
+        })
 
         github_auth_url = (
             f"https://github.com/login/oauth/authorize"
@@ -180,12 +216,38 @@ class WebSessionManager:
         Returns:
             RedirectResponse with session cookie or error HTMLResponse
         """
-        # Get redirect path from state
-        redirect_path = self.sessions.pop(f"redirect_{state}", "/")
-
         # Verify state was valid
-        if not self.sessions.pop(f"state_{state}", None):
+        state_data = await self.session_store.get('sessions', f"state_{state}")
+        if not isinstance(state_data, dict) or 'value' not in state_data:
             return HTMLResponse("Invalid state", status_code=400)
+        
+        # Check expiration
+        expires_at = state_data.get('expires_at')
+        if expires_at and time.time() > expires_at:
+            await self.session_store.delete('sessions', f"state_{state}")
+            return HTMLResponse("State expired", status_code=400)
+        
+        state_valid = state_data.get('value', False)
+        if not state_valid:
+            return HTMLResponse("Invalid state", status_code=400)
+        
+        await self.session_store.delete('sessions', f"state_{state}")
+
+        # Get redirect path from state
+        redirect_data = await self.session_store.get('sessions', f"redirect_{state}")
+        if isinstance(redirect_data, dict) and 'value' in redirect_data:
+            redirect_path = redirect_data['value']
+        else:
+            redirect_path = "/"
+        
+        if redirect_path:
+            await self.session_store.delete('sessions', f"redirect_{state}")
+        
+        # Validate redirect path to prevent open redirect attacks
+        # Only allow relative paths (starting with /) or empty string
+        if redirect_path and not (redirect_path.startswith('/') or redirect_path == ''):
+            logger.warning(f"Invalid redirect path attempted: {redirect_path}")
+            redirect_path = "/"
 
         # Use oauth_provider's helper methods to get GitHub token and verify user
         try:
@@ -195,6 +257,11 @@ class WebSessionManager:
             # Get GitHub user info
             user_data = await self.oauth_provider.get_github_user(github_token)
             username = user_data.get('login')
+            
+            # Validate username exists
+            if not username:
+                logger.error("GitHub user data missing 'login' field")
+                return HTMLResponse("OAuth error: Unable to retrieve user information", status_code=400)
 
             # Check repository access and admin permissions
             has_access = True
@@ -223,13 +290,16 @@ class WebSessionManager:
         session_id = secrets.token_urlsafe(32)
         current_time = time.time()
         expires_at = current_time + self.session_timeout
-        self.sessions[session_id] = {
+        session_data = {
             'username': username,
             'has_admin': has_admin,
             'expires_at': expires_at,
             'github_token': github_token,
             'last_verified': current_time
         }
+        # Persist session to storage
+        await self.session_store.set('sessions', session_id, session_data)
+
         logger.info(f"Web login: {username} (has_admin={has_admin}, expires in {self.session_timeout / 3600:.1f} hours)")
 
         # Set cookie and redirect
@@ -238,19 +308,30 @@ class WebSessionManager:
             key="web_session",
             value=session_id,
             httponly=True,
-            secure=True,
+            secure=True,  # Always require HTTPS for security
             samesite="lax"
         )
         return response
 
-    def logout(self, request):
+    async def logout(self, request):
         """Logout from web interface."""
         session_id = request.cookies.get("web_session")
         if session_id:
-            self.sessions.pop(session_id, None)
+            try:
+                # Delete session from storage (ignore errors if session doesn't exist)
+                await self.session_store.delete('sessions', session_id)
+            except Exception as e:
+                # Log but don't fail - session might already be deleted or expired
+                logger.debug(f"Error deleting session during logout: {e}")
 
         response = RedirectResponse(url="/", status_code=303)
-        response.delete_cookie("web_session")
+        # Delete cookie with same attributes as when it was set
+        response.delete_cookie(
+            key="web_session",
+            httponly=True,
+            secure=True,  # Must match the secure flag used when setting
+            samesite="lax"  # Must match the samesite used when setting
+        )
         return response
 
 
@@ -259,22 +340,51 @@ def setup_shared_auth_routes(app, session_manager: WebSessionManager):
 
     @app.route("/login")
     async def login(request):
-        """Unified login endpoint - redirects to GitHub OAuth."""
+        """Unified login endpoint - redirects to GitHub OAuth or creates dev session."""
         # Get redirect parameter (where to go after successful login)
         redirect_after = request.query_params.get("redirect", "/")
+        
+        # If auth is disabled, create dev session immediately
+        if not session_manager.require_auth:
+            session_id = secrets.token_urlsafe(32)
+            current_time = time.time()
+            expires_at = current_time + session_manager.session_timeout
+            session_data = {
+                'username': 'dev-user',
+                'has_admin': True,
+                'expires_at': expires_at,
+                'last_verified': current_time
+            }
+            await session_manager.session_store.set('sessions', session_id, session_data)
+            
+            response = RedirectResponse(url=redirect_after, status_code=303)
+            response.set_cookie(
+                key="web_session",
+                value=session_id,
+                httponly=True,
+                secure=True,
+                samesite="lax"
+            )
+            return response
 
+        # Normal OAuth flow
         # Create OAuth login URL with redirect path stored in state
-        github_auth_url, state = session_manager.create_oauth_login_url(redirect_after)
+        github_auth_url, state = await session_manager.create_oauth_login_url(redirect_after)
 
-        # Store state to verify callback
-        session_manager.sessions[f"state_{state}"] = True
+        # Store state to verify callback with expiration (OAuth flows timeout after 10 minutes)
+        current_time = time.time()
+        expires_at = current_time + 600  # 10 minutes
+        await session_manager.session_store.set('sessions', f"state_{state}", {
+            'value': True,
+            'expires_at': expires_at
+        })
 
         return RedirectResponse(url=github_auth_url)
 
     @app.route("/logout")
     async def logout(request):
         """Unified logout endpoint - clears session and redirects to home."""
-        return session_manager.logout(request)
+        return await session_manager.logout(request)
 
     async def handle_unified_callback(code: str, state: str):
         """Handle unified OAuth callback (called from main OAuth callback)."""

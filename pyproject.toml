@@ -21,6 +21,9 @@ dev = [
     "pytest>=7.0.0",
     "pytest-asyncio>=0.21.0",
 ]
+gcp = [
+    "google-cloud-firestore>=2.14.0",
+]
 
 [project.scripts]
 test-mcp = "test_mcp.server:main"
