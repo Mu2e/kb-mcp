@@ -191,7 +191,8 @@ def main():
     @app.route("/")
     async def root(request):
         active_sessions = oauth_provider.get_active_sessions_count()
-        return HTMLResponse(html_templates.root_page(active_sessions, oauth_provider.required_repo))
+        username = web_session_manager.get_session_username(request)
+        return HTMLResponse(html_templates.root_page(active_sessions, oauth_provider.required_repo, username))
 
     # GitHub OAuth callback - handles redirect from GitHub
     @app.route("/oauth/github/callback")
@@ -215,10 +216,20 @@ def main():
         active_sessions = oauth_provider.get_active_sessions_count()
         return HTMLResponse(html_templates.status_page(active_sessions))
 
-    # Setup admin routes (OAuth protected web interface)
-    # Returns admin callback handler for multiplexing with MCP OAuth
-    admin_callback_handler = admin.setup_admin_routes(app, oauth_provider)
-    oauth_provider.set_admin_callback_handler(admin_callback_handler)
+    # Setup shared web session manager for admin and web interfaces
+    from .web_auth import WebSessionManager, setup_shared_auth_routes
+    web_session_manager = WebSessionManager(oauth_provider)
+
+    # Setup unified login/logout routes and get callback handler
+    unified_callback_handler = setup_shared_auth_routes(app, web_session_manager)
+    oauth_provider.set_web_callback_handler(unified_callback_handler)
+
+    # Setup admin routes (OAuth protected web interface for API key management)
+    admin.setup_admin_routes(app, oauth_provider, web_session_manager)
+
+    # Setup web routes (OAuth protected web interface for interactive tools)
+    from . import web
+    web.setup_web_routes(app, oauth_provider, web_session_manager)
 
     if USE_HTTPS:
         uvicorn.run(

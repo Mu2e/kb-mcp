@@ -1,13 +1,33 @@
 """HTML templates for server endpoints."""
 
 
-def root_page(active_sessions: int, required_repo: str) -> str:
+def root_page(active_sessions: int, required_repo: str, username: str | None = None) -> str:
     """Generate the root landing page."""
     auth_status = (
         f"Restricted to users with access to: <code>{required_repo}</code>"
         if required_repo
         else "Open to all authenticated GitHub users"
     )
+
+    # User session status
+    if username:
+        user_status = f"""
+        <div style="background: #dcfce7; padding: 15px; border-radius: 8px; margin: 20px 0; border-left: 4px solid #16a34a;">
+            <p style="margin: 0;">
+                <strong>Logged in as:</strong> {username}
+                <a href="/logout" style="margin-left: 20px;">Logout</a>
+            </p>
+        </div>
+        """
+    else:
+        user_status = """
+        <div style="background: #fef3c7; padding: 15px; border-radius: 8px; margin: 20px 0; border-left: 4px solid #f59e0b;">
+            <p style="margin: 0;">
+                <strong>Not logged in</strong>
+                <a href="/login" style="margin-left: 20px;">Login</a>
+            </p>
+        </div>
+        """
 
     return f"""<!DOCTYPE html>
 <html>
@@ -26,6 +46,8 @@ def root_page(active_sessions: int, required_repo: str) -> str:
 <body>
     <h1>MCP Server: test-mcp</h1>
     <p class="status">Server Status: Running</p>
+
+    {user_status}
 
     <div class="info">
         <h2>About This Server</h2>
@@ -48,6 +70,14 @@ def root_page(active_sessions: int, required_repo: str) -> str:
         <h2>Available Tools</h2>
         <ul>
             <li><code>generate_html</code> - Generate simple HTML pages</li>
+        </ul>
+    </div>
+
+    <div class="info">
+        <h2>Web Interfaces</h2>
+        <ul>
+            <li><a href="/admin"><code>/admin</code></a> - API Key Management (requires admin permissions)</li>
+            <li><a href="/web"><code>/web</code></a> - Interactive Web Interface (requires repository access)</li>
         </ul>
     </div>
 

@@ -55,11 +55,11 @@ class GitHubOAuthProvider(
         self.access_tokens: dict[str, AccessToken] = {}
         self.github_tokens: dict[str, str] = {}  # session_id -> github_token
         self.token_users: dict[str, str] = {}  # access_token -> github_username
-        self.admin_callback_handler = None  # Set by server.py after admin routes are setup
+        self.web_callback_handler = None  # Set by server.py for web interface callbacks
 
-    def set_admin_callback_handler(self, handler):
-        """Set the admin callback handler for multiplexing OAuth callbacks."""
-        self.admin_callback_handler = handler
+    def set_web_callback_handler(self, handler):
+        """Set the web callback handler for all web interface OAuth callbacks."""
+        self.web_callback_handler = handler
 
     async def get_client(self, client_id: str) -> OAuthClientInformationFull | None:
         """Get registered MCP client."""
@@ -100,53 +100,48 @@ class GitHubOAuthProvider(
 
     async def handle_github_callback(self, code: str, state: str) -> str:
         """
-        Handle GitHub callback (multiplexed for both MCP OAuth and admin login):
-        - If state starts with "admin_", route to admin callback handler
-        - Otherwise, handle MCP OAuth flow:
-          1. Exchange GitHub code for GitHub access token
-          2. Generate our MCP authorization code
-          3. Redirect back to MCP client
+        Handle GitHub callback (multiplexed for MCP OAuth and web interfaces):
+        - If state is in pending_auth (MCP OAuth flow), handle MCP OAuth
+        - Otherwise, route to web callback handler for admin/web interfaces
         """
-        # Check if this is an admin callback (state prefixed with "admin_")
-        if state.startswith("admin_"):
-            if self.admin_callback_handler:
-                return await self.admin_callback_handler(code, state)
+        # Check if this is MCP OAuth flow
+        if state in self.pending_auth:
+            # MCP OAuth flow
+            client, params = self.pending_auth.pop(state)
+
+            # Exchange code for GitHub access token
+            github_token = await self.exchange_github_code(code)
+
+            # Generate MCP authorization code
+            auth_code = secrets.token_urlsafe(32)
+            self.auth_codes[auth_code] = AuthorizationCode(
+                code=auth_code,
+                scopes=params.scopes or [],
+                expires_at=time.time() + 600,  # 10 minutes
+                client_id=client.client_id,
+                code_challenge=params.code_challenge,
+                redirect_uri=params.redirect_uri,
+                redirect_uri_provided_explicitly=params.redirect_uri_provided_explicitly,
+                resource=params.resource,
+            )
+
+            # Store GitHub token linked to this auth code
+            self.github_tokens[auth_code] = github_token
+
+            # Redirect back to MCP client
+            redirect_url = str(params.redirect_uri)
+            separator = "&" if "?" in redirect_url else "?"
+            redirect_url += f"{separator}code={auth_code}"
+            if params.state:
+                redirect_url += f"&state={params.state}"
+
+            return redirect_url
+        else:
+            # Web interface callback (admin/web login)
+            if self.web_callback_handler:
+                return await self.web_callback_handler(code, state)
             else:
-                raise AuthorizeError("invalid_request", "Admin callback handler not configured")
-
-        # MCP OAuth flow
-        if state not in self.pending_auth:
-            raise AuthorizeError("invalid_request", "Invalid state parameter")
-
-        client, params = self.pending_auth.pop(state)
-
-        # Exchange code for GitHub access token
-        github_token = await self.exchange_github_code(code)
-
-        # Generate MCP authorization code
-        auth_code = secrets.token_urlsafe(32)
-        self.auth_codes[auth_code] = AuthorizationCode(
-            code=auth_code,
-            scopes=params.scopes or [],
-            expires_at=time.time() + 600,  # 10 minutes
-            client_id=client.client_id,
-            code_challenge=params.code_challenge,
-            redirect_uri=params.redirect_uri,
-            redirect_uri_provided_explicitly=params.redirect_uri_provided_explicitly,
-            resource=params.resource,
-        )
-
-        # Store GitHub token linked to this auth code
-        self.github_tokens[auth_code] = github_token
-
-        # Redirect back to MCP client
-        redirect_url = str(params.redirect_uri)
-        separator = "&" if "?" in redirect_url else "?"
-        redirect_url += f"{separator}code={auth_code}"
-        if params.state:
-            redirect_url += f"&state={params.state}"
-
-        return redirect_url
+                raise AuthorizeError("invalid_request", "Invalid state parameter - not MCP OAuth and no web handler configured")
 
     async def load_authorization_code(
         self, client: OAuthClientInformationFull, authorization_code: str

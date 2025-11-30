@@ -71,6 +71,26 @@ Leave empty to allow all authenticated GitHub users:
 GITHUB_REQUIRED_REPO=
 ```
 
+## Web Interface Authentication
+
+### REQUIRE_WEB_AUTH
+Enable or disable authentication for web interfaces (`/admin` and `/web`).
+
+```bash
+REQUIRE_WEB_AUTH=true  # Enable authentication (production)
+REQUIRE_WEB_AUTH=false # Disable authentication (development only)
+```
+
+**Default:** `true`
+
+**Important:** Only set to `false` for local development. Always use `true` in production deployments.
+
+When disabled:
+- `/admin` and `/web` are accessible without GitHub OAuth login
+- A development warning banner is displayed on both pages
+- Session username is set to `dev-user` with full admin access
+- MCP endpoints (`/mcp`) still require authentication (OAuth or API key)
+
 ## API Key Configuration
 
 ### API_KEYS_FILE
