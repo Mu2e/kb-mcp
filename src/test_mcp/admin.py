@@ -14,34 +14,32 @@ def setup_admin_routes(app, oauth_provider, session_manager: WebSessionManager):
     @app.route("/admin")
     async def admin_page(request):
         """Admin interface (GitHub OAuth protected, requires admin permissions)."""
-        username = session_manager.get_session_username(request)
-        if not username:
-            # Redirect to login with return path
-            return RedirectResponse(url="/login?redirect=/admin")
+        # Force re-verification on every admin page load for maximum security
+        if not await session_manager.has_admin_access(request, force_reverify=True):
+            return RedirectResponse(url="/login?redirect=/admin", status_code=303)
 
-        # Check admin permissions
-        if not session_manager.has_admin_access(request):
-            return HTMLResponse(
-                "Access denied: Admin permissions required",
-                status_code=403
-            )
+        # Get username from session (already verified above)
+        username = await session_manager.get_session_username(request, force_reverify=False)
 
         # Get auth warning banner
         auth_warning = session_manager.get_auth_warning_html()
 
-        # Get all API keys
+        # Get all API keys (dict mapping key -> info)
         keys = api_key_manager.list_keys()
         keys_html = ""
-        for key in keys:
+        for api_key, key_info in keys.items():
+            # Truncate API key for display
+            display_key = api_key[:12] + "..." if len(api_key) > 12 else api_key
             keys_html += f"""
             <tr>
-                <td>{key['username']}</td>
-                <td>{key['description']}</td>
-                <td>{key.get('created_at', 'N/A')}</td>
+                <td><code>{display_key}</code></td>
+                <td>{key_info['username']}</td>
+                <td>{key_info['description']}</td>
+                <td>{key_info.get('created', 'N/A')}</td>
                 <td>
                     <form method="POST" action="/admin/revoke" style="display:inline">
-                        <input type="hidden" name="username" value="{key['username']}">
-                        <button type="submit" onclick="return confirm('Revoke key for {key['username']}?')">Revoke</button>
+                        <input type="hidden" name="api_key" value="{api_key}">
+                        <button type="submit" onclick="return confirm('Revoke key for {key_info['username']}?')">Revoke</button>
                     </form>
                 </td>
             </tr>
@@ -84,6 +82,7 @@ def setup_admin_routes(app, oauth_provider, session_manager: WebSessionManager):
     <h2>Existing API Keys</h2>
     <table>
         <tr>
+            <th>API Key</th>
             <th>Username</th>
             <th>Description</th>
             <th>Created</th>
@@ -100,12 +99,12 @@ def setup_admin_routes(app, oauth_provider, session_manager: WebSessionManager):
     @app.route("/admin/generate", methods=["POST"])
     async def admin_generate(request):
         """Generate API key."""
-        username = session_manager.get_session_username(request)
-        if not username:
-            return RedirectResponse(url="/login?redirect=/admin")
+        # Force re-verification for sensitive admin operation
+        if not await session_manager.has_admin_access(request, force_reverify=True):
+            return RedirectResponse(url="/login?redirect=/admin", status_code=303)
 
-        if not session_manager.has_admin_access(request):
-            return HTMLResponse("Access denied: Admin permissions required", status_code=403)
+        # Get username for logging (already verified above)
+        username = await session_manager.get_session_username(request, force_reverify=False)
 
         form = await request.form()
         key_username = form.get("username")
@@ -115,7 +114,7 @@ def setup_admin_routes(app, oauth_provider, session_manager: WebSessionManager):
             return HTMLResponse("Missing username", status_code=400)
 
         try:
-            api_key = api_key_manager.generate_key(key_username, description)
+            api_key = api_key_manager.create_key(key_username, description)
             logger.info(f"Generated API key for {key_username} by {username}")
 
             return HTMLResponse(f"""
@@ -139,26 +138,26 @@ def setup_admin_routes(app, oauth_provider, session_manager: WebSessionManager):
     @app.route("/admin/revoke", methods=["POST"])
     async def admin_revoke(request):
         """Revoke API key."""
-        username = session_manager.get_session_username(request)
-        if not username:
-            return RedirectResponse(url="/login?redirect=/admin")
+        # Force re-verification for sensitive admin operation
+        if not await session_manager.has_admin_access(request, force_reverify=True):
+            return RedirectResponse(url="/login?redirect=/admin", status_code=303)
 
-        if not session_manager.has_admin_access(request):
-            return HTMLResponse("Access denied: Admin permissions required", status_code=403)
+        # Get username for logging (already verified above)
+        username = await session_manager.get_session_username(request, force_reverify=False)
 
         form = await request.form()
-        key_username = form.get("username")
+        api_key = form.get("api_key")
 
-        if not key_username:
-            return HTMLResponse("Missing username", status_code=400)
+        if not api_key:
+            return HTMLResponse("Missing api_key", status_code=400)
 
         try:
-            success = api_key_manager.revoke_key(key_username)
+            success = api_key_manager.revoke_key(api_key)
             if success:
-                logger.info(f"Revoked API key for {key_username} by {username}")
+                logger.info(f"Revoked API key {api_key[:12]}... by {username}")
                 return RedirectResponse(url="/admin", status_code=303)
             else:
-                return HTMLResponse(f"No API key found for {key_username}", status_code=404)
+                return HTMLResponse(f"API key not found", status_code=404)
         except Exception as e:
             logger.error(f"Error revoking API key: {e}")
             return HTMLResponse(f"Error: {str(e)}", status_code=400)

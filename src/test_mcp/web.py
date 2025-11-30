@@ -13,7 +13,7 @@ def setup_web_routes(app, oauth_provider, session_manager: WebSessionManager):
     @app.route("/web")
     async def web_page(request):
         """Web interface (GitHub OAuth protected)."""
-        username = session_manager.get_session_username(request)
+        username = await session_manager.get_session_username(request)
         if not username:
             # Redirect to login with return path
             return RedirectResponse(url="/login?redirect=/web")

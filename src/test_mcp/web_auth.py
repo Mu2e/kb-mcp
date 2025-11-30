@@ -3,6 +3,7 @@
 import logging
 import os
 import secrets
+import time
 from urllib.parse import quote, unquote
 from starlette.responses import HTMLResponse, RedirectResponse
 
@@ -16,13 +17,24 @@ class WebSessionManager:
         self.oauth_provider = oauth_provider
         # Store browser sessions (in production, use Redis or similar)
         self.sessions = {}
+        # Session timeout in seconds (default: 24 hours)
+        self.session_timeout = int(os.getenv("WEB_SESSION_TIMEOUT", "86400"))
+        # Re-verification interval in seconds (default: 1 hour)
+        self.reverify_interval = int(os.getenv("WEB_REVERIFY_INTERVAL", "3600"))
         # Flag to disable authentication (for local development only)
         self.require_auth = os.getenv("REQUIRE_WEB_AUTH", "true").lower() == "true"
         if not self.require_auth:
             logger.warning("WEB AUTHENTICATION DISABLED - For development only! Set REQUIRE_WEB_AUTH=true for production.")
+        logger.info(f"Web session timeout: {self.session_timeout} seconds ({self.session_timeout / 3600:.1f} hours)")
+        logger.info(f"Web re-verification interval: {self.reverify_interval} seconds ({self.reverify_interval / 3600:.1f} hours)")
 
-    def get_session_data(self, request):
-        """Get full session data from browser session cookie."""
+    async def get_session_data(self, request, force_reverify=False):
+        """Get full session data from browser session cookie with re-verification.
+
+        Args:
+            request: The request object
+            force_reverify: If True, always re-verify with GitHub (used for admin pages)
+        """
         # Bypass authentication if disabled
         if not self.require_auth:
             return {'username': 'dev-user', 'has_admin': True}
@@ -30,18 +42,95 @@ class WebSessionManager:
         session_id = request.cookies.get("web_session")
         if not session_id:
             return None
-        return self.sessions.get(session_id)
 
-    def get_session_username(self, request):
-        """Get username from browser session cookie."""
-        session_data = self.get_session_data(request)
+        session_data = self.sessions.get(session_id)
+        if not session_data:
+            return None
+
+        current_time = time.time()
+
+        # Check if session has expired
+        expires_at = session_data.get('expires_at')
+        if expires_at and current_time > expires_at:
+            # Session expired, clean it up
+            logger.info(f"Session expired for user: {session_data.get('username')}")
+            self.sessions.pop(session_id, None)
+            return None
+
+        # Sliding expiration - extend session on each request
+        session_data['expires_at'] = current_time + self.session_timeout
+
+        # Periodic re-verification with GitHub (or forced for admin pages)
+        last_verified = session_data.get('last_verified', 0)
+        should_reverify = force_reverify or (current_time - last_verified > self.reverify_interval)
+
+        if should_reverify:
+            github_token = session_data.get('github_token')
+            if not github_token:
+                # No GitHub token stored (old session), invalidate
+                logger.warning(f"No GitHub token in session for user: {session_data.get('username')}")
+                self.sessions.pop(session_id, None)
+                return None
+
+            try:
+                # Re-verify GitHub user
+                user_data = await self.oauth_provider.get_github_user(github_token)
+                username = user_data.get('login')
+
+                # Re-verify repository access and admin permissions
+                has_access = True
+                has_admin = False
+
+                if self.oauth_provider.required_repo:
+                    has_access = await self.oauth_provider.verify_repo_access(
+                        github_token, require_admin=False
+                    )
+                    if not has_access:
+                        logger.warning(f"User {username} no longer has access to {self.oauth_provider.required_repo}")
+                        self.sessions.pop(session_id, None)
+                        return None
+
+                    has_admin = await self.oauth_provider.verify_repo_access(
+                        github_token, require_admin=True
+                    )
+
+                # Update session with re-verified data
+                session_data['username'] = username
+                session_data['has_admin'] = has_admin
+                session_data['last_verified'] = current_time
+                if force_reverify:
+                    logger.debug(f"Re-verified admin session for {username} (has_admin={has_admin})")
+                else:
+                    logger.info(f"Re-verified session for {username} (has_admin={has_admin})")
+
+            except Exception as e:
+                # Re-verification failed, invalidate session
+                logger.error(f"Session re-verification failed for {session_data.get('username')}: {e}")
+                self.sessions.pop(session_id, None)
+                return None
+
+        return session_data
+
+    async def get_session_username(self, request, force_reverify=False):
+        """Get username from browser session cookie.
+
+        Args:
+            request: The request object
+            force_reverify: If True, always re-verify with GitHub (used for admin pages)
+        """
+        session_data = await self.get_session_data(request, force_reverify=force_reverify)
         if not session_data:
             return None
         return session_data.get('username')
 
-    def has_admin_access(self, request):
-        """Check if session has admin access."""
-        session_data = self.get_session_data(request)
+    async def has_admin_access(self, request, force_reverify=False):
+        """Check if session has admin access.
+
+        Args:
+            request: The request object
+            force_reverify: If True, always re-verify with GitHub (used for admin pages)
+        """
+        session_data = await self.get_session_data(request, force_reverify=force_reverify)
         if not session_data:
             return False
         return session_data.get('has_admin', False)
@@ -76,7 +165,7 @@ class WebSessionManager:
             f"?client_id={self.oauth_provider.github_client_id}"
             f"&redirect_uri={self.oauth_provider.base_url}/oauth/github/callback"
             f"&state={state}"
-            f"&scope=read:user"
+            f"&scope=read:user repo"
         )
         return github_auth_url, state
 
@@ -130,13 +219,18 @@ class WebSessionManager:
             logger.error(f"OAuth error: {e}")
             return HTMLResponse(f"OAuth error: {str(e)}", status_code=400)
 
-        # Create browser session with permission data
+        # Create browser session with permission data, expiration, and GitHub token
         session_id = secrets.token_urlsafe(32)
+        current_time = time.time()
+        expires_at = current_time + self.session_timeout
         self.sessions[session_id] = {
             'username': username,
-            'has_admin': has_admin
+            'has_admin': has_admin,
+            'expires_at': expires_at,
+            'github_token': github_token,
+            'last_verified': current_time
         }
-        logger.info(f"Web login: {username} (has_admin={has_admin})")
+        logger.info(f"Web login: {username} (has_admin={has_admin}, expires in {self.session_timeout / 3600:.1f} hours)")
 
         # Set cookie and redirect
         response = RedirectResponse(url=redirect_path, status_code=303)

@@ -191,7 +191,7 @@ def main():
     @app.route("/")
     async def root(request):
         active_sessions = oauth_provider.get_active_sessions_count()
-        username = web_session_manager.get_session_username(request)
+        username = await web_session_manager.get_session_username(request)
         return HTMLResponse(html_templates.root_page(active_sessions, oauth_provider.required_repo, username))
 
     # GitHub OAuth callback - handles redirect from GitHub
@@ -204,9 +204,13 @@ def main():
             return HTMLResponse("Missing code or state", status_code=400)
 
         try:
-            # Handle GitHub callback and get redirect URL back to MCP client
-            redirect_url = await oauth_provider.handle_github_callback(code, state)
-            return RedirectResponse(redirect_url)
+            # Handle GitHub callback (returns either string URL or RedirectResponse)
+            result = await oauth_provider.handle_github_callback(code, state)
+            # If it's already a Response object (web login), return it directly
+            if hasattr(result, 'status_code'):
+                return result
+            # Otherwise it's a URL string (MCP OAuth), wrap in RedirectResponse
+            return RedirectResponse(result)
         except Exception as e:
             return HTMLResponse(f"OAuth Error: {str(e)}", status_code=400)
 

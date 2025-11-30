@@ -56,7 +56,7 @@ gcloud run deploy ${SERVICE_NAME} \
     --memory 512Mi \
     --cpu 1 \
     --min-instances 0 \
-    --max-instances 2 \
+    --max-instances 1 \
     --execution-environment gen2 \
     --add-volume name=data,type=cloud-storage,bucket=${BUCKET_NAME} \
     --add-volume-mount volume=data,mount-path=/app/data \

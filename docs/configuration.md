@@ -91,6 +91,43 @@ When disabled:
 - Session username is set to `dev-user` with full admin access
 - MCP endpoints (`/mcp`) still require authentication (OAuth or API key)
 
+### WEB_SESSION_TIMEOUT
+Session timeout in seconds for web interfaces (`/admin` and `/web`).
+
+```bash
+WEB_SESSION_TIMEOUT=86400  # 24 hours (default)
+WEB_SESSION_TIMEOUT=3600   # 1 hour
+WEB_SESSION_TIMEOUT=604800 # 7 days
+```
+
+**Default:** `86400` (24 hours)
+
+**Behavior:** Uses **sliding expiration** - the timeout is extended on every request. If a user is actively using the interface, their session won't expire. Sessions expire only after being inactive for the configured duration.
+
+Expired sessions are automatically cleaned up on the next request attempt.
+
+### WEB_REVERIFY_INTERVAL
+How often to re-verify GitHub permissions for active sessions (in seconds).
+
+```bash
+WEB_REVERIFY_INTERVAL=3600  # 1 hour (default)
+WEB_REVERIFY_INTERVAL=1800  # 30 minutes
+WEB_REVERIFY_INTERVAL=7200  # 2 hours
+```
+
+**Default:** `3600` (1 hour)
+
+**Behavior:** On each request, if more than this interval has passed since the last verification, the session will:
+1. Re-check with GitHub to verify the user still exists
+2. Re-verify repository access permissions
+3. Re-verify admin permissions (for admin sessions)
+
+If any verification fails (user revoked, permissions changed, token invalid), the session is immediately invalidated and the user must log in again.
+
+**Admin pages (`/admin`) always re-verify on every request** regardless of this interval, similar to MCP OAuth tokens. This provides maximum security for sensitive operations (creating/revoking API keys).
+
+**Regular web pages (`/web`)** use the configured interval (default: 1 hour) to reduce GitHub API calls while maintaining security.
+
 ## API Key Configuration
 
 ### API_KEYS_FILE

@@ -17,6 +17,15 @@ Deploy your MCP server to Google Cloud Run - a fully managed serverless platform
 gsutil mb gs://YOUR_PROJECT_ID-mcp-data
 ```
 
+Use the following to get your service account
+```bash
+gcloud iam service-accounts list
+``` 
+and then grant it permision:
+```bash
+gsutil iam ch serviceAccount:XXXXXXXXXXXXX-compute@developer.gserviceaccount.com:roles/storage.objectAdmin gs://YOUR_PROJECT_ID-mcp-data
+```
+
 2. **Store GitHub OAuth secrets** in Secret Manager:
 
 ```bash
