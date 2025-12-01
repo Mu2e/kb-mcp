@@ -1,9 +1,14 @@
 """MCP server application with OAuth and HTTPS using FastMCP."""
 
 from dotenv import load_dotenv
+from pathlib import Path
 
 # Load environment variables early
-load_dotenv()
+# Find project root (where .env file is located)
+# Go up from src/test_mcp/server/server.py to project root
+project_root = Path(__file__).parent.parent.parent.parent
+env_path = project_root / ".env"
+load_dotenv(env_path)
 
 import logging
 import os

@@ -5,10 +5,53 @@ import argparse
 import sys
 from pathlib import Path
 
-from . import add, add_source, get, get_stats, list_sources
-from .core import Source
+from . import add, add_from_path, add_source, deduplicate, get, get_stats, list_sources
+from .utils import find_all_duplicates
+from .core import Document, Source
 from .database import get_db_session
 from ..parser import parse
+
+
+def _interactive_dedup_choice(existing_by_id, existing_by_hash, new_doc):
+    """Interactive prompt for handling duplicates."""
+    print("\n    Duplicates found:")
+    
+    if existing_by_id:
+        print(f"  • Existing document with same source_id+doc_id:")
+        print(f"    ID: {existing_by_id.id}")
+        print(f"    Source: {existing_by_id.source_id}/{existing_by_id.doc_id}")
+        print(f"    Inserted: {existing_by_id.insert_time}")
+    
+    if existing_by_hash and (not existing_by_id or existing_by_hash.id != existing_by_id.id):
+        print(f"  • Existing document with same content_hash:")
+        print(f"    ID: {existing_by_hash.id}")
+        print(f"    Source: {existing_by_hash.source_id}/{existing_by_hash.doc_id}")
+        print(f"    Inserted: {existing_by_hash.insert_time}")
+    
+    print(f"\n  New document:")
+    print(f"    Source: {new_doc.source_id}/{new_doc.doc_id}")
+    
+    print("\nOptions:")
+    print("  0 - Insert anyway (create duplicate)")
+    print("  1 - Insert with warning (create duplicate)")
+    print("  2 - Update existing by hash (if exists)")
+    print("  3 - Update existing by hash with warnings")
+    print("  4 - Update existing by source_id+doc_id (if exists), else by hash")
+    
+    while True:
+        try:
+            choice = input("\nChoose action [0-4] (default: 2): ").strip()
+            if not choice:
+                return 3
+            level = int(choice)
+            if 0 <= level <= 4:
+                return level
+            print("Invalid choice. Please enter 0-4.")
+        except ValueError:
+            print("Invalid input. Please enter a number 0-4.")
+        except (EOFError, KeyboardInterrupt):
+            print("\nCancelled.")
+            sys.exit(1)
 
 
 def cmd_add(args):
@@ -22,7 +65,6 @@ def cmd_add(args):
     # Determine source_id if not provided
     source_id = args.source_id
     if not source_id:
-        # Default to file extension or "local"
         source_id = "local"
         print(f"Warning: No source_id provided, using '{source_id}'")
         print("  Use --source-id to specify a source")
@@ -34,70 +76,82 @@ def cmd_add(args):
             print(f"Source '{source_id}' does not exist. Creating it...")
             add_source(source_id=source_id, name=f"Local files ({source_id})")
 
-    print(f"Processing file: {file_path}")
-
-    # Parse document (MIME type will be auto-detected)
-    # Note: parse() returns List[dict] - we use the first (main) document
-    try:
-        doc_dicts = parse(file_path)
-        if not doc_dicts:
-            raise ValueError("No documents extracted from file")
-        
-        main_doc = doc_dicts[0]
-        text_content = main_doc.get('text', '')
-        mime_type = main_doc.get('source_type', '')
-        
-        print(f"  Detected MIME type: {mime_type}")
-        if not text_content:
-            print(f"  Warning: No text extracted from {file_path}")
-        
-        if len(doc_dicts) > 1:
-            print(f"  Note: {len(doc_dicts) - 1} image document(s) also extracted")
-    except NotImplementedError as e:
-        print(f"Error: Unsupported file type: {e}")
-        sys.exit(1)
-    except Exception as e:
-        print(f"Error parsing document: {e}")
-        print("  Adding document with empty text content")
-        text_content = ""
-        # Try to detect MIME type anyway for source_type
-        try:
-            from ..parser import detect_mime_type
-            mime_type = detect_mime_type(file_path)
-        except Exception:
-            mime_type = "application/octet-stream"
-
     # Determine doc_id
     doc_id = args.doc_id
     if not doc_id:
-        # Use filename without extension as doc_id
         doc_id = file_path.stem
 
-    # Prepare document data
-    doc_data = {
-        "source_id": source_id,
-        "doc_id": doc_id,
-        "uri": f"file://{file_path.absolute()}",
-        "source_type": mime_type,
-        "text": text_content,
-        "meta": {
-            "filename": file_path.name,
-            "filepath": str(file_path.absolute()),
-            "filesize": file_path.stat().st_size,
-        },
-    }
+    # Prepare data dict
+    data = {"source_id": source_id}
+    if doc_id:
+        data["doc_id"] = doc_id
 
-    # Add document
+    # Determine deduplication level
+    dedup_level = args.dedup_level
+    
+    # If no dedup level specified and not in batch mode, use interactive mode
+    interactive = not args.batch
+    
+    # If no dedup level specified and interactive mode, check for duplicates first
+    if dedup_level is None and interactive:
+        # Parse the file first to check for duplicates
+        try:
+            from .base import _find_duplicates
+            from .core import Document
+            import hashlib
+            
+            doc_dicts = parse(file_path, data=data)
+            if not doc_dicts:
+                raise ValueError("No documents extracted from file")
+            
+            main_doc_dict = doc_dicts[0]
+            temp_doc = Document.from_dict(main_doc_dict)
+            
+            # Compute hash manually
+            if temp_doc.text:
+                content = temp_doc.text.encode("utf-8")
+            elif temp_doc.binary:
+                content = temp_doc.binary
+            else:
+                content = b""
+            if content:
+                temp_doc.content_hash = hashlib.sha256(content).hexdigest()
+            
+            with get_db_session() as session:
+                existing_by_id, existing_by_hash = _find_duplicates(temp_doc, session)
+                
+                if existing_by_id or existing_by_hash:
+                    dedup_level = _interactive_dedup_choice(
+                        existing_by_id, existing_by_hash, temp_doc
+                    )
+        except Exception as e:
+            print(f"Warning: Could not check for duplicates: {e}")
+            print("  Proceeding with default deduplication level")
+
+    print(f"Processing file: {file_path}")
+    
+    # Add document using add_from_path
     try:
-        doc = add(doc_data)
-        print(f"✓ Added document: {doc.id}")
-        print(f"  Source: {doc.source_id}")
-        print(f"  Doc ID: {doc.doc_id}")
-        print(f"  Type: {doc.source_type}")
-        if doc.text:
-            print(f"  Text length: {len(doc.text)} characters")
+        documents = add_from_path(
+            file_path,
+            data=data,
+            parse_image_additional_doc=args.parse_images,
+            parse_image_llm_description=args.parse_images_llm,
+            dedup_level=dedup_level,
+        )
+        
+        print(f"✓ Added {len(documents)} document(s):")
+        for doc in documents:
+            print(f"  • {doc.id}")
+            print(f"    Source: {doc.source_id}")
+            print(f"    Doc ID: {doc.doc_id}")
+            print(f"    Type: {doc.source_type}")
+            if doc.text:
+                print(f"    Text length: {len(doc.text)} characters")
     except Exception as e:
         print(f"Error adding document: {e}")
+        import traceback
+        traceback.print_exc()
         sys.exit(1)
 
 
@@ -182,6 +236,81 @@ def cmd_source_list(args):
             print()
 
 
+def cmd_deduplicate(args):
+    """Deduplicate the entire database."""
+    print("Scanning database for duplicates...")
+    
+    duplicates = find_all_duplicates()
+    
+    if not duplicates:
+        print("✓ No duplicates found.")
+        return
+    
+    print(f"\nFound {len(duplicates)} duplicate group(s):")
+    
+    # Fetch document details for display
+    from . import get
+    
+    total_by_id = sum(len(by_id_dups) for _, by_id_dups, _ in duplicates)
+    total_by_hash = sum(len(by_hash_dups) for _, _, by_hash_dups in duplicates)
+    
+    if total_by_id > 0:
+        print(f"\n  {total_by_id} duplicate(s) by source_id+doc_id:")
+        count = 0
+        for keep_id, by_id_dups, _ in duplicates:
+            if by_id_dups:
+                keep_doc = get(uuid=keep_id)
+                for dup_id in by_id_dups[:10 - count]:  # Show up to 10 total
+                    dup_doc = get(uuid=dup_id)
+                    if keep_doc and dup_doc:
+                        print(f"    • Keep: {keep_id[:8]}... ({keep_doc.source_id}/{keep_doc.doc_id})")
+                        print(f"      Duplicate: {dup_id[:8]}... ({dup_doc.source_id}/{dup_doc.doc_id})")
+                    count += 1
+                    if count >= 10:
+                        break
+                if count >= 10:
+                    break
+        if total_by_id > 10:
+            print(f"    ... and {total_by_id - 10} more")
+    
+    if total_by_hash > 0:
+        print(f"\n  {total_by_hash} duplicate(s) by content_hash:")
+        count = 0
+        for keep_id, _, by_hash_dups in duplicates:
+            if by_hash_dups:
+                keep_doc = get(uuid=keep_id)
+                for dup_id in by_hash_dups[:10 - count]:  # Show up to 10 total
+                    dup_doc = get(uuid=dup_id)
+                    if keep_doc and dup_doc:
+                        hash_preview = keep_doc.content_hash[:16] if keep_doc.content_hash else 'N/A'
+                        print(f"    • Keep: {keep_id[:8]}... (hash: {hash_preview}...)")
+                        print(f"      Duplicate: {dup_id[:8]}...")
+                    count += 1
+                    if count >= 10:
+                        break
+                if count >= 10:
+                    break
+        if total_by_hash > 10:
+            print(f"    ... and {total_by_hash - 10} more")
+    
+    if args.dry_run:
+        print("\n[DRY RUN] No changes made. Use --apply to perform deduplication.")
+        return
+    
+    if not args.apply:
+        print("\nUse --apply to perform deduplication, or --dry-run to see what would happen.")
+        return
+    
+    # Apply deduplication
+    print(f"\nApplying deduplication...")
+    print("  (Keeping oldest document in each duplicate group, deleting others)")
+    
+    result = deduplicate()
+    
+    print(f"✓ Deduplication complete:")
+    print(f"  Deleted: {result['deleted']} duplicate document(s)")
+
+
 def main():
     """Main CLI entry point."""
     parser = argparse.ArgumentParser(description="Knowledge base CLI")
@@ -192,6 +321,27 @@ def main():
     add_parser.add_argument("file", help="Path to document file")
     add_parser.add_argument("--source-id", help="Source identifier (default: 'local')")
     add_parser.add_argument("--doc-id", help="Document ID (default: filename without extension)")
+    add_parser.add_argument(
+        "--dedup-level",
+        type=int,
+        choices=[0, 1, 2, 3, 4],
+        help="Deduplication level: 0=insert, 1=warn, 2=overwrite hash, 3=overwrite hash+warn (default), 4=overwrite all"
+    )
+    add_parser.add_argument(
+        "--batch",
+        action="store_true",
+        help="Batch mode: disable interactive prompts, use default deduplication level"
+    )
+    add_parser.add_argument(
+        "--parse-images",
+        action="store_true",
+        help="Extract images as separate documents"
+    )
+    add_parser.add_argument(
+        "--parse-images-llm",
+        action="store_true",
+        help="Generate LLM descriptions for images (requires OPENAI_API_KEY)"
+    )
 
     # Get command
     get_parser = subparsers.add_parser("get", help="Get a document")
@@ -226,6 +376,22 @@ def main():
         help="Output as JSON"
     )
 
+    # DB Admin command
+    db_admin_parser = subparsers.add_parser("db-admin", help="Database administration commands")
+    db_admin_subparsers = db_admin_parser.add_subparsers(dest="db_command", help="DB admin commands")
+    
+    dedup_parser = db_admin_subparsers.add_parser("deduplicate", help="Find and remove duplicate documents")
+    dedup_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show duplicates without making changes"
+    )
+    dedup_parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="Apply deduplication (required to make changes)"
+    )
+
     args = parser.parse_args()
 
     if not args.command:
@@ -257,6 +423,12 @@ def main():
             cmd_source_list(args)
         else:
             source_parser.print_help()
+            sys.exit(1)
+    elif args.command == "db-admin":
+        if args.db_command == "deduplicate":
+            cmd_deduplicate(args)
+        else:
+            db_admin_parser.print_help()
             sys.exit(1)
     else:
         parser.print_help()

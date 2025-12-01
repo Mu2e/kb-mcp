@@ -77,19 +77,19 @@ GITHUB_REQUIRED_REPO=
 
 ## Web Interface Authentication
 
-### REQUIRE_WEB_AUTH
-Enable or disable authentication for web interfaces (`/admin` and `/web`).
+### DISABLE_WEB_AUTH
+Disable authentication for web interfaces (`/admin` and `/web`) for local development.
 
 ```bash
-REQUIRE_WEB_AUTH=true  # Enable authentication (production)
-REQUIRE_WEB_AUTH=false # Disable authentication (development only)
+DISABLE_WEB_AUTH=false # Authentication enabled (default, production)
+DISABLE_WEB_AUTH=true  # Disable authentication (development only)
 ```
 
-**Default:** `true`
+**Default:** `false` (authentication is **enabled** by default)
 
-**Important:** Only set to `false` for local development. Always use `true` in production deployments.
+**Important:** Only set to `true` for local development. Always use `false` (or omit) in production deployments.
 
-When disabled:
+When disabled (`DISABLE_WEB_AUTH=true`):
 - `/admin` and `/web` are accessible without GitHub OAuth login
 - A development warning banner is displayed on both pages
 - Session username is set to `dev-user` with full admin access

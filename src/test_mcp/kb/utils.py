@@ -1,6 +1,7 @@
 """Utility functions for knowledge base operations."""
 
-from typing import Dict, Any, List
+import hashlib
+from typing import Dict, Any, List, Tuple, Optional
 from .database import get_db_session
 from .core import Document, Source
 
@@ -65,4 +66,191 @@ def list_sources() -> List[Dict[str, Any]]:
             })
     
     return result
+
+
+def find_all_duplicates(
+    by_hash: bool = True,
+    by_id: bool = True,
+) -> List[Tuple[str, List[str], List[str]]]:
+    """Find all duplicate documents in the database using efficient SQL queries.
+    
+    Args:
+        by_hash: If True, find duplicates by content_hash
+        by_id: If True, find duplicates by (source_id, doc_id)
+    
+    Returns:
+        List of tuples: (keep_id, by_id_duplicates, by_hash_duplicates)
+        - keep_id: UUID of document to keep (oldest by insert_time)
+        - by_id_duplicates: List of UUIDs that are duplicates by source_id+doc_id
+        - by_hash_duplicates: List of UUIDs that are duplicates by content_hash
+    """
+    from sqlalchemy import func
+    from collections import defaultdict
+    
+    # Map keep_id -> (by_id_duplicates, by_hash_duplicates)
+    duplicate_groups = defaultdict(lambda: ([], []))
+    processed_keep_ids = set()  # Track which documents are "keep" documents
+    
+    with get_db_session() as session:
+        # First, ensure all documents have content_hash computed
+        docs_without_hash = (
+            session.query(Document)
+            .filter(Document.content_hash.is_(None))
+            .all()
+        )
+        
+        for doc in docs_without_hash:
+            if doc.text:
+                content = doc.text.encode("utf-8")
+            elif doc.binary:
+                content = doc.binary
+            else:
+                content = b""
+            if content:
+                doc.content_hash = hashlib.sha256(content).hexdigest()
+        
+        if docs_without_hash:
+            session.commit()
+        
+        # Find duplicates by (source_id, doc_id)
+        if by_id:
+            id_duplicates = (
+                session.query(
+                    Document.source_id,
+                    Document.doc_id,
+                    func.count(Document.id).label('count')
+                )
+                .filter(Document.source_id.isnot(None), Document.doc_id.isnot(None))
+                .group_by(Document.source_id, Document.doc_id)
+                .having(func.count(Document.id) > 1)
+                .all()
+            )
+            
+            for source_id, doc_id, count in id_duplicates:
+                # Get all documents with this source_id+doc_id
+                docs = (
+                    session.query(Document)
+                    .filter(
+                        Document.source_id == source_id,
+                        Document.doc_id == doc_id
+                    )
+                    .order_by(Document.insert_time)
+                    .all()
+                )
+                
+                if len(docs) > 1:
+                    keep_id = docs[0].id
+                    duplicate_ids = [doc.id for doc in docs[1:]]
+                    duplicate_groups[keep_id][0].extend(duplicate_ids)
+                    processed_keep_ids.add(keep_id)
+        
+        # Find duplicates by content_hash
+        if by_hash:
+            hash_duplicates = (
+                session.query(
+                    Document.content_hash,
+                    func.count(Document.id).label('count')
+                )
+                .filter(Document.content_hash.isnot(None))
+                .group_by(Document.content_hash)
+                .having(func.count(Document.id) > 1)
+                .all()
+            )
+            
+            for content_hash, count in hash_duplicates:
+                # Get all documents with this content_hash
+                docs = (
+                    session.query(Document)
+                    .filter(Document.content_hash == content_hash)
+                    .order_by(Document.insert_time)
+                    .all()
+                )
+                
+                if len(docs) > 1:
+                    keep_id = docs[0].id
+                    duplicate_ids = [doc.id for doc in docs[1:] if doc.id not in processed_keep_ids]
+                    if duplicate_ids:
+                        duplicate_groups[keep_id][1].extend(duplicate_ids)
+                        if keep_id not in processed_keep_ids:
+                            processed_keep_ids.add(keep_id)
+    
+    # Convert to list of tuples
+    return [
+        (keep_id, by_id_dups, by_hash_dups)
+        for keep_id, (by_id_dups, by_hash_dups) in duplicate_groups.items()
+        if by_id_dups or by_hash_dups  # Only include if there are actual duplicates
+    ]
+
+
+def deduplicate(
+    by_hash: bool = True,
+    by_id: bool = False,
+) -> Dict[str, Any]:
+    """Deduplicate the entire database.
+    
+    For each duplicate group, keeps the oldest document (by insert_time) and deletes the rest.
+    
+    Args:
+        by_hash: If True, deduplicate by content_hash
+        by_id: If True, deduplicate by (source_id, doc_id)
+    
+    Returns:
+        Dictionary with deduplication results:
+        - duplicates_found: int - Number of duplicate groups found
+        - deleted: int - Number of duplicate documents deleted
+        - by_id_count: int - Number of duplicates by source_id+doc_id
+        - by_hash_count: int - Number of duplicates by content_hash
+    """
+    # Find all duplicates
+    duplicates = find_all_duplicates(by_hash=by_hash, by_id=by_id)
+    
+    if not duplicates:
+        return {
+            "duplicates_found": 0,
+            "deleted": 0,
+            "by_id_count": 0,
+            "by_hash_count": 0,
+        }
+    
+    # Count by type
+    by_id_count = sum(len(by_id_dups) for _, by_id_dups, _ in duplicates)
+    by_hash_count = sum(len(by_hash_dups) for _, _, by_hash_dups in duplicates)
+    
+    # Apply deduplication: delete all duplicate documents (keep the oldest ones)
+    deleted_count = 0
+    processed_ids = set()
+    
+    with get_db_session() as session:
+        for keep_id, by_id_dups, by_hash_dups in duplicates:
+            # Mark keep_id as processed so we don't delete it
+            processed_ids.add(keep_id)
+            
+            # Delete duplicates by source_id+doc_id
+            for dup_id in by_id_dups:
+                if dup_id not in processed_ids:
+                    doc = session.query(Document).filter(Document.id == dup_id).first()
+                    if doc:
+                        session.delete(doc)
+                        deleted_count += 1
+                        processed_ids.add(dup_id)
+            
+            # Delete duplicates by content_hash
+            for dup_id in by_hash_dups:
+                if dup_id not in processed_ids:
+                    doc = session.query(Document).filter(Document.id == dup_id).first()
+                    if doc:
+                        session.delete(doc)
+                        deleted_count += 1
+                        processed_ids.add(dup_id)
+            
+            # Commit after processing each group
+            if by_id_dups or by_hash_dups:
+                session.commit()
+    
+    return {
+        "duplicates_found": len(duplicates),
+        "deleted": deleted_count,
+        "by_id_count": by_id_count,
+        "by_hash_count": by_hash_count,
+    }
 

@@ -2,8 +2,9 @@
 
 import hashlib
 import logging
+import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from .database import get_db_session, init_db
 from .core import Document, Source
@@ -12,6 +13,178 @@ logger = logging.getLogger(__name__)
 
 # Track if database has been initialized
 _db_initialized = False
+
+# Deduplication levels
+DEDUP_LEVEL_INSERT = 0  # Insert duplicates, no warnings
+DEDUP_LEVEL_WARN = 1  # Insert with warnings
+DEDUP_LEVEL_OVERWRITE_HASH = 2  # Overwrite if same hash
+DEDUP_LEVEL_OVERWRITE_HASH_WARN = 3  # Same as 2 but with warnings for existing source_id, doc_id (default)
+DEDUP_LEVEL_OVERWRITE_ALL = 4  # Overwrite same hash and same source_id, doc_id
+
+
+def _get_default_dedup_level() -> int:
+    """Get default deduplication level from environment variable.
+    
+    Returns:
+        Deduplication level (0-4), default is 2
+    """
+    level_str = os.getenv("KB_DEDUPLICATION_LEVEL", "3")
+    return int(level_str)
+
+
+def _find_duplicates(
+    document: Document,
+    session: Any,
+) -> Tuple[Optional[Document], Optional[Document]]:
+    """Find duplicate documents by source_id+doc_id and by content_hash.
+    
+    Args:
+        document: Document to check for duplicates
+        session: Database session
+    
+    Returns:
+        Tuple of (existing_by_id, existing_by_hash):
+        - existing_by_id: Document with same source_id and doc_id, or None
+        - existing_by_hash: Document with same content_hash, or None
+    """
+    existing_by_id = None
+    existing_by_hash = None
+    
+    # Check for existing document with same source_id and doc_id
+    if document.source_id and document.doc_id:
+        existing_by_id = (
+            session.query(Document)
+            .filter(
+                Document.source_id == document.source_id,
+                Document.doc_id == document.doc_id,
+            )
+            .first()
+        )
+    
+    # Check for existing document with same content_hash
+    if document.content_hash:
+        existing_by_hash = (
+            session.query(Document)
+            .filter(Document.content_hash == document.content_hash)
+            .first()
+        )
+    
+    return existing_by_id, existing_by_hash
+
+
+def _update_document(existing: Document, new: Document, session: Any, update_hash: bool = False) -> Document:
+    """Update existing document with new document's data.
+    
+    Args:
+        existing: Existing document to update
+        new: New document with updated data
+        session: Database session
+        update_hash: If True, also update content_hash; otherwise keep existing hash
+    
+    Returns:
+        Updated document (detached from session)
+    """
+    existing.source_id = new.source_id
+    existing.doc_id = new.doc_id
+    existing.uri = new.uri
+    existing.source_type = new.source_type
+    existing.doc_type = new.doc_type
+    existing.text = new.text
+    existing.binary = new.binary
+    existing.meta = new.meta
+    existing.creating_time = new.creating_time
+    existing.update_time = new.update_time
+    existing.parent_id = new.parent_id
+    if update_hash:
+        existing.content_hash = new.content_hash
+    session.commit()
+    session.refresh(existing)
+    session.expunge(existing)
+    return existing
+
+
+def _handle_duplicate(
+    document: Document,
+    existing_by_id: Optional[Document],
+    existing_by_hash: Optional[Document],
+    dedup_level: int,
+    session: Any,
+) -> Optional[Document]:
+    """Handle duplicate document based on deduplication level.
+    
+    Args:
+        document: New document to add
+        existing_by_id: Existing document with same source_id+doc_id, or None
+        existing_by_hash: Existing document with same content_hash, or None
+        dedup_level: Deduplication level (0-4)
+        session: Database session
+    
+    Returns:
+        Document object (existing or new), or None if should insert new
+    """
+    # Level 0: Insert duplicates, no warnings
+    if dedup_level == DEDUP_LEVEL_INSERT:
+        return None
+    
+    # Level 1: Insert with warnings
+    if dedup_level == DEDUP_LEVEL_WARN:
+        if existing_by_id:
+            logger.warning(
+                f"Duplicate source_id+doc_id: {document.source_id}/{document.doc_id} "
+                f"(existing: {existing_by_id.id})"
+            )
+        if existing_by_hash and existing_by_hash.id != (existing_by_id.id if existing_by_id else None):
+            logger.warning(
+                f"Duplicate content_hash: {document.content_hash} "
+                f"(existing: {existing_by_hash.id})"
+            )
+        return None
+    
+    # Level 2: Overwrite if same hash
+    if dedup_level == DEDUP_LEVEL_OVERWRITE_HASH:
+        if existing_by_hash:
+            updated = _update_document(existing_by_hash, document, session, update_hash=False)
+            logger.warning(
+                f"Replaced document {updated.id} (same content_hash: {document.content_hash[:16] if document.content_hash else 'N/A'}...)"
+            )
+            return updated
+        return None
+    
+    # Level 3: Same as 2 but with warnings for existing source_id, doc_id
+    if dedup_level == DEDUP_LEVEL_OVERWRITE_HASH_WARN:
+        if existing_by_id and (not existing_by_hash or existing_by_id.id != existing_by_hash.id):
+            logger.warning(
+                f"Existing source_id+doc_id: {document.source_id}/{document.doc_id} "
+                f"(existing: {existing_by_id.id}), but different content_hash"
+            )
+        if existing_by_hash:
+            updated = _update_document(existing_by_hash, document, session, update_hash=False)
+            logger.warning(
+                f"Replaced document {updated.id} (same content_hash: {document.content_hash[:16] if document.content_hash else 'N/A'}...)"
+            )
+            return updated
+        return None
+    
+    # Level 4: Overwrite same hash and same source_id, doc_id
+    if dedup_level == DEDUP_LEVEL_OVERWRITE_ALL:
+        if existing_by_id:
+            updated = _update_document(existing_by_id, document, session, update_hash=True)
+            logger.warning(
+                f"Replaced document {updated.id} "
+                f"(same source_id+doc_id: {document.source_id}/{document.doc_id})"
+            )
+            return updated
+        if existing_by_hash:
+            updated = _update_document(existing_by_hash, document, session, update_hash=False)
+            logger.warning(
+                f"Replaced document {updated.id} (same content_hash: {document.content_hash[:16] if document.content_hash else 'N/A'}...)"
+            )
+            return updated
+        return None
+    
+    # Unknown level - default to insert
+    logger.warning(f"Unknown deduplication level {dedup_level}, proceeding with insert")
+    return None
 
 
 def _ensure_db_initialized() -> None:
@@ -40,6 +213,8 @@ def _compute_hash(document: Document) -> None:
 
 def add(
     data: Union[Document, Dict[str, Any]],
+    *,
+    dedup_level: Optional[int] = None,
 ) -> Document:
     """Add a new document to the database.
 
@@ -54,18 +229,31 @@ def add(
         # Add Document object
         doc_obj = Document.from_dict({...})
         doc = add(doc_obj)
+        
+        # With custom deduplication level
+        doc = add(data, dedup_level=4)
 
     Args:
         data: Document object or dictionary with document data
+        dedup_level: Deduplication level (0-4). If None, uses KB_DEDUPLICATION_LEVEL env var or default 2.
+                     - 0: Insert duplicates, no warnings
+                     - 1: Insert with warnings
+                     - 2: Overwrite if same hash (default)
+                     - 3: Same as 2 but with warnings for existing source_id, doc_id
+                     - 4: Overwrite same hash and same source_id, doc_id
 
     Returns:
-        Created Document object
+        Created or updated Document object
 
     Raises:
         ValueError: If data is not Document or dict, or if both text and binary are None
     """
     # Ensure database is initialized (lazy loading)
     _ensure_db_initialized()
+
+    # Get deduplication level
+    if dedup_level is None:
+        dedup_level = _get_default_dedup_level()
 
     # Handle input formats
     if isinstance(data, Document):
@@ -98,6 +286,22 @@ def add(
                 f"Create it first using add_source('{document.source_id}', ...)"
             )
 
+        # Check for duplicates
+        if dedup_level >= DEDUP_LEVEL_INSERT:
+            existing_by_id, existing_by_hash = _find_duplicates(document, session)
+        else:
+            existing_by_id, existing_by_hash = None, None
+        
+        # Handle duplicate based on level
+        existing_doc = _handle_duplicate(
+            document, existing_by_id, existing_by_hash, dedup_level, session
+        )
+        
+        if existing_doc is not None:
+            # Document was updated, return it
+            return existing_doc
+        
+        # No duplicate or level 0/1 - proceed with insert
         session.add(document)
         session.flush()  # Get the ID
         session.commit()
@@ -116,6 +320,8 @@ def add(
 
 def add_many(
     documents: List[Document],
+    *,
+    dedup_level: Optional[int] = None,
 ) -> List[Document]:
     """Add multiple documents to the database.
     
@@ -123,12 +329,21 @@ def add_many(
         from test_mcp.kb import add_many
         
         docs = add_many([doc1, doc2, doc3])
+        
+        # With custom deduplication level
+        docs = add_many([doc1, doc2, doc3], dedup_level=4)
 
     Args:
         documents: List of Document objects
+        dedup_level: Deduplication level (0-4). If None, uses KB_DEDUPLICATION_LEVEL env var or default 2.
+                     - 0: Insert duplicates, no warnings
+                     - 1: Insert with warnings
+                     - 2: Overwrite if same hash (default)
+                     - 3: Same as 2 but with warnings for existing source_id, doc_id
+                     - 4: Overwrite same hash and same source_id, doc_id
 
     Returns:
-        List of created Document objects
+        List of created or updated Document objects
 
     Raises:
         ValueError: If documents list is empty
@@ -148,7 +363,7 @@ def add_many(
             parent_id = ids.get(doc.meta["parent_doc_id"])
             if parent_id:
                 doc.parent_id = parent_id
-        added_doc = add(doc)
+        added_doc = add(doc, dedup_level=dedup_level)
         ids[added_doc.doc_id] = added_doc.id
         result.append(added_doc)
 
@@ -163,6 +378,7 @@ def add_from_path(
     doc_id: Optional[str] = None,
     parse_image_additional_doc: Optional[bool] = None,
     parse_image_llm_description: Optional[bool] = None,
+    dedup_level: Optional[int] = None,
 ) -> List[Document]:
     """Parse a file and add extracted document(s) to the knowledge base.
     
@@ -217,6 +433,12 @@ def add_from_path(
                                     If None, reads from PARSE_IMAGE_ADDITIONAL_DOC env var.
         parse_image_llm_description: If True, generate LLM descriptions for images.
                                      If None, reads from PARSE_IMAGE_LLM_DESCRIPTION env var.
+        dedup_level: Deduplication level (0-4). If None, uses KB_DEDUPLICATION_LEVEL env var or default 2.
+                     - 0: Insert duplicates, no warnings
+                     - 1: Insert with warnings
+                     - 2: Overwrite if same hash (default)
+                     - 3: Same as 2 but with warnings for existing source_id, doc_id
+                     - 4: Overwrite same hash and same source_id, doc_id
     
     Returns:
         List of created Document objects:
@@ -292,7 +514,7 @@ def add_from_path(
     documents = [Document.from_dict(doc_dict) for doc_dict in doc_dicts]
     
     # Add all documents to the database
-    result = add_many(documents)
+    result = add_many(documents, dedup_level=dedup_level)
     
     final_source_id = parse_data["source_id"]
     final_doc_id = parse_data["doc_id"]

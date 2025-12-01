@@ -29,11 +29,13 @@ class WebSessionManager:
         self.reverify_interval = int(os.getenv("WEB_REVERIFY_INTERVAL", "3600"))
 
         # Flag to disable authentication (for local development only)
-        self.require_auth = os.getenv("REQUIRE_WEB_AUTH", "true").lower() == "true"
-        if not self.require_auth:
+        # Default: authentication is REQUIRED (secure by default)
+        disable_auth = os.getenv("DISABLE_WEB_AUTH", "false").lower() == "true"
+        self.require_auth = not disable_auth
+        if disable_auth:
             logger.warning(
                 "WEB AUTHENTICATION DISABLED - For development only! "
-                "Set REQUIRE_WEB_AUTH=true for production."
+                "Remove DISABLE_WEB_AUTH or set DISABLE_WEB_AUTH=false for production."
             )
         logger.info(
             f"Web session timeout: {self.session_timeout} seconds "
@@ -182,8 +184,8 @@ class WebSessionManager:
         if not self.require_auth:
             return """
             <div style="background: #fff3cd; border: 1px solid #ffc107; padding: 15px; margin-bottom: 20px; border-radius: 4px;">
-                <strong>Development Mode:</strong> Web authentication is disabled (REQUIRE_WEB_AUTH=false).
-                Enable authentication for production deployments.
+                <strong>Development Mode:</strong> Web authentication is disabled (DISABLE_WEB_AUTH=true).
+                Remove DISABLE_WEB_AUTH or set DISABLE_WEB_AUTH=false for production deployments.
             </div>
             """
         return ""
@@ -319,6 +321,34 @@ def setup_shared_auth_routes(app, session_manager: WebSessionManager):
     async def login(request):
         """Start web login flow."""
         redirect_after_login = request.query_params.get("redirect", "/")
+        
+        # If auth is disabled, create a dev session automatically
+        if not session_manager.require_auth:
+            session_id = secrets.token_urlsafe(32)
+            current_time = time.time()
+            session_data = {
+                "username": "dev-user",
+                "github_token": None,
+                "has_admin": True,
+                "created_at": current_time,
+                "expires_at": current_time + session_manager.session_timeout,
+                "last_verified": current_time,
+            }
+            await session_manager.session_store.set("sessions", session_id, session_data)
+            
+            response = RedirectResponse(url=redirect_after_login, status_code=303)
+            response.set_cookie(
+                "web_session",
+                session_id,
+                max_age=session_manager.session_timeout,
+                httponly=True,
+                secure=False,  # Dev mode, not using HTTPS typically
+                samesite="lax",
+            )
+            logger.info(f"Created dev session for dev-user (auth disabled)")
+            return response
+        
+        # Normal OAuth flow
         github_auth_url, state = await session_manager.create_oauth_login_url(
             redirect_after_login=redirect_after_login
         )

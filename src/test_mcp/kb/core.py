@@ -140,7 +140,7 @@ class Document(Base):
     # index=True on columns creates single-column indexes
     # Composite indexes are defined in __table_args__
     __table_args__ = (
-        Index("idx_documents_source_type", "source_id", "source_type"),
+        #Index("idx_documents_source_type", "source_id", "source_type"),
         Index("idx_documents_insert_time", "insert_time"),
         Index("idx_documents_content_hash", "content_hash"),
         Index("idx_documents_source_doc_id", "source_id", "doc_id"),

@@ -110,6 +110,48 @@ DB_MAX_OVERFLOW=10
 
 **Default:** `10`
 
+## Deduplication Configuration
+
+### KB_DEDUPLICATION_LEVEL
+Controls how duplicate documents are handled when adding to the knowledge base.
+
+```bash
+KB_DEDUPLICATION_LEVEL=2
+```
+
+**Default:** `2`
+
+**Options:**
+- `0` - **Insert duplicates, no warnings**: Always insert new documents, even if duplicates exist
+- `1` - **Insert with warnings**: Insert duplicates but log warnings for existing source_id+doc_id or content_hash
+- `2` - **Overwrite if same hash** (default): Update existing document if content_hash matches
+- `3` - **Overwrite hash with warnings**: Same as level 2, but also warn about existing source_id+doc_id with different hash
+- `4` - **Overwrite all matches**: Update existing document if either source_id+doc_id matches OR content_hash matches
+
+**Behavior Details:**
+
+**Level 0:** No duplicate checking. All documents are inserted, potentially creating duplicates.
+
+**Level 1:** Checks for duplicates and logs warnings, but still inserts all documents:
+- Warns if document with same `source_id` + `doc_id` exists
+- Warns if document with same `content_hash` exists
+
+**Level 2 (Default):** Updates existing document if `content_hash` matches:
+- If a document with the same `content_hash` exists, it is updated with new data
+- If no hash match, document is inserted
+- No warnings for existing `source_id` + `doc_id` with different hash
+
+**Level 3:** Same as level 2, but also warns about existing `source_id` + `doc_id`:
+- Updates existing document if `content_hash` matches
+- Warns if `source_id` + `doc_id` exists but `content_hash` is different
+
+**Level 4:** Updates existing document if either condition matches:
+- If `source_id` + `doc_id` matches, update that document
+- Otherwise, if `content_hash` matches, update that document
+- Otherwise, insert new document
+
+**Note:** The deduplication level can also be specified per-operation using the `dedup_level` parameter in `add()`, `add_many()`, and `add_from_path()` functions.
+
 ## Example Configurations
 
 ### PostgreSQL (Production)
