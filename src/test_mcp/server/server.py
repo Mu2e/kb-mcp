@@ -312,8 +312,11 @@ def main():
 
     # Setup web routes (OAuth protected web interface for interactive tools)
     from . import web
-
     web.setup_web_routes(app, oauth_provider, web_session_manager)
+
+    # Setup API routes (OAuth protected API endpoints)
+    from . import api
+    api.setup_api_routes(app, web_session_manager)
 
     if USE_HTTPS:
         uvicorn.run(

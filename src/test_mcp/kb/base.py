@@ -806,6 +806,38 @@ def get_count(
     return result if isinstance(result, int) else 0
 
 
+def get_children(
+    parent_id: str,
+) -> list[Document]:
+    """Get child documents of a parent document.
+    
+    Usage:
+        children = get_children("550e8400-e29b-41d4-a716-446655440000")
+    
+    Args:
+        parent_id: UUID of the parent document
+    
+    Returns:
+        List of child Document objects (empty list if no children found)
+    """
+    _ensure_db_initialized()
+    
+    with get_db_session() as session:
+        query = session.query(Document).filter(Document.parent_id == parent_id)
+        
+        # Apply ordering (default: by insert_time descending)
+        query = query.order_by(Document.insert_time.desc())
+        
+        # Execute query
+        documents = query.all()
+        
+        # Detach all results from session
+        for doc in documents:
+            session.expunge(doc)
+    
+    return documents
+
+
 def add_source(
     source_id: str,
     name: str | None = None,

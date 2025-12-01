@@ -2,6 +2,8 @@
 """CLI tool for knowledge base operations."""
 
 import argparse
+import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -81,10 +83,37 @@ def cmd_add(args):
     if not doc_id:
         doc_id = file_path.stem
 
+    # Handle file copying if --copy is specified
+    uri = None
+    if args.copy:
+        # Get DATA_DIR and create local directory
+        data_dir = os.getenv("DATA_DIR", "data")
+        local_dir = Path(data_dir) / "local"
+        local_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Copy file to local directory
+        dest_file = local_dir / file_path.name
+        # Handle duplicates by adding a number
+        counter = 1
+        original_dest = dest_file
+        while dest_file.exists():
+            stem = original_dest.stem
+            suffix = original_dest.suffix
+            dest_file = local_dir / f"{stem}_{counter}{suffix}"
+            counter += 1
+        
+        shutil.copy2(file_path, dest_file)
+        print(f"  Copied file to: {dest_file}")
+        
+        # Set URI to local://local/filename
+        uri = f"local://local/{dest_file.name}"
+
     # Prepare data dict
     data = {"source_id": source_id}
     if doc_id:
         data["doc_id"] = doc_id
+    if uri:
+        data["uri"] = uri
 
     # Determine deduplication level
     dedup_level = args.dedup_level
@@ -146,6 +175,8 @@ def cmd_add(args):
             print(f"    Source: {doc.source_id}")
             print(f"    Doc ID: {doc.doc_id}")
             print(f"    Type: {doc.source_type}")
+            if doc.uri:
+                print(f"    URI: {doc.uri}")
             if doc.text:
                 print(f"    Text length: {len(doc.text)} characters")
     except Exception as e:
@@ -341,6 +372,11 @@ def main():
         "--parse-images-llm",
         action="store_true",
         help="Generate LLM descriptions for images (requires OPENAI_API_KEY)"
+    )
+    add_parser.add_argument(
+        "--copy",
+        action="store_true",
+        help="Copy file to DATA_DIR/local and set URI to local://local/FILENAME"
     )
 
     # Get command

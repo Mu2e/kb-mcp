@@ -14,6 +14,15 @@ let currentFilters = {
 document.addEventListener('DOMContentLoaded', function() {
     initFilters();
     updateFilterCounts(); // Load initial filter counts
+    
+    // Check for uploaded_docs query parameter and highlight those documents
+    const urlParams = new URLSearchParams(window.location.search);
+    const uploadedDocs = urlParams.get('uploaded_docs');
+    if (uploadedDocs) {
+        // Store uploaded doc IDs to highlight them after loading
+        window.uploadedDocIds = uploadedDocs.split(',').filter(id => id);
+    }
+    
     loadDocuments(true); // Initial load
     
     // Set up infinite scroll
@@ -238,8 +247,16 @@ async function loadDocuments(reset = false) {
 function createDocumentElement(doc) {
     const div = document.createElement('div');
     div.className = 'document-item';
+    
+    // Highlight newly uploaded documents
+    if (window.uploadedDocIds && window.uploadedDocIds.includes(doc.id)) {
+        div.style.border = '2px solid #4CAF50';
+        div.style.backgroundColor = '#f0f8f0';
+    }
+    
     div.setAttribute('data-source-id', doc.source_id);
     div.setAttribute('data-doc-type', doc.doc_type);
+    div.setAttribute('data-doc-id', doc.id);
     
     // Make entire box clickable
     div.addEventListener('click', function(e) {

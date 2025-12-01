@@ -90,6 +90,29 @@ h3 {
     border-left: 4px solid #4CAF50;
     padding: 15px;
     margin: 20px 0;
+    position: relative;
+    border-radius: 4px;
+}
+
+.success-box a {
+    color: #155724;
+    text-decoration: underline;
+    font-weight: bold;
+}
+
+.success-box button {
+    background: none;
+    border: none;
+    color: #155724;
+    font-size: 20px;
+    cursor: pointer;
+    padding: 0 10px;
+    float: right;
+    line-height: 1;
+}
+
+.success-box button:hover {
+    color: #000;
 }
 
 .warning-box {
