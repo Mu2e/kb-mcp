@@ -526,13 +526,17 @@ def add_from_path(
     return result
 
 
-def get(
+def _get(
     identifier: str | None = None,
     *,
     uuid: str | None = None,
     source_id: str | None = None,
     doc_id: str | None = None,
-) -> Document | list[Document] | None:
+    filter_dict: Dict[str, Any] | None = None,
+    limit: int | None = None,
+    offset: int | None = None,
+    count_only: bool = False,
+) -> Document | list[Document] | int | None:
     """Get document(s) by various criteria.
 
     Usage:
@@ -561,6 +565,15 @@ def get(
         
         # Get all documents (empty query)
         docs = get()
+        
+        # Use filter_dict for advanced filtering
+        docs = get(filter_dict={"source_id": "mu2e-docdb", "doc_type": "text"})
+        
+        # With limit and offset for pagination
+        docs = get(source_id="mu2e-docdb", limit=10, offset=20)
+        
+        # Get count using get_count()
+        count = get_count(filter_dict={"source_id": "mu2e-docdb"})
 
     Args:
         identifier: Positional argument that can be:
@@ -570,11 +583,22 @@ def get(
         uuid: Explicit UUID lookup (guaranteed, overrides identifier)
         source_id: Source identifier to filter by
         doc_id: Document ID within source to filter by
+        filter_dict: Dictionary with filter criteria. Supported keys:
+                    - source_id: Filter by source ID
+                    - doc_id: Filter by document ID
+                    - doc_type: Filter by document type
+                    - source_type: Filter by source type (MIME type)
+                    - text_contains: Filter documents containing text (case-insensitive)
+        limit: Maximum number of documents to return (ignored if count_only=True)
+        offset: Number of documents to skip (ignored if count_only=True)
+        count_only: If True, return count instead of documents
 
     Returns:
-        - Single Document if one match found
-        - list[Document] if multiple matches found
-        - None if no matches found
+        - If count_only=True: int (count of matching documents)
+        - If count_only=False:
+          - Single Document if one match found
+          - list[Document] if multiple matches found
+          - None if no matches found
     """
     _ensure_db_initialized()
 
@@ -609,11 +633,37 @@ def get(
                     if doc_id is None:
                         doc_id = identifier
 
-        # Apply filters
+        # Apply explicit filters (backward compatibility)
         if source_id:
             query = query.filter(Document.source_id == source_id)
         if doc_id:
             query = query.filter(Document.doc_id == doc_id)
+
+        # Apply filter_dict filters (takes precedence if both provided)
+        if filter_dict:
+            if "source_id" in filter_dict and filter_dict["source_id"]:
+                query = query.filter(Document.source_id == filter_dict["source_id"])
+            if "doc_id" in filter_dict and filter_dict["doc_id"]:
+                query = query.filter(Document.doc_id == filter_dict["doc_id"])
+            if "doc_type" in filter_dict and filter_dict["doc_type"]:
+                query = query.filter(Document.doc_type == filter_dict["doc_type"])
+            if "source_type" in filter_dict and filter_dict["source_type"]:
+                query = query.filter(Document.source_type == filter_dict["source_type"])
+            if "text_contains" in filter_dict and filter_dict["text_contains"]:
+                query = query.filter(Document.text.contains(filter_dict["text_contains"]))
+
+        # If count_only, return count early
+        if count_only:
+            return query.count()
+
+        # Apply ordering (default: by insert_time descending)
+        query = query.order_by(Document.insert_time.desc())
+
+        # Apply pagination
+        if offset is not None:
+            query = query.offset(offset)
+        if limit is not None:
+            query = query.limit(limit)
 
         # Execute query
         documents = query.all()
@@ -629,6 +679,131 @@ def get(
         return documents[0]
     else:
         return documents
+
+
+def get(
+    identifier: str | None = None,
+    *,
+    uuid: str | None = None,
+    source_id: str | None = None,
+    doc_id: str | None = None,
+    filter_dict: Dict[str, Any] | None = None,
+    limit: int | None = None,
+    offset: int | None = None,
+) -> Document | list[Document] | None:
+    """Get document(s) by various criteria.
+
+    Usage:
+        # UUID (positional, auto-detected)
+        doc = get("550e8400-e29b-41d4-a716-446655440000")
+        
+        # UUID (explicit keyword, guaranteed)
+        doc = get(uuid="550e8400-e29b-41d4-a716-446655440000")
+        
+        # Parse identifier: "source_id_doc_id" (split on "_")
+        doc = get("mu2e-docdb_1234-doc1")
+        # → source_id="mu2e-docdb", doc_id="1234-doc1"
+        
+        # Parse identifier: just doc_id (no "_", not UUID)
+        doc = get("1234-doc1")
+        # → doc_id="1234-doc1"
+        
+        # Explicit doc_id
+        doc = get(doc_id="1234-doc1")
+        
+        # Explicit source_id and doc_id
+        doc = get(source_id="mu2e-docdb", doc_id="1234-doc1")
+        
+        # Get all documents from a source
+        docs = get(source_id="mu2e-docdb")
+        
+        # Get all documents (empty query)
+        docs = get()
+        
+        # Use filter_dict for advanced filtering
+        docs = get(filter_dict={"source_id": "mu2e-docdb", "doc_type": "text"})
+        
+        # With limit and offset for pagination
+        docs = get(source_id="mu2e-docdb", limit=10, offset=20)
+
+    Args:
+        identifier: Positional argument that can be:
+                    - UUID (36 chars with dashes) → used as document UUID
+                    - "source_id_doc_id" format → parsed (split on "_")
+                    - Otherwise → treated as doc_id
+        uuid: Explicit UUID lookup (guaranteed, overrides identifier)
+        source_id: Source identifier to filter by
+        doc_id: Document ID within source to filter by
+        filter_dict: Dictionary with filter criteria. Supported keys:
+                    - source_id: Filter by source ID
+                    - doc_id: Filter by document ID
+                    - doc_type: Filter by document type
+                    - source_type: Filter by source type (MIME type)
+                    - text_contains: Filter documents containing text (case-insensitive)
+        limit: Maximum number of documents to return
+        offset: Number of documents to skip (for pagination)
+
+    Returns:
+        - Single Document if one match found
+        - list[Document] if multiple matches found
+        - None if no matches found
+    """
+    result = _get(
+        identifier=identifier,
+        uuid=uuid,
+        source_id=source_id,
+        doc_id=doc_id,
+        filter_dict=filter_dict,
+        limit=limit,
+        offset=offset,
+        count_only=False,
+    )
+    # Type narrowing: when count_only=False, result is never int
+    if isinstance(result, int):
+        return None  # Should never happen, but handle for type safety
+    return result
+
+
+def get_count(
+    identifier: str | None = None,
+    *,
+    uuid: str | None = None,
+    source_id: str | None = None,
+    doc_id: str | None = None,
+    filter_dict: Dict[str, Any] | None = None,
+) -> int:
+    """Get count of documents matching criteria.
+
+    Usage:
+        # Count all documents
+        count = get_count()
+        
+        # Count documents from a source
+        count = get_count(source_id="mu2e-docdb")
+        
+        # Count with filter_dict
+        count = get_count(filter_dict={"doc_type": "text", "source_id": "mu2e-docdb"})
+
+    Args:
+        identifier: Positional argument (same as get())
+        uuid: Explicit UUID lookup
+        source_id: Source identifier to filter by
+        doc_id: Document ID within source to filter by
+        filter_dict: Dictionary with filter criteria (same as get())
+
+    Returns:
+        Number of documents matching the criteria
+    """
+    result = _get(
+        identifier=identifier,
+        uuid=uuid,
+        source_id=source_id,
+        doc_id=doc_id,
+        filter_dict=filter_dict,
+        count_only=True,
+    )
+    # Type narrowing: when count_only=True, result is always int
+    return result if isinstance(result, int) else 0
 
 
 def add_source(
@@ -680,5 +855,69 @@ def add_source(
     logger.info(f"Added/updated source: {source_id}")
     return source
 
+
+
+
+def get_options() -> Dict[str, Any]:
+    """Get filter options for the knowledge base.
+
+    Returns a dictionary with available filter options that can be used
+    in filter_dict or for building UI dropdowns.
+
+    Returns:
+        Dictionary with:
+        - source_options: List of dicts with {"id": str, "name": str | None, "count": int}
+        - doc_type_options: List of dicts with {"doc_type": str, "count": int}
+    """
+    _ensure_db_initialized()
+
+    from sqlalchemy import func
+
+    with get_db_session() as session:
+        # Get sources with document counts
+        source_counts = (
+            session.query(
+                Source.id,
+                Source.name,
+                func.count(Document.id).label("count")
+            )
+            .outerjoin(Document, Source.id == Document.source_id)
+            .group_by(Source.id, Source.name)
+            .order_by(Source.id)
+            .all()
+        )
+
+        source_options = [
+            {
+                "id": source_id,
+                "name": source_name,
+                "count": count
+            }
+            for source_id, source_name, count in source_counts
+        ]
+
+        # Get document types with counts
+        doc_type_counts = (
+            session.query(
+                Document.doc_type,
+                func.count(Document.id).label("count")
+            )
+            .group_by(Document.doc_type)
+            .order_by(Document.doc_type)
+            .all()
+        )
+
+        doc_type_options = [
+            {
+                "doc_type": doc_type,
+                "count": count
+            }
+            for doc_type, count in doc_type_counts
+        ]
+
+    return {
+        "source_options": source_options,
+        "doc_type_options": doc_type_options,
+    }
 
 

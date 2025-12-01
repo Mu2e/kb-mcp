@@ -1,0 +1,380 @@
+/* Simple W3Schools-style CSS for MCP Server */
+
+* {
+    box-sizing: border-box;
+}
+
+body {
+    font-family: Arial, Helvetica, sans-serif;
+    margin: 0;
+    padding: 0;
+    background-color: #f1f1f1;
+}
+
+.container {
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 20px;
+    background-color: white;
+    min-height: 100vh;
+}
+
+h1 {
+    color: #2196F3;
+    margin-top: 0;
+    font-size: 1.8em;
+}
+
+h2 {
+    color: #4CAF50;
+    margin-top: 10px;
+    font-size: 1.3em;
+}
+
+h3 {
+    color: #555;
+    font-size: 1.1em;
+}
+
+/* Navigation */
+.nav {
+    background-color: #333;
+    overflow: hidden;
+    margin: -20px -20px 20px -20px;
+    padding: 0 20px;
+}
+
+.nav a {
+    float: left;
+    color: #f2f2f2;
+    text-align: center;
+    padding: 14px 16px;
+    text-decoration: none;
+    font-size: 17px;
+}
+
+.nav a:hover {
+    background-color: #ddd;
+    color: black;
+}
+
+.nav a.active {
+    background-color: #2196F3;
+    color: white;
+}
+
+.nav-right {
+    float: right;
+}
+
+/* Cards */
+.card {
+    background-color: white;
+    padding: 12px 15px;
+    margin-top: 15px;
+    border: 1px solid #e0e0e0;
+    border-radius: 4px;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+}
+
+.info-box {
+    background-color: #e7f3ff;
+    border-left: 4px solid #2196F3;
+    padding: 10px 12px;
+    margin: 12px 0;
+    font-size: 14px;
+}
+
+.success-box {
+    background-color: #d4edda;
+    border-left: 4px solid #4CAF50;
+    padding: 15px;
+    margin: 20px 0;
+}
+
+.warning-box {
+    background-color: #fff3cd;
+    border-left: 4px solid #ffc107;
+    padding: 15px;
+    margin: 20px 0;
+}
+
+.error-box {
+    background-color: #f8d7da;
+    border-left: 4px solid #dc3545;
+    padding: 15px;
+    margin: 20px 0;
+}
+
+/* Tables */
+table {
+    border-collapse: collapse;
+    width: 100%;
+    margin: 20px 0;
+}
+
+table th, table td {
+    border: 1px solid #e0e0e0;
+    padding: 8px 10px;
+    text-align: left;
+    font-size: 14px;
+}
+
+table th {
+    background-color: #f5f5f5;
+    color: #333;
+    font-weight: 600;
+}
+
+table tr:nth-child(even) {
+    background-color: #fafafa;
+}
+
+/* Remove row hover effect - only style links */
+table tr:hover {
+    background-color: inherit;
+}
+
+/* Style links in tables */
+table td a {
+    color: #2196F3;
+    text-decoration: underline;
+}
+
+table td a:hover {
+    background-color: #f0f7ff;
+    padding: 2px 4px;
+    margin: -2px -4px;
+    border-radius: 2px;
+    display: inline-block;
+}
+
+/* Forms */
+.form-group {
+    margin: 15px 0;
+}
+
+label {
+    display: block;
+    margin-bottom: 5px;
+    font-weight: bold;
+}
+
+input[type="text"],
+input[type="search"],
+input[type="number"],
+select,
+textarea {
+    width: 100%;
+    padding: 8px;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    font-size: 14px;
+}
+
+input[type="text"]:focus,
+input[type="search"]:focus,
+input[type="number"]:focus,
+select:focus,
+textarea:focus {
+    border-color: #2196F3;
+    outline: none;
+}
+
+/* Buttons */
+button,
+.btn {
+    background-color: #2196F3;
+    color: white;
+    padding: 6px 12px;
+    border: none;
+    border-radius: 3px;
+    cursor: pointer;
+    font-size: 14px;
+    text-decoration: none;
+    display: inline-block;
+}
+
+button:hover,
+.btn:hover {
+    background-color: #0b7dda;
+}
+
+button.danger,
+.btn.danger {
+    background-color: #f44336;
+}
+
+button.danger:hover,
+.btn.danger:hover {
+    background-color: #da190b;
+}
+
+button.success,
+.btn.success {
+    background-color: #4CAF50;
+}
+
+button.success:hover,
+.btn.success:hover {
+    background-color: #45a049;
+}
+
+/* Code */
+code {
+    background-color: #f4f4f4;
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-family: "Courier New", monospace;
+    font-size: 14px;
+}
+
+pre {
+    background-color: #f4f4f4;
+    padding: 15px;
+    border-radius: 4px;
+    overflow-x: auto;
+}
+
+/* Links */
+a {
+    color: #2196F3;
+    text-decoration: none;
+}
+
+a:hover {
+    text-decoration: underline;
+}
+
+/* Filters */
+.filters {
+    background-color: #f9f9f9;
+    padding: 15px;
+    border-radius: 4px;
+    margin: 20px 0;
+}
+
+.filter-row {
+    display: flex;
+    gap: 15px;
+    margin-bottom: 10px;
+    flex-wrap: wrap;
+}
+
+.filter-group {
+    flex: 1;
+    min-width: 200px;
+}
+
+/* Document list */
+.document-list {
+    margin-top: 20px;
+}
+
+.document-item {
+    border: 1px solid #e0e0e0;
+    border-radius: 4px;
+    padding: 12px;
+    margin-bottom: 12px;
+    background-color: white;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.document-item:hover {
+    box-shadow: 0 2px 6px rgba(0,0,0,0.08);
+    border-color: #2196F3;
+    transform: translateY(-1px);
+}
+
+.document-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: start;
+    margin-bottom: 8px;
+}
+
+.document-meta {
+    color: #666;
+    font-size: 13px;
+    margin-top: 6px;
+}
+
+.document-preview {
+    color: #555;
+    margin-top: 8px;
+    max-height: 80px;
+    overflow: hidden;
+    font-size: 14px;
+}
+
+.document-actions {
+    margin-top: 8px;
+}
+
+.document-actions a {
+    pointer-events: auto;
+}
+
+/* Pagination */
+.pagination {
+    margin-top: 20px;
+    text-align: center;
+}
+
+.pagination a,
+.pagination span {
+    padding: 8px 16px;
+    text-decoration: none;
+    border: 1px solid #ddd;
+    margin: 0 4px;
+    display: inline-block;
+}
+
+.pagination a:hover {
+    background-color: #2196F3;
+    color: white;
+}
+
+.pagination .active {
+    background-color: #2196F3;
+    color: white;
+    border-color: #2196F3;
+}
+
+/* Utilities */
+.text-right {
+    text-align: right;
+}
+
+.text-center {
+    text-align: center;
+}
+
+.mt-20 {
+    margin-top: 20px;
+}
+
+.mb-20 {
+    margin-bottom: 20px;
+}
+
+.clearfix::after {
+    content: "";
+    display: table;
+    clear: both;
+}
+
+/* Loading indicator */
+#loading-more {
+    padding: 20px;
+    text-align: center;
+    color: #666;
+    font-style: italic;
+}
+
+/* Document list container */
+#document-list {
+    min-height: 200px;
+}
+

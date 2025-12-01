@@ -189,8 +189,13 @@ def main():
     from starlette.responses import HTMLResponse, RedirectResponse
     from starlette.middleware.base import BaseHTTPMiddleware
     from starlette.requests import Request
+    from starlette.staticfiles import StaticFiles
 
     app = mcp.streamable_http_app()
+    
+    # Serve static files (CSS, JS)
+    static_path = Path(__file__).parent / "static"
+    app.mount("/static", StaticFiles(directory=str(static_path)), name="static")
 
     # Audit and debug middleware
     class AuditMiddleware(BaseHTTPMiddleware):
