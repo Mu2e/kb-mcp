@@ -2,7 +2,7 @@
 
 import hashlib
 import logging
-from typing import Any, Dict
+from typing import Any, Dict, List, Union
 
 from .database import get_db_session, init_db
 from .core import Document, Source
@@ -38,8 +38,7 @@ def _compute_hash(document: Document) -> None:
 
 
 def add(
-    data: Document | Dict[str, Any],
-    run_pipeline: bool = True,
+    data: Union[Document, Dict[str, Any]],
 ) -> Document:
     """Add a new document to the database.
 
@@ -57,7 +56,6 @@ def add(
 
     Args:
         data: Document object or dictionary with document data
-        run_pipeline: Whether to run processing pipeline (placeholder for now)
 
     Returns:
         Created Document object
@@ -112,18 +110,41 @@ def add(
 
     logger.info(f"Added document: {doc_id} from {doc_source_id}")
 
-    # TODO: Run processing pipeline if requested
-    if run_pipeline:
-        # Placeholder for future pipeline
-        # This could include:
-        # - Text extraction/cleaning
-        # - Chunking
-        # - Embedding generation
-        # - Metadata extraction
-        # - Content analysis
-        pass
-
     return document
+
+
+def add_many(
+    documents: List[Document],
+) -> List[Document]:
+    """Add multiple documents to the database.
+    
+    Usage:
+        from test_mcp.kb import add_many
+        
+        docs = add_many([doc1, doc2, doc3])
+
+    Args:
+        documents: List of Document objects
+
+    Returns:
+        List of created Document objects
+
+    Raises:
+        ValueError: If documents list is empty
+    """
+    # Ensure database is initialized (lazy loading)
+    _ensure_db_initialized()
+
+    if not documents:
+        raise ValueError("Cannot add empty list of documents")
+    
+    # Add each document
+    result = []
+    for doc in documents:
+        added_doc = add(doc)
+        result.append(added_doc)
+    
+    return result
 
 
 def get(

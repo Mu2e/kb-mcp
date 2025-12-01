@@ -2,6 +2,7 @@
 
 import uuid
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
 from sqlalchemy import (
@@ -94,13 +95,10 @@ class Document(Base):
     # Examples: "text", "image", "mixed", "table", etc.
     doc_type = Column(String(64), nullable=False, default="text", index=True)
 
-    # Content - can store either text or binary
-    # For text documents: use text
-    # For binary documents (images, PDFs): use binary
-    # We keep both because:
-    # - Text is easier to search and query
-    # - Binary preserves exact format for images, PDFs, etc.
-    # - Some documents might have both (e.g., extracted text from PDF + original PDF)
+    # Content - can store both text and binary
+    # For text documents: use text for extracted/descriptive text
+    # For binary documents (images, PDFs): use binary for the actual data
+    # Some documents might have both (e.g., image with LLM-generated description in text)
     text = Column(Text, nullable=True)
     binary = Column(LargeBinary, nullable=True)
 
@@ -187,7 +185,7 @@ class Document(Base):
 
         # if text is present but source_type is not set, set it to "text"
         if "text" in data and "source_type" not in data:
-            data["source_type"] = "text"
+            data["source_type"] = "text/plain"
 
         # Extract fields, using defaults where appropriate
         return cls(
@@ -195,7 +193,7 @@ class Document(Base):
             source_id=data["source_id"],
             doc_id=data.get("doc_id"),
             uri=data.get("uri"),
-            source_type=data["source_type"],
+            source_type=data.get("source_type", "application/octet-stream"),
             doc_type=data.get("doc_type", "text"),
             text=data.get("text"),
             binary=data.get("binary"),
@@ -204,3 +202,142 @@ class Document(Base):
             update_time=data.get("update_time"),
             parent_id=data.get("parent_id")
         )
+
+    def to_dict(self) -> dict:
+        """Convert Document instance to dictionary.
+        
+        Returns:
+            Dictionary representation of the document (binary is included as bytes)
+            
+        Example:
+            doc = Document.from_dict({...})
+            doc_dict = doc.to_dict()
+            # Binary data is included as bytes in the dict
+        """
+        result = {
+            "id": self.id,
+            "source_id": self.source_id,
+            "doc_id": self.doc_id,
+            "uri": self.uri,
+            "source_type": self.source_type,
+            "doc_type": self.doc_type,
+            "text": self.text,
+            "meta": self.meta if self.meta else {},
+        }
+        
+        # Include binary if present (as bytes - Python dicts can handle this)
+        if self.binary:
+            result["binary"] = self.binary
+        
+        # Add timestamps
+        if self.creating_time:
+            result["creating_time"] = self.creating_time.isoformat()
+        if self.update_time:
+            result["update_time"] = self.update_time.isoformat()
+        if self.insert_time:
+            result["insert_time"] = self.insert_time.isoformat()
+        
+        # Add parent_id if present
+        if self.parent_id:
+            result["parent_id"] = self.parent_id
+        
+        return result
+
+    @classmethod
+    def from_file(
+        cls,
+        file_path: str | Path,
+        data: Optional[dict] = None,
+    ) -> "Document":
+        """Create a Document instance from a file path.
+
+        This loads the file's binary data and creates a Document object.
+        The Document can then be parsed using parse() for text extraction.
+
+        Args:
+            file_path: Path to the document file
+            data: Optional dictionary with document fields (same as from_dict).
+                  If provided, will be merged with file-derived data.
+                  Required fields: source_id, doc_id (or will use defaults)
+
+        Returns:
+            Document instance with binary data loaded (not yet saved to database)
+
+        Raises:
+            FileNotFoundError: If the file doesn't exist
+            ValueError: If source_id is not provided (in data or as default)
+
+        Example:
+            from test_mcp.kb import Document
+            from test_mcp.parser import parse
+
+            # Simple usage
+            doc = Document.from_file("document.pdf", {
+                "source_id": "mu2e-docdb",
+                "doc_id": "1234"
+            })
+            
+            # Parse using dict with binary
+            doc_dicts = parse(data={
+                "source_id": doc.source_id,
+                "doc_id": doc.doc_id,
+                "binary": doc.binary,
+                "source_type": doc.source_type,
+                "meta": doc.meta or {}
+            })
+            documents = [Document.from_dict(d) for d in doc_dicts]
+        """
+        file_path = Path(file_path)
+        
+        if not file_path.exists():
+            raise FileNotFoundError(f"File not found: {file_path}")
+        
+        # Start with provided data or empty dict
+        doc_data = dict(data) if data else {}
+        
+        # Read binary data from file
+        binary_data = file_path.read_bytes()
+        doc_data["binary"] = binary_data
+        
+        # Auto-detect MIME type if not provided
+        if "source_type" not in doc_data:
+            try:
+                from ..parser import detect_mime_type
+                mime_type = detect_mime_type(file_path)
+            except ImportError:
+                # Fallback to mimetypes if parser not available
+                import mimetypes
+                mime_type, _ = mimetypes.guess_type(str(file_path))
+                if not mime_type:
+                    mime_type = "application/octet-stream"
+            doc_data["source_type"] = mime_type
+        
+        # Default doc_id to filename without extension if not provided
+        if "doc_id" not in doc_data:
+            doc_data["doc_id"] = file_path.stem
+
+        if "source_id" not in doc_data:
+            doc_data["source_id"] = "local"
+        
+        # Default uri to file:// absolute path if not provided
+        if "uri" not in doc_data:
+            doc_data["uri"] = f"file://{file_path.absolute()}"
+        
+        # Add file metadata to meta dict
+        if "meta" not in doc_data:
+            doc_data["meta"] = {}
+        
+        # Add file properties to metadata
+        file_stat = file_path.stat()
+        doc_data["meta"].update({
+            "filename": file_path.name,
+            "filepath": str(file_path.absolute()),
+            "filesize": file_stat.st_size,
+        })
+        
+        # Validate required fields
+        if "source_id" not in doc_data:
+            raise ValueError("source_id is required in data dictionary")
+        
+        # Use from_dict to create the document (reuses validation logic)
+        return cls.from_dict(doc_data)
