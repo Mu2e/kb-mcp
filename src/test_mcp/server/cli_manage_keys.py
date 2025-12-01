@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""CLI tool for managing MCP API keys."""
+"""CLI tool for managing MCP API keys (server package)."""
 
 import os
 import sys
 from pathlib import Path
 
-from ..api_keys import ApiKeyManager
+from .api_keys import ApiKeyManager
 
 
 def main():
@@ -17,7 +17,7 @@ def main():
     manager = ApiKeyManager(api_keys_file)
 
     if len(sys.argv) < 2:
-        print("Usage: python -m test_mcp.cli.manage_keys <command> [args]")
+        print("Usage: test-mcp-manage-keys <command> [args]")
         print()
         print("Commands:")
         print("  generate <username> [description]  - Generate a new API key")
@@ -32,7 +32,7 @@ def main():
     if command == "generate":
         if len(sys.argv) < 3:
             print("Error: username required")
-            print("Usage: python -m test_mcp.cli.manage_keys generate <username> [description]")
+            print("Usage: test-mcp-manage-keys generate <username> [description]")
             sys.exit(1)
 
         username = sys.argv[2]
@@ -55,7 +55,7 @@ def main():
             print("No API keys found.")
             print()
             print("Generate a key with:")
-            print("  python -m test_mcp.cli.manage_keys generate <username> [description]")
+            print("  test-mcp-manage-keys generate <username> [description]")
         else:
             print(f"Found {len(keys)} API key(s):")
             print()
@@ -63,14 +63,14 @@ def main():
                 print(f"Key: {api_key[:15]}...{api_key[-8:]}")
                 print(f"  Username: {info['username']}")
                 print(f"  Created: {info['created']}")
-                if info.get('description'):
+                if info.get("description"):
                     print(f"  Description: {info['description']}")
                 print()
 
     elif command == "revoke":
         if len(sys.argv) < 3:
             print("Error: API key required")
-            print("Usage: python -m test_mcp.cli.manage_keys revoke <api_key>")
+            print("Usage: test-mcp-manage-keys revoke <api_key>")
             sys.exit(1)
 
         api_key = sys.argv[2]
@@ -89,3 +89,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+

@@ -9,23 +9,42 @@ description = "Minimal streamable-http MCP server with GitHub OAuth authenticati
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
+# Minimal core dependencies (python-dotenv used by all modules)
 dependencies = [
-    "mcp>=1.1.0",
-    "uvicorn>=0.27.0",
     "python-dotenv>=1.0.0",
-    "httpx>=0.27.0",
-    "sqlalchemy>=2.0.0",
-    "psycopg2-binary>=2.9.0",
 ]
 
 [project.optional-dependencies]
-dev = [
-    "pytest>=7.0.0",
-    "pytest-asyncio>=0.21.0",
+# Server module: Core dependencies
+# Note: Server uses KB features, so typically install with: pip install -e ".[server,kb]"
+server = [
+    "mcp>=1.1.0",
+    "uvicorn>=0.27.0",
+    "httpx>=0.27.0",
 ]
+
+# Knowledge Base module: Database and parser dependencies
+# Note: KB uses parsers for document processing, so parser deps are included
+kb = [
+    # Database
+    "sqlalchemy>=2.0.0",
+    "psycopg2-binary>=2.9.0",
+    # Parsers (required for KB document processing)
+    "PyPDF2>=3.0.0",
+    "python-docx>=1.1.0",
+    "beautifulsoup4>=4.12.0",
+    "python-magic>=0.4.27",
+    "python-pptx>=0.6.0",
+    "openpyxl>=3.1.0",
+    "pillow>=10.0.0",
+]
+
+# Server module: Google Cloud Platform integration (Firestore for session storage)
 gcp = [
     "google-cloud-firestore>=2.14.0",
 ]
+
+# Parser module: Document parsing dependencies
 parser = [
     "PyPDF2>=3.0.0",
     "python-docx>=1.1.0",
@@ -35,14 +54,21 @@ parser = [
     "openpyxl>=3.1.0",
     "pillow>=10.0.0",
 ]
+
+# Parser module: LLM-based image description generation
 llm = [
     "openai>=1.0.0",
 ]
 
 [project.scripts]
+# Server module CLI commands
 test-mcp = "test_mcp.server:main"
-test-mcp-manage-keys = "test_mcp.cli.manage_keys:main"
+test-mcp-manage-keys = "test_mcp.server.cli_manage_keys:main"
+
+# Knowledge Base module CLI commands
 kb = "test_mcp.kb.cli:main"
+
+# Parser module CLI commands
 kb-parse = "test_mcp.parser.cli:main"
 
 [project.urls]

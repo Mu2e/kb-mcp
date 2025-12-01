@@ -199,10 +199,10 @@ class PDFParser(BaseParser):
                                             "source_type": "image/png",
                                             "doc_type": "image",
                                             "binary": image_bytes,
-                                            "parent_doc_id": parent_data.get("id", parent_data['doc_id']),
                                             "meta": {
                                                 "page": page_num_1_indexed,
                                                 "image_number": image_counter,
+                                                "parent_doc_id": parent_data.get("id", parent_data['doc_id']),
                                             }
                                         }
                                         image_dict["meta"] = image_dict["meta"] | parent_data.get("meta", {})

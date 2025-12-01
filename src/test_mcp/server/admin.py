@@ -1,7 +1,8 @@
-"""Admin web interface for managing API keys (OAuth protected via GitHub)."""
+"""Admin web interface for managing API keys (server package)."""
 
 import logging
 from starlette.responses import HTMLResponse, RedirectResponse
+
 from .web_auth import WebSessionManager
 
 logger = logging.getLogger(__name__)
@@ -19,7 +20,9 @@ def setup_admin_routes(app, oauth_provider, session_manager: WebSessionManager):
             return RedirectResponse(url="/login?redirect=/admin", status_code=303)
 
         # Get username from session (already verified above)
-        username = await session_manager.get_session_username(request, force_reverify=False)
+        username = await session_manager.get_session_username(
+            request, force_reverify=False
+        )
 
         # Get auth warning banner
         auth_warning = session_manager.get_auth_warning_html()
@@ -45,7 +48,8 @@ def setup_admin_routes(app, oauth_provider, session_manager: WebSessionManager):
             </tr>
             """
 
-        return HTMLResponse(f"""
+        return HTMLResponse(
+            f"""
 <!DOCTYPE html>
 <html>
 <head>
@@ -94,7 +98,8 @@ def setup_admin_routes(app, oauth_provider, session_manager: WebSessionManager):
     <p><a href="/">← Back to Home</a></p>
 </body>
 </html>
-        """)
+        """
+        )
 
     @app.route("/admin/generate", methods=["POST"])
     async def admin_generate(request):
@@ -104,7 +109,9 @@ def setup_admin_routes(app, oauth_provider, session_manager: WebSessionManager):
             return RedirectResponse(url="/login?redirect=/admin", status_code=303)
 
         # Get username for logging (already verified above)
-        username = await session_manager.get_session_username(request, force_reverify=False)
+        username = await session_manager.get_session_username(
+            request, force_reverify=False
+        )
 
         form = await request.form()
         key_username = form.get("username")
@@ -117,7 +124,8 @@ def setup_admin_routes(app, oauth_provider, session_manager: WebSessionManager):
             api_key = api_key_manager.create_key(key_username, description)
             logger.info(f"Generated API key for {key_username} by {username}")
 
-            return HTMLResponse(f"""
+            return HTMLResponse(
+                f"""
 <!DOCTYPE html>
 <html>
 <head><title>API Key Generated</title></head>
@@ -130,7 +138,8 @@ def setup_admin_routes(app, oauth_provider, session_manager: WebSessionManager):
     <p><a href="/admin">Back to Admin</a></p>
 </body>
 </html>
-            """)
+            """
+            )
         except Exception as e:
             logger.error(f"Error generating API key: {e}")
             return HTMLResponse(f"Error: {str(e)}", status_code=400)
@@ -143,7 +152,9 @@ def setup_admin_routes(app, oauth_provider, session_manager: WebSessionManager):
             return RedirectResponse(url="/login?redirect=/admin", status_code=303)
 
         # Get username for logging (already verified above)
-        username = await session_manager.get_session_username(request, force_reverify=False)
+        username = await session_manager.get_session_username(
+            request, force_reverify=False
+        )
 
         form = await request.form()
         api_key = form.get("api_key")
@@ -157,7 +168,9 @@ def setup_admin_routes(app, oauth_provider, session_manager: WebSessionManager):
                 logger.info(f"Revoked API key {api_key[:12]}... by {username}")
                 return RedirectResponse(url="/admin", status_code=303)
             else:
-                return HTMLResponse(f"API key not found", status_code=404)
+                return HTMLResponse("API key not found", status_code=404)
         except Exception as e:
             logger.error(f"Error revoking API key: {e}")
             return HTMLResponse(f"Error: {str(e)}", status_code=400)
+
+

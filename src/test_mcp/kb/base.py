@@ -2,7 +2,8 @@
 
 import hashlib
 import logging
-from typing import Any, Dict, List, Union
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Union
 
 from .database import get_db_session, init_db
 from .core import Document, Source
@@ -140,9 +141,165 @@ def add_many(
     
     # Add each document
     result = []
+    # id mapping for parent-child relationships
+    ids = {} # doc_id -> id
     for doc in documents:
+        if "parent_doc_id" in doc.meta:
+            parent_id = ids.get(doc.meta["parent_doc_id"])
+            if parent_id:
+                doc.parent_id = parent_id
         added_doc = add(doc)
+        ids[added_doc.doc_id] = added_doc.id
         result.append(added_doc)
+
+    return result
+
+
+def add_from_path(
+    file_path: Union[str, Path],
+    *,
+    data: Optional[Dict[str, Any]] = None,
+    source_id: Optional[str] = None,
+    doc_id: Optional[str] = None,
+    parse_image_additional_doc: Optional[bool] = None,
+    parse_image_llm_description: Optional[bool] = None,
+) -> List[Document]:
+    """Parse a file and add extracted document(s) to the knowledge base.
+    
+    This function parses a document file, extracts text and optionally images,
+    then adds all resulting documents to the knowledge base.
+    
+    Usage:
+        from test_mcp.kb import add_from_path
+        
+        # Using data dict (recommended for complex cases)
+        docs = add_from_path(
+            "document.pdf",
+            data={
+                "source_id": "mu2e-docdb",
+                "doc_id": "1234",
+                "meta": {"author": "John Doe"}
+            }
+        )
+        
+        # Using individual parameters (simpler for basic cases)
+        docs = add_from_path(
+            "document.pdf",
+            source_id="mu2e-docdb"
+        )
+        
+        # With explicit doc_id
+        docs = add_from_path(
+            "document.pdf",
+            source_id="mu2e-docdb",
+            doc_id="1234"
+        )
+        
+        # With image extraction
+        docs = add_from_path(
+            "document.pdf",
+            data={"source_id": "mu2e-docdb", "doc_id": "1234"},
+            parse_image_additional_doc=True,
+            parse_image_llm_description=True
+        )
+    
+    Args:
+        file_path: Path to the document file to parse
+        data: Optional dictionary with document fields (same as Document.from_dict).
+              If provided, must include source_id. Can include doc_id, meta, source_type, etc.
+              If not provided, source_id must be passed as a separate parameter.
+        source_id: Source identifier. Required if data is not provided.
+                   If both data and source_id are provided, source_id overrides data['source_id'].
+        doc_id: Document ID within the source. If not provided:
+                - Uses data['doc_id'] if data is provided
+                - Otherwise uses filename stem
+        parse_image_additional_doc: If True, create separate Document objects for images.
+                                    If None, reads from PARSE_IMAGE_ADDITIONAL_DOC env var.
+        parse_image_llm_description: If True, generate LLM descriptions for images.
+                                     If None, reads from PARSE_IMAGE_LLM_DESCRIPTION env var.
+    
+    Returns:
+        List of created Document objects:
+        - First: Main document with extracted text
+        - Rest: Image documents (if parse_image_additional_doc=True)
+    
+    Raises:
+        FileNotFoundError: If the file doesn't exist
+        ValueError: If source_id is not provided (neither in data nor as parameter)
+        NotImplementedError: If the document type is not supported
+    
+    Example:
+        from test_mcp.kb import add_from_path
+        
+        # Using data dict with metadata
+        documents = add_from_path(
+            "/path/to/document.pdf",
+            data={
+                "source_id": "local",
+                "doc_id": "my-doc-123",
+                "meta": {"category": "research", "year": 2024}
+            }
+        )
+        
+        # Main document is documents[0]
+        # If images were extracted, they're in documents[1:]
+    """
+    # Ensure database is initialized (lazy loading)
+    _ensure_db_initialized()
+    
+    file_path = Path(file_path)
+    
+    if not file_path.exists():
+        raise FileNotFoundError(f"File not found: {file_path}")
+    
+    # Import parse function (lazy import to avoid circular dependencies)
+    try:
+        from ..parser import parse
+    except ImportError:
+        raise ImportError(
+            "Parser module not available. Install with: pip install -e '.[parser]'"
+        )
+    
+    # Prepare data dict for parse()
+    # Start with provided data dict or empty dict
+    parse_data = dict(data) if data else {}
+    
+    # Override with individual parameters if provided
+    if source_id is not None:
+        parse_data["source_id"] = source_id
+    if doc_id is not None:
+        parse_data["doc_id"] = doc_id
+    
+    if "source_id" not in parse_data:
+        parse_data["source_id"] = "local"
+    
+    # Set doc_id if not provided
+    if "doc_id" not in parse_data:
+        parse_data["doc_id"] = file_path.stem
+    
+    # Parse the file - returns List[dict]
+    doc_dicts = parse(
+        file_path,
+        data=parse_data,
+        parse_image_additional_doc=parse_image_additional_doc,
+        parse_image_llm_description=parse_image_llm_description,
+    )
+    
+    if not doc_dicts:
+        raise ValueError(f"No documents extracted from {file_path}")
+    
+    # Convert dicts to Document objects
+    documents = [Document.from_dict(doc_dict) for doc_dict in doc_dicts]
+    
+    # Add all documents to the database
+    result = add_many(documents)
+    
+    final_source_id = parse_data["source_id"]
+    final_doc_id = parse_data["doc_id"]
+    logger.info(
+        f"Added {len(result)} document(s) from {file_path.name} "
+        f"(source_id={final_source_id}, doc_id={final_doc_id})"
+    )
     
     return result
 

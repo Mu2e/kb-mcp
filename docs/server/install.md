@@ -3,7 +3,11 @@
 ## 1. Python Dependencies
 
 ```bash
-pip install -e .
+# Install server with KB support (recommended, since server uses KB features)
+pip install -e ".[server,kb]"
+
+# Or install just the server (KB features will not work)
+pip install -e ".[server]"
 ```
 
 ## 2. ngrok Setup

@@ -25,6 +25,42 @@ Claude Desktop connects to remote MCP servers through **Connectors**.
 
 **Note**: For local development with ngrok, the URL changes on each restart. Update the connector URL accordingly.
 
+## ollmcp
+
+ollmcp connects to MCP servers via a local configuration file.
+
+**Authentication**: API Key (see [API Keys](api-keys.md))
+
+**Note**: ollmcp doesn't support OAuth2 flows at the moment, so API keys are required. It supports tools but not resources.
+
+### Setup
+
+1. Generate an API key:
+   ```bash
+   test-mcp-manage-keys generate your-username "ollmcp"
+   ```
+   Save the generated key.
+
+2. Create or edit your ollmcp config file at `~/.config/ollmcp/mcp-servers/config.json`:
+   ```json
+   {
+     "mcpServers": {
+       "test-mcp": {
+         "type": "streamable_http",
+         "url": "https://your-server-url/mcp",
+         "headers": {
+           "Authorization": "Bearer YOUR_API_KEY"
+         }
+       }
+     }
+   }
+   ```
+
+3. Start ollmcp:
+   ```bash
+   ollmcp -j ~/.config/ollmcp/mcp-servers/config.json
+   ```
+
 ## Cursor IDE
 
 Cursor connects to MCP servers via a local configuration file.

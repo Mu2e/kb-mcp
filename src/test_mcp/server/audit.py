@@ -1,8 +1,7 @@
-"""Simple audit logging for tool calls."""
+"""Simple audit logging for tool calls (server package)."""
 
 import json
 import logging
-import time
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
@@ -24,3 +23,5 @@ def log_tool_call(username: str, tool_name: str, arguments: dict) -> None:
     }
 
     logger.info(f"[AUDIT] {json.dumps(audit_entry)}")
+
+

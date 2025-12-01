@@ -1,4 +1,6 @@
-"""GitHub OAuth provider implementing MCP OAuth protocol."""
+"""GitHub OAuth provider implementing MCP OAuth protocol (server package)."""
+
+from __future__ import annotations
 
 import json
 import logging
@@ -37,12 +39,18 @@ class GitHubOAuthProvider(
         self.required_repo = os.getenv("GITHUB_REQUIRED_REPO", "")  # Format: "owner/repo"
 
         if not self.github_client_id or not self.github_client_secret:
-            logger.warning("GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET not set - OAuth will not work")
+            logger.warning(
+                "GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET not set - OAuth will not work"
+            )
 
         if not self.required_repo:
-            logger.warning("GITHUB_REQUIRED_REPO not set - all GitHub users will be allowed")
+            logger.warning(
+                "GITHUB_REQUIRED_REPO not set - all GitHub users will be allowed"
+            )
         else:
-            logger.info(f"Access restricted to users with access to: {self.required_repo}")
+            logger.info(
+                f"Access restricted to users with access to: {self.required_repo}"
+            )
 
         # API key authentication - always enabled
         # Use DATA_DIR env var if set (e.g., /data for Cloud Storage mount), otherwise "data/"
@@ -57,8 +65,10 @@ class GitHubOAuthProvider(
         self.session_store = SessionStore(collection_name="oauth_sessions")
 
         # Ephemeral state (not persisted - only valid during OAuth flow)
-        self.pending_auth: dict[str, tuple[OAuthClientInformationFull, AuthorizationParams]] = {}
-        self.web_callback_handler = None  # Set by server.py for web interface callbacks
+        self.pending_auth: dict[
+            str, tuple[OAuthClientInformationFull, AuthorizationParams]
+        ] = {}
+        self.web_callback_handler = None  # Set by server for web interface callbacks
 
     def set_web_callback_handler(self, handler):
         """Set the web callback handler for all web interface OAuth callbacks."""
@@ -66,7 +76,7 @@ class GitHubOAuthProvider(
 
     async def get_client(self, client_id: str) -> OAuthClientInformationFull | None:
         """Get registered MCP client."""
-        client_dict = await self.session_store.get('clients', client_id)
+        client_dict = await self.session_store.get("clients", client_id)
         if client_dict and isinstance(client_dict, dict):
             return OAuthClientInformationFull(**client_dict)
         return None
@@ -75,18 +85,22 @@ class GitHubOAuthProvider(
         """Register MCP client."""
         # Store client in SessionStore
         # Use model_dump() to ensure proper serialization (AnyUrl -> string)
-        await self.session_store.set('clients', client_info.client_id, client_info.model_dump(mode='json'))
-        logger.info(f"Registered MCP client: {client_info.client_id}, redirect_uris={client_info.redirect_uris}")
+        await self.session_store.set(
+            "clients", client_info.client_id, client_info.model_dump(mode="json")
+        )
+        logger.info(
+            f"Registered MCP client: {client_info.client_id}, "
+            f"redirect_uris={client_info.redirect_uris}"
+        )
 
     async def authorize(
         self, client: OAuthClientInformationFull, params: AuthorizationParams
     ) -> str:
-        """
-        Start OAuth flow by redirecting to GitHub.
-        MCP client will open this URL in a browser.
-        """
+        """Start OAuth flow by redirecting to GitHub."""
         logger.info(f"Authorization requested by client: {client.client_id}")
-        logger.debug(f"Auth params: redirect_uri={params.redirect_uri}, state={params.state}")
+        logger.debug(
+            f"Auth params: redirect_uri={params.redirect_uri}, state={params.state}"
+        )
 
         # Generate state to track this authorization request
         state = secrets.token_urlsafe(32)
@@ -95,12 +109,12 @@ class GitHubOAuthProvider(
         # Build GitHub OAuth URL
         # We'll redirect back to our server's callback, which will then redirect to the MCP client
         github_auth_url = (
-            f"https://github.com/login/oauth/authorize"
+            "https://github.com/login/oauth/authorize"
             f"?client_id={self.github_client_id}"
             f"&redirect_uri={self.base_url}/oauth/github/callback"
             f"&state={state}"
-            f"&scope=read:user repo" # we could add read:org if we want to check org membership
-        )
+            f"&scope=read:user repo"
+        )  # we could add read:org if we want to check org membership
 
         logger.debug(f"Redirecting to GitHub OAuth: {github_auth_url[:100]}...")
 
@@ -135,8 +149,10 @@ class GitHubOAuthProvider(
 
             # Store authorization code and GitHub token in SessionStore
             # Use model_dump() to ensure proper serialization (AnyUrl -> string)
-            await self.session_store.set('auth_codes', auth_code, auth_code_obj.model_dump(mode='json'))
-            await self.session_store.set('github_tokens', auth_code, github_token)
+            await self.session_store.set(
+                "auth_codes", auth_code, auth_code_obj.model_dump(mode="json")
+            )
+            await self.session_store.set("github_tokens", auth_code, github_token)
 
             # Redirect back to MCP client
             redirect_url = str(params.redirect_uri)
@@ -151,13 +167,16 @@ class GitHubOAuthProvider(
             if self.web_callback_handler:
                 return await self.web_callback_handler(code, state)
             else:
-                raise AuthorizeError("invalid_request", "Invalid state parameter - not MCP OAuth and no web handler configured")
+                raise AuthorizeError(
+                    "invalid_request",
+                    "Invalid state parameter - not MCP OAuth and no web handler configured",
+                )
 
     async def load_authorization_code(
         self, client: OAuthClientInformationFull, authorization_code: str
     ) -> AuthorizationCode | None:
         """Load MCP authorization code."""
-        code_dict = await self.session_store.get('auth_codes', authorization_code)
+        code_dict = await self.session_store.get("auth_codes", authorization_code)
         if code_dict and isinstance(code_dict, dict):
             code = AuthorizationCode(**code_dict)
             if code.client_id == client.client_id:
@@ -172,13 +191,13 @@ class GitHubOAuthProvider(
         code_str = authorization_code.code
 
         # Get GitHub token from SessionStore
-        github_token = await self.session_store.get('github_tokens', code_str)
+        github_token = await self.session_store.get("github_tokens", code_str)
         if not github_token:
             raise TokenError("invalid_grant", "Authorization code not found")
 
         # Clean up used code and token
-        await self.session_store.delete('auth_codes', code_str)
-        await self.session_store.delete('github_tokens', code_str)
+        await self.session_store.delete("auth_codes", code_str)
+        await self.session_store.delete("github_tokens", code_str)
 
         # Generate MCP access token
         access_token_str = secrets.token_urlsafe(32)
@@ -194,8 +213,10 @@ class GitHubOAuthProvider(
 
         # Store access token and GitHub token in SessionStore
         # Use model_dump() to ensure proper serialization
-        await self.session_store.set('access_tokens', access_token_str, access_token.model_dump(mode='json'))
-        await self.session_store.set('github_tokens', access_token_str, github_token)
+        await self.session_store.set(
+            "access_tokens", access_token_str, access_token.model_dump(mode="json")
+        )
+        await self.session_store.set("github_tokens", access_token_str, github_token)
 
         logger.info(f"Issued access token for client {client.client_id}")
 
@@ -203,7 +224,9 @@ class GitHubOAuthProvider(
             access_token=access_token_str,
             token_type="Bearer",
             expires_in=expires_in,
-            scope=" ".join(authorization_code.scopes) if authorization_code.scopes else None,
+            scope=" ".join(authorization_code.scopes)
+            if authorization_code.scopes
+            else None,
         )
 
     async def exchange_refresh_token(
@@ -222,7 +245,7 @@ class GitHubOAuthProvider(
             if username:
                 logger.info(f"Valid API key for user: {username}")
                 # Store username for audit logging
-                await self.session_store.set('token_users', token, username)
+                await self.session_store.set("token_users", token, username)
                 # Return a synthetic AccessToken (API keys don't expire)
                 return AccessToken(
                     token=token,
@@ -235,7 +258,7 @@ class GitHubOAuthProvider(
                 return None
 
         # Otherwise, treat as OAuth token - get from SessionStore
-        access_dict = await self.session_store.get('access_tokens', token)
+        access_dict = await self.session_store.get("access_tokens", token)
         if not access_dict or not isinstance(access_dict, dict):
             logger.warning(f"Token not found: {token[:20]}...")
             return None
@@ -247,7 +270,7 @@ class GitHubOAuthProvider(
             return None
 
         # Verify with GitHub
-        github_token = await self.session_store.get('github_tokens', token)
+        github_token = await self.session_store.get("github_tokens", token)
         if not github_token:
             logger.error(f"No GitHub token found for access token: {token[:20]}...")
             return None
@@ -255,11 +278,11 @@ class GitHubOAuthProvider(
         try:
             # Verify user
             user_data = await self.get_github_user(github_token)
-            username = user_data.get('login')
+            username = user_data.get("login")
             logger.info(f"GitHub user: {username} (id: {user_data.get('id')})")
 
             # Store username for this token
-            await self.session_store.set('token_users', token, username)
+            await self.session_store.set("token_users", token, username)
 
             # Check repository access if required
             if self.required_repo:
@@ -268,7 +291,9 @@ class GitHubOAuthProvider(
                 if has_access:
                     logger.info(f"User {username} has access to {self.required_repo}")
                 else:
-                    logger.warning(f"User {username} does NOT have access to {self.required_repo}")
+                    logger.warning(
+                        f"User {username} does NOT have access to {self.required_repo}"
+                    )
                     return None
         except AuthorizeError as e:
             logger.warning(f"GitHub verification failed: {e.description}")
@@ -279,28 +304,17 @@ class GitHubOAuthProvider(
 
     async def get_active_sessions_count(self) -> int:
         """Get count of active sessions."""
-        return await self.session_store.count_items('access_tokens')
+        return await self.session_store.count_items("access_tokens")
 
     async def get_username_for_token(self, token: str) -> str | None:
         """Get GitHub username for a given access token."""
-        return await self.session_store.get('token_users', token)
+        return await self.session_store.get("token_users", token)
 
     # GitHub API helper methods (shared between OAuth and admin)
-    async def exchange_github_code(self, code: str, client_secret: bool = True) -> str:
-        """
-        Exchange GitHub authorization code for GitHub access token.
-
-        Args:
-            code: GitHub authorization code
-            client_secret: Whether to include client_secret (True for confidential clients,
-                          False for PKCE flows - though we always use client_secret in this app)
-
-        Returns:
-            GitHub access token
-
-        Raises:
-            AuthorizeError: If exchange fails
-        """
+    async def exchange_github_code(
+        self, code: str, client_secret: bool = True
+    ) -> str:
+        """Exchange GitHub authorization code for GitHub access token."""
         async with httpx.AsyncClient() as http_client:
             data = {
                 "client_id": self.github_client_id,
@@ -317,45 +331,30 @@ class GitHubOAuthProvider(
             github_data = response.json()
 
         if "error" in github_data:
-            raise AuthorizeError("access_denied", github_data.get("error_description", "Unknown error"))
+            raise AuthorizeError(
+                "access_denied", github_data.get("error_description", "Unknown error")
+            )
 
         return github_data["access_token"]
 
     async def get_github_user(self, github_token: str) -> dict[str, Any]:
-        """
-        Get GitHub user information from access token.
-
-        Args:
-            github_token: GitHub access token
-
-        Returns:
-            GitHub user data dict with 'login', 'id', etc.
-
-        Raises:
-            AuthorizeError: If user info fetch fails
-        """
+        """Get GitHub user information from access token."""
         async with httpx.AsyncClient() as client:
             response = await client.get(
                 "https://api.github.com/user",
                 headers={"Authorization": f"Bearer {github_token}"},
             )
             if response.status_code != 200:
-                raise AuthorizeError("access_denied", f"Failed to get user info: {response.status_code}")
+                raise AuthorizeError(
+                    "access_denied", f"Failed to get user info: {response.status_code}"
+                )
 
             return response.json()
 
-    async def verify_repo_access(self, github_token: str, repo: str | None = None, require_admin: bool = False) -> bool:
-        """
-        Verify user has access to a GitHub repository.
-
-        Args:
-            github_token: GitHub access token
-            repo: Repository in 'owner/repo' format (defaults to self.required_repo)
-            require_admin: If True, require admin permissions on the repo
-
-        Returns:
-            True if user has access (and admin permission if required), False otherwise
-        """
+    async def verify_repo_access(
+        self, github_token: str, repo: str | None = None, require_admin: bool = False
+    ) -> bool:
+        """Verify user has access to a GitHub repository."""
         repo = repo or self.required_repo
         if not repo:
             return True  # No repo restriction
@@ -375,3 +374,5 @@ class GitHubOAuthProvider(
                 return permissions.get("admin", False)
 
             return True
+
+

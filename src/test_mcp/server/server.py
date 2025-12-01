@@ -1,4 +1,4 @@
-"""Minimal MCP server with OAuth and HTTPS using FastMCP."""
+"""MCP server application with OAuth and HTTPS using FastMCP."""
 
 from dotenv import load_dotenv
 
@@ -9,6 +9,7 @@ import logging
 import os
 from mcp.server.fastmcp import FastMCP
 from mcp.server.auth.settings import AuthSettings, ClientRegistrationOptions
+
 from .oauth import GitHubOAuthProvider
 from . import html_templates
 from . import audit
@@ -31,6 +32,7 @@ logging.getLogger("test_mcp").setLevel(MCP_LOG_LEVEL)
 # Setup audit logging to file if path is set
 if AUDIT_LOG_FILE:
     from pathlib import Path
+
     audit_log_path = Path(AUDIT_LOG_FILE)
     audit_log_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -65,12 +67,7 @@ mcp = FastMCP(
 
 @mcp.tool()
 def generate_html(title: str, content: str) -> str:
-    """Generate simple HTML page.
-
-    Args:
-        title: Page title
-        content: Page content
-    """
+    """Generate simple HTML page."""
     html = f"""<!DOCTYPE html>
 <html>
 <head><title>{title}</title></head>
@@ -82,6 +79,69 @@ def generate_html(title: str, content: str) -> str:
     return html
 
 
+@mcp.tool()
+def kb_get_document(
+    identifier: str | None = None,
+    uuid: str | None = None,
+    source_id: str | None = None,
+    doc_id: str | None = None,
+) -> str:
+    """Get a document from the knowledge base."""
+    from ..kb import get
+    import json
+
+    try:
+        result = get(
+            identifier=identifier,
+            uuid=uuid,
+            source_id=source_id,
+            doc_id=doc_id,
+        )
+
+        if result is None:
+            return json.dumps({"error": "Document not found"}, indent=2)
+
+        if isinstance(result, list):
+            return json.dumps(
+                {
+                    "count": len(result),
+                    "documents": [
+                        {
+                            "id": doc.id,
+                            "source_id": doc.source_id,
+                            "doc_id": doc.doc_id,
+                            "uri": doc.uri,
+                            "source_type": doc.source_type,
+                            "text_preview": doc.text[:500] if doc.text else None,
+                        }
+                        for doc in result
+                    ],
+                },
+                indent=2,
+            )
+        else:
+            doc = result
+            return json.dumps(
+                {
+                    "id": doc.id,
+                    "source_id": doc.source_id,
+                    "doc_id": doc.doc_id,
+                    "uri": doc.uri,
+                    "source_type": doc.source_type,
+                    "doc_type": doc.doc_type,
+                    "text": doc.text,
+                    "meta": doc.meta,
+                    "insert_time": doc.insert_time.isoformat()
+                    if doc.insert_time
+                    else None,
+                },
+                indent=2,
+            )
+    except Exception as e:
+        logger.error(f"Error in kb_get_document: {e}", exc_info=True)
+        return json.dumps({"error": str(e)}, indent=2)
+
+
 @mcp.resource("status://live")
 async def server_status() -> str:
     """Get live server status with current timestamp."""
@@ -90,32 +150,30 @@ async def server_status() -> str:
 
     now = datetime.now()
     active_sessions = await oauth_provider.get_active_sessions_count()
-    return json.dumps({
-        "server": "test-mcp",
-        "timestamp": now.strftime("%Y-%m-%d %H:%M:%S"),
-        "uptime_info": "Server is running",
-        "active_sessions": active_sessions,
-        "base_url": BASE_URL,
-    }, indent=2)
+    return json.dumps(
+        {
+            "server": "test-mcp",
+            "timestamp": now.strftime("%Y-%m-%d %H:%M:%S"),
+            "uptime_info": "Server is running",
+            "active_sessions": active_sessions,
+            "base_url": BASE_URL,
+        },
+        indent=2,
+    )
 
 
 @mcp.resource("log://{name}")
 def read_log(name: str) -> str:
-    """Read a log file by name.
-
-    Args:
-        name: Log file name
-    """
-    return f"This is the content of the {name} log file.\nExample log entry: [2025-01-29 12:00:00] INFO: Sample log message"
+    """Read a log file by name."""
+    return (
+        f"This is the content of the {name} log file.\n"
+        "Example log entry: [2025-01-29 12:00:00] INFO: Sample log message"
+    )
 
 
 @mcp.prompt()
 def webpage_prompt(topic: str) -> str:
-    """Generate a prompt for creating a webpage about a topic.
-
-    Args:
-        topic: The topic for the webpage
-    """
+    """Generate a prompt for creating a webpage about a topic."""
     return f"Create a simple HTML webpage about {topic} using the generate_html tool."
 
 
@@ -128,9 +186,6 @@ def main():
     from starlette.requests import Request
 
     app = mcp.streamable_http_app()
-
-    # Note: SessionStore automatically loads data at initialization (for disk storage)
-    # No need for explicit startup event - loading happens in SessionStore.__init__
 
     # Audit and debug middleware
     class AuditMiddleware(BaseHTTPMiddleware):
@@ -157,7 +212,10 @@ def main():
                         rpc_request = json.loads(body)
 
                         # Check if this is a tool call (tools/call method)
-                        if isinstance(rpc_request, dict) and rpc_request.get("method") == "tools/call":
+                        if (
+                            isinstance(rpc_request, dict)
+                            and rpc_request.get("method") == "tools/call"
+                        ):
                             params = rpc_request.get("params", {})
                             tool_name = params.get("name", "unknown")
                             tool_args = params.get("arguments", {})
@@ -167,8 +225,10 @@ def main():
 
                         # Reconstruct request with body
                         scope = request.scope
+
                         async def receive():
                             return {"type": "http.request", "body": body}
+
                         request = Request(scope, receive)
                     except Exception as e:
                         logger.error(f"Error parsing request for audit: {e}")
@@ -196,7 +256,11 @@ def main():
     async def root(request):
         active_sessions = await oauth_provider.get_active_sessions_count()
         username = await web_session_manager.get_session_username(request)
-        return HTMLResponse(html_templates.root_page(active_sessions, oauth_provider.required_repo, username))
+        return HTMLResponse(
+            html_templates.root_page(
+                active_sessions, oauth_provider.required_repo, username
+            )
+        )
 
     # GitHub OAuth callback - handles redirect from GitHub
     @app.route("/oauth/github/callback")
@@ -211,7 +275,7 @@ def main():
             # Handle GitHub callback (returns either string URL or RedirectResponse)
             result = await oauth_provider.handle_github_callback(code, state)
             # If it's already a Response object (web login), return it directly
-            if hasattr(result, 'status_code'):
+            if hasattr(result, "status_code"):
                 return result
             # Otherwise it's a URL string (MCP OAuth), wrap in RedirectResponse
             return RedirectResponse(result)
@@ -226,6 +290,7 @@ def main():
 
     # Setup shared web session manager for admin and web interfaces
     from .web_auth import WebSessionManager, setup_shared_auth_routes
+
     web_session_manager = WebSessionManager(oauth_provider)
 
     # Setup unified login/logout routes and get callback handler
@@ -237,6 +302,7 @@ def main():
 
     # Setup web routes (OAuth protected web interface for interactive tools)
     from . import web
+
     web.setup_web_routes(app, oauth_provider, web_session_manager)
 
     if USE_HTTPS:
@@ -259,3 +325,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+

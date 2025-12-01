@@ -1,7 +1,8 @@
-"""Protected web interface for interactive MCP tool usage (OAuth protected via GitHub)."""
+"""Protected web interface for interactive MCP tool usage (server package)."""
 
 import logging
 from starlette.responses import HTMLResponse, RedirectResponse
+
 from .web_auth import WebSessionManager
 
 logger = logging.getLogger(__name__)
@@ -21,7 +22,8 @@ def setup_web_routes(app, oauth_provider, session_manager: WebSessionManager):
         # Get auth warning banner
         auth_warning = session_manager.get_auth_warning_html()
 
-        return HTMLResponse(f"""
+        return HTMLResponse(
+            f"""
 <!DOCTYPE html>
 <html>
 <head>
@@ -48,4 +50,7 @@ def setup_web_routes(app, oauth_provider, session_manager: WebSessionManager):
     <p><a href="/">← Back to Home</a></p>
 </body>
 </html>
-        """)
+        """
+        )
+
+

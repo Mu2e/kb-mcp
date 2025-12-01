@@ -78,6 +78,7 @@ def root_page(active_sessions: int, required_repo: str, username: str | None = N
         <ul>
             <li><a href="/admin"><code>/admin</code></a> - API Key Management (requires admin permissions)</li>
             <li><a href="/web"><code>/web</code></a> - Interactive Web Interface (requires repository access)</li>
+            <li><a href="/kb"><code>/kb</code></a> - Knowledge Base (requires repository access)</li>
         </ul>
     </div>
 
@@ -109,3 +110,5 @@ def status_page(active_sessions: int) -> str:
     <p>OAuth is handled automatically by MCP clients</p>
 </body>
 </html>"""
+
+

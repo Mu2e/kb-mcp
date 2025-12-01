@@ -9,8 +9,8 @@ COPY pyproject.toml .
 COPY README.md .
 COPY src/ ./src/
 
-# Install dependencies (including GCP extras for Firestore support)
-RUN pip install --no-cache-dir -e ".[gcp]"
+# Install dependencies (server, kb, and GCP extras for Firestore support)
+RUN pip install --no-cache-dir -e ".[server,kb,gcp]"
 
 # Create data directory for API keys
 RUN mkdir -p /app/data

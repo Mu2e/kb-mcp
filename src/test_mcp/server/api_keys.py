@@ -1,4 +1,6 @@
-"""API key management for MCP server."""
+"""API key management for MCP server (server package)."""
+
+from __future__ import annotations
 
 import json
 import secrets
@@ -9,6 +11,7 @@ from typing import TypedDict
 
 class ApiKeyInfo(TypedDict):
     """API key information stored in keys file."""
+
     username: str
     description: str
     created: str
@@ -106,3 +109,5 @@ class ApiKeyManager:
             self._save_keys(keys)
             return True
         return False
+
+

@@ -5,7 +5,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from . import add, add_source, get
+from . import add, add_source, get, get_stats, list_sources
 from .core import Source
 from .database import get_db_session
 from ..parser import parse
@@ -37,14 +37,22 @@ def cmd_add(args):
     print(f"Processing file: {file_path}")
 
     # Parse document (MIME type will be auto-detected)
+    # Note: parse() returns List[dict] - we use the first (main) document
     try:
-        result = parse(file_path)
-        text_content = result['text']
-        mime_type = result['mime_type']
+        doc_dicts = parse(file_path)
+        if not doc_dicts:
+            raise ValueError("No documents extracted from file")
+        
+        main_doc = doc_dicts[0]
+        text_content = main_doc.get('text', '')
+        mime_type = main_doc.get('source_type', '')
+        
         print(f"  Detected MIME type: {mime_type}")
-        print(f"  Parser: {result['parser']}")
         if not text_content:
             print(f"  Warning: No text extracted from {file_path}")
+        
+        if len(doc_dicts) > 1:
+            print(f"  Note: {len(doc_dicts) - 1} image document(s) also extracted")
     except NotImplementedError as e:
         print(f"Error: Unsupported file type: {e}")
         sys.exit(1)
@@ -128,33 +136,50 @@ def cmd_get(args):
 
 def cmd_stats(args):
     """Show knowledge base statistics."""
-    from .database import get_db_session
-    from .core import Document, Source
+    import json
+    
+    stats = get_stats()
+    
+    if args.json:
+        print(json.dumps(stats, indent=2))
+    else:
+        print("Knowledge Base Statistics")
+        print("=" * 40)
+        print(f"Total documents: {stats['total_documents']}")
+        print(f"Total sources: {stats['total_sources']}")
+        print()
+        if stats['documents_by_source']:
+            print("Documents by source:")
+            for item in stats['documents_by_source']:
+                print(f"  {item['source_id']}: {item['count']}")
 
-    with get_db_session() as session:
-        # Count documents
-        doc_count = session.query(Document).count()
-        
-        # Count sources
-        source_count = session.query(Source).count()
-        
-        # Count by source
-        from sqlalchemy import func
-        docs_by_source = (
-            session.query(Document.source_id, func.count(Document.id))
-            .group_by(Document.source_id)
-            .all()
-        )
 
-    print("Knowledge Base Statistics")
-    print("=" * 40)
-    print(f"Total documents: {doc_count}")
-    print(f"Total sources: {source_count}")
-    print()
-    if docs_by_source:
-        print("Documents by source:")
-        for source_id, count in docs_by_source:
-            print(f"  {source_id}: {count}")
+def cmd_source_list(args):
+    """List all sources."""
+    import json
+    
+    sources = list_sources()
+    
+    if args.json:
+        print(json.dumps(sources, indent=2))
+    else:
+        if not sources:
+            print("No sources found")
+            return
+        
+        print("Sources")
+        print("=" * 40)
+        for source in sources:
+            print(f"ID: {source['id']}")
+            if source['name']:
+                print(f"  Name: {source['name']}")
+            if source['description']:
+                print(f"  Description: {source['description']}")
+            if source['base_uri']:
+                print(f"  Base URI: {source['base_uri']}")
+            if source['created_at']:
+                print(f"  Created: {source['created_at']}")
+            print()
 
 
 def main():
@@ -178,6 +203,11 @@ def main():
 
     # Stats command
     stats_parser = subparsers.add_parser("stats", help="Show knowledge base statistics")
+    stats_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output statistics as JSON"
+    )
 
     # Source command
     source_parser = subparsers.add_parser("source", help="Manage sources")
@@ -188,6 +218,13 @@ def main():
     source_add_parser.add_argument("--name", help="Source name")
     source_add_parser.add_argument("--description", help="Source description")
     source_add_parser.add_argument("--base-uri", help="Base URI for the source")
+    
+    source_list_parser = source_subparsers.add_parser("list", help="List all sources")
+    source_list_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output as JSON"
+    )
 
     args = parser.parse_args()
 
@@ -216,6 +253,8 @@ def main():
             except Exception as e:
                 print(f"Error: {e}")
                 sys.exit(1)
+        elif args.source_command == "list":
+            cmd_source_list(args)
         else:
             source_parser.print_help()
             sys.exit(1)
