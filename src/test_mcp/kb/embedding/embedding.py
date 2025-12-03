@@ -573,3 +573,224 @@ def get_embedding_vector(
         except (ValueError, Exception):
             return None
 
+
+def optimize_embedding_index(embedding_name: str, session=None) -> Dict[str, Any]:
+    """
+    Optimize IVFFlat index for an embedding table by recalculating optimal 'lists' parameter.
+    
+    IVFFlat indexes work best when the 'lists' parameter is optimized based on the number
+    of embeddings. This function:
+    1. Counts embeddings in the table
+    2. Calculates optimal 'lists' parameter (roughly sqrt(count) or count/1000, min 10, max 1000)
+    3. Rebuilds the index with the optimized parameter
+    
+    Args:
+        embedding_name: Short name of the embedding (e.g., "openai-small")
+        session: Optional database session. If None, creates a new session.
+        
+    Returns:
+        Dictionary with optimization results:
+        {
+            "embedding_name": str,
+            "embedding_count": int,
+            "optimal_lists": int,
+            "index_rebuilt": bool,
+            "message": str
+        }
+        
+    Example:
+        >>> from test_mcp.kb.embedding import optimize_embedding_index
+        >>> result = optimize_embedding_index("openai-small")
+        >>> print(result["message"])
+    """
+    from sqlalchemy import text
+    
+    if session is None:
+        session = get_db_session()
+        should_close = True
+    else:
+        should_close = False
+    
+    try:
+        config, embedding_table = _get_embedding_table(session, embedding_name)
+        dialect_name = session.bind.dialect.name
+        
+        if dialect_name != 'postgresql':
+            return {
+                "embedding_name": embedding_name,
+                "embedding_count": 0,
+                "optimal_lists": None,
+                "index_rebuilt": False,
+                "message": f"Index optimization only supported for PostgreSQL (current: {dialect_name})"
+            }
+        
+        inspector = sqlalchemy_inspect(session.bind)
+        if not _table_exists(inspector, embedding_table.name):
+            return {
+                "embedding_name": embedding_name,
+                "embedding_count": 0,
+                "optimal_lists": None,
+                "index_rebuilt": False,
+                "message": f"Table {embedding_table.name} does not exist"
+            }
+        
+        # Count embeddings
+        count_stmt = select(func.count()).select_from(embedding_table)
+        embedding_count = session.execute(count_stmt).scalar() or 0
+        
+        if embedding_count == 0:
+            return {
+                "embedding_name": embedding_name,
+                "embedding_count": 0,
+                "optimal_lists": None,
+                "index_rebuilt": False,
+                "message": f"No embeddings found in {embedding_table.name}"
+            }
+        
+        # Calculate optimal lists parameter
+        # Rule of thumb: lists = sqrt(count) or count/1000, with bounds
+        # pgvector docs recommend: lists = rows / 1000 for up to 1M rows, then rows / sqrt(rows)
+        if embedding_count <= 1000:
+            optimal_lists = max(10, embedding_count // 100)  # At least 10, roughly 1% of count
+        elif embedding_count <= 1000000:
+            optimal_lists = min(1000, max(10, embedding_count // 1000))  # rows / 1000, capped at 1000
+        else:
+            import math
+            optimal_lists = min(1000, max(10, int(math.sqrt(embedding_count))))  # sqrt(rows), capped at 1000
+        
+        index_name = f"{embedding_table.name}_vector_idx"
+        
+        # Check current index
+        indexes = inspector.get_indexes(embedding_table.name)
+        index_exists = any(idx['name'] == index_name for idx in indexes)
+        
+        if not index_exists:
+            # Create index if it doesn't exist
+            try:
+                session.execute(text(f"""
+                    CREATE INDEX {index_name}
+                    ON {embedding_table.name}
+                    USING ivfflat (embedding vector_cosine_ops)
+                    WITH (lists = {optimal_lists})
+                """))
+                session.commit()
+                return {
+                    "embedding_name": embedding_name,
+                    "embedding_count": embedding_count,
+                    "optimal_lists": optimal_lists,
+                    "index_rebuilt": True,
+                    "message": f"Created IVFFlat index with lists={optimal_lists} for {embedding_count} embeddings"
+                }
+            except Exception as e:
+                return {
+                    "embedding_name": embedding_name,
+                    "embedding_count": embedding_count,
+                    "optimal_lists": optimal_lists,
+                    "index_rebuilt": False,
+                    "message": f"Failed to create index: {e}"
+                }
+        
+        # Rebuild index with optimized parameter
+        try:
+            # Drop and recreate index
+            session.execute(text(f"DROP INDEX IF EXISTS {index_name}"))
+            session.execute(text(f"""
+                CREATE INDEX {index_name}
+                ON {embedding_table.name}
+                USING ivfflat (embedding vector_cosine_ops)
+                WITH (lists = {optimal_lists})
+            """))
+            session.commit()
+            
+            return {
+                "embedding_name": embedding_name,
+                "embedding_count": embedding_count,
+                "optimal_lists": optimal_lists,
+                "index_rebuilt": True,
+                "message": f"Rebuilt IVFFlat index with lists={optimal_lists} for {embedding_count} embeddings"
+            }
+        except Exception as e:
+            session.rollback()
+            return {
+                "embedding_name": embedding_name,
+                "embedding_count": embedding_count,
+                "optimal_lists": optimal_lists,
+                "index_rebuilt": False,
+                "message": f"Failed to rebuild index: {e}"
+            }
+    finally:
+        if should_close:
+            session.close()
+
+
+def vacuum_analyze_embedding_table(embedding_name: str, session=None) -> Dict[str, Any]:
+    """
+    Run VACUUM ANALYZE on an embedding table to update PostgreSQL statistics.
+    
+    This is important for query planning, especially after bulk inserts or updates.
+    VACUUM ANALYZE updates table statistics that PostgreSQL uses to choose optimal query plans.
+    
+    Args:
+        embedding_name: Short name of the embedding (e.g., "openai-small")
+        session: Optional database session. If None, creates a new session.
+        
+    Returns:
+        Dictionary with results:
+        {
+            "embedding_name": str,
+            "vacuumed": bool,
+            "message": str
+        }
+        
+    Example:
+        >>> from test_mcp.kb.embedding import vacuum_analyze_embedding_table
+        >>> result = vacuum_analyze_embedding_table("openai-small")
+    """
+    from sqlalchemy import text
+    
+    if session is None:
+        session = get_db_session()
+        should_close = True
+    else:
+        should_close = False
+    
+    try:
+        config, embedding_table = _get_embedding_table(session, embedding_name)
+        dialect_name = session.bind.dialect.name
+        
+        if dialect_name != 'postgresql':
+            return {
+                "embedding_name": embedding_name,
+                "vacuumed": False,
+                "message": f"VACUUM ANALYZE only supported for PostgreSQL (current: {dialect_name})"
+            }
+        
+        inspector = sqlalchemy_inspect(session.bind)
+        if not _table_exists(inspector, embedding_table.name):
+            return {
+                "embedding_name": embedding_name,
+                "vacuumed": False,
+                "message": f"Table {embedding_table.name} does not exist"
+            }
+        
+        try:
+            # VACUUM ANALYZE updates statistics for query planning
+            session.execute(text(f"VACUUM ANALYZE {embedding_table.name}"))
+            session.commit()
+            
+            return {
+                "embedding_name": embedding_name,
+                "vacuumed": True,
+                "message": f"VACUUM ANALYZE completed for {embedding_table.name}"
+            }
+        except Exception as e:
+            session.rollback()
+            return {
+                "embedding_name": embedding_name,
+                "vacuumed": False,
+                "message": f"Failed to run VACUUM ANALYZE: {e}"
+            }
+    finally:
+        if should_close:
+            session.close()
+

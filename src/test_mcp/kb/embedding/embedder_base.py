@@ -157,6 +157,34 @@ class BaseEmbedder(ABC):
             # Get dialect name for later use
             dialect_name = session.bind.dialect.name
             
+            # Create IVFFlat index for PostgreSQL with pgvector (for efficient vector similarity search)
+            if dialect_name == 'postgresql':
+                from sqlalchemy import text, inspect as sqlalchemy_inspect
+                index_name = f"{embedding_table.name}_vector_idx"
+                inspector = sqlalchemy_inspect(session.bind)
+                
+                # Check if index already exists
+                indexes = inspector.get_indexes(embedding_table.name)
+                index_exists = any(idx['name'] == index_name for idx in indexes)
+                
+                if not index_exists:
+                    try:
+                        # Create IVFFlat index with cosine distance operator
+                        # lists = 250 is a reasonable default (can be optimized later based on data size)
+                        # vector_cosine_ops is the operator class for cosine distance
+                        session.execute(text(f"""
+                            CREATE INDEX IF NOT EXISTS {index_name}
+                            ON {embedding_table.name}
+                            USING ivfflat (embedding vector_cosine_ops)
+                            WITH (lists = 250)
+                        """))
+                        session.flush()
+                        logger.info(f"Created IVFFlat index {index_name} for {embedding_table.name}")
+                    except Exception as e:
+                        # If pgvector extension isn't available or index creation fails, log and continue
+                        logger.warning(f"Could not create IVFFlat index for {embedding_table.name}: {e}")
+                        logger.debug("This is OK if pgvector extension is not installed or if index already exists")
+            
             # For existing SQLite tables, ensure the unique index exists
             # SQLite requires a unique index (not just constraint) for ON CONFLICT to work
             if dialect_name == 'sqlite':

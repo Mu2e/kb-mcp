@@ -48,3 +48,10 @@ if Chunk is not None:
 if get_statistics is not None:
     __all__.append("get_statistics")
 
+# Import search function if available
+try:
+    from .search import search
+    __all__.append("search")
+except ImportError:
+    search = None
+
