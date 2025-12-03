@@ -5,6 +5,12 @@ from .core import Document, Source
 from .database import get_db_session, init_db
 from .utils import deduplicate, find_all_duplicates, get_stats, list_sources
 
+# Import statistics if available
+try:
+    from .statistics import get_statistics
+except ImportError:
+    get_statistics = None
+
 # Import embedding models to ensure they're registered with Base.metadata
 # This ensures database tables are created when init_db() is called
 try:
@@ -37,4 +43,8 @@ __all__ = [
 # Conditionally add embedding models to exports if available
 if Chunk is not None:
     __all__.extend(["Chunk", "EmbeddingConfig"])
+
+# Conditionally add statistics function if available
+if get_statistics is not None:
+    __all__.append("get_statistics")
 

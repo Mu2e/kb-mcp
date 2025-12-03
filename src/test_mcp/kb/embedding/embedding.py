@@ -1,5 +1,6 @@
 """Embedding utilities for embedding module."""
 
+import logging
 from typing import List, Optional, Dict, Any, Union
 from .core import Chunk, EmbeddingConfig
 from ..database import get_db_session

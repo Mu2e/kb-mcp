@@ -333,3 +333,340 @@ function escapeHtml(text) {
     div.textContent = text;
     return div.innerHTML;
 }
+
+// Reusable form loading indicator
+// Sets up a loading indicator for form submissions
+// Args:
+//   formId: ID of the form element
+//   submitButtonId: ID of the submit button
+//   statusContainerId: ID of the container to show loading message
+//   loadingMessage: Optional custom loading message (default: "Processing, please wait...")
+function setupFormLoadingIndicator(formId, submitButtonId, statusContainerId, loadingMessage) {
+    const form = document.getElementById(formId);
+    const submitBtn = document.getElementById(submitButtonId);
+    const statusContainer = document.getElementById(statusContainerId);
+    
+    if (!form || !submitBtn || !statusContainer) {
+        console.warn('Form loading indicator: Missing required elements', {formId, submitButtonId, statusContainerId});
+        return;
+    }
+    
+    form.addEventListener('submit', function(e) {
+        // Disable submit button
+        submitBtn.disabled = true;
+        submitBtn.style.opacity = '0.6';
+        submitBtn.style.cursor = 'not-allowed';
+        const originalText = submitBtn.textContent;
+        submitBtn.textContent = 'Processing...';
+        
+        // Show loading indicator
+        const message = loadingMessage || 'Processing, please wait...';
+        statusContainer.innerHTML = `
+            <div class="info-box" style="display: flex; align-items: center; gap: 10px; margin-top: 15px;">
+                <div style="border: 3px solid #f3f3f3; border-top: 3px solid #4CAF50; border-radius: 50%; width: 20px; height: 20px; animation: spin 1s linear infinite; flex-shrink: 0;"></div>
+                <div>${escapeHtml(message)}</div>
+            </div>
+            <style>
+            @keyframes spin {
+                0% { transform: rotate(0deg); }
+                100% { transform: rotate(360deg); }
+            }
+            </style>
+        `;
+        
+        // Store original button text for potential reset (though redirect should happen)
+        submitBtn.dataset.originalText = originalText;
+    });
+}
+
+// Chunk highlighting functionality for document detail page
+function initChunkHighlighting(docId) {
+    const strategyRadios = document.querySelectorAll('input[name="chunk-strategy"]');
+    const chunkInfo = document.getElementById('chunk-info');
+    const chunkDetailsPanel = document.getElementById('chunk-details-panel');
+    const chunkDetailsContent = document.getElementById('chunk-details-content');
+    const textElement = document.getElementById('document-text');
+    let originalText = null;
+    let currentChunks = null;
+    let currentStrategy = null;
+    
+    if (!textElement) {
+        console.log('Text element not found');
+        return;
+    }
+    
+    if (!strategyRadios || strategyRadios.length === 0) {
+        console.log('Strategy radios not found - chunking may not be available');
+        return;
+    }
+    
+    // Store original text
+    originalText = textElement.textContent;
+    console.log('Chunk highlighting initialized for document', docId);
+    
+    // Initially hide chunk details panel - will be shown when chunks are loaded
+    if (chunkDetailsPanel) {
+        chunkDetailsPanel.style.display = 'none';
+    }
+    
+    // Load chunks when strategy is selected
+    strategyRadios.forEach(radio => {
+        radio.addEventListener('change', async function() {
+            if (!this.checked) return;
+            const strategy = this.value;
+            currentStrategy = strategy;
+            
+            // Update visual state of radio buttons
+            strategyRadios.forEach(r => {
+                const label = r.closest('label');
+                if (label) {
+                    label.style.background = r.checked ? '#f0f8ff' : '#fff';
+                }
+            });
+            
+            await loadChunksForStrategy(strategy);
+        });
+    });
+    
+    // Load chunks for selected strategy
+    async function loadChunksForStrategy(strategy) {
+        if (!strategy) {
+            clearChunkHighlights();
+            if (chunkInfo) chunkInfo.textContent = '';
+            // Hide chunk details panel when no strategy selected
+            if (chunkDetailsPanel) {
+                chunkDetailsPanel.style.display = 'none';
+            }
+            return;
+        }
+        
+        try {
+            console.log('Loading chunks for strategy:', strategy);
+            const response = await fetch(`/api/document/${docId}/chunks?strategy=${encodeURIComponent(strategy)}`);
+            if (!response.ok) {
+                const errorText = await response.text();
+                throw new Error(`Failed to load chunks: ${response.status} ${errorText}`);
+            }
+            
+            const data = await response.json();
+            console.log('Chunks response:', data);
+            currentChunks = data.chunks || [];
+            
+            if (chunkInfo) {
+                chunkInfo.textContent = `Loaded ${currentChunks.length} chunk(s)`;
+            }
+            
+            if (currentChunks.length > 0) {
+                console.log('Setting up highlights for', currentChunks.length, 'chunks');
+                // Show chunk details panel when chunks are available
+                if (chunkDetailsPanel) {
+                    chunkDetailsPanel.style.display = 'block';
+                    chunkDetailsContent.innerHTML = '<p>Hover over a highlighted chunk to see details.</p>';
+                }
+                setupChunkHighlights();
+            } else {
+                console.log('No chunks found for strategy:', strategy);
+                if (chunkInfo) chunkInfo.textContent = 'No chunks found for this strategy';
+                // Hide chunk details panel when no chunks
+                if (chunkDetailsPanel) {
+                    chunkDetailsPanel.style.display = 'none';
+                }
+            }
+        } catch (error) {
+            console.error('Error loading chunks:', error);
+            if (chunkInfo) chunkInfo.textContent = `Error: ${error.message}`;
+            // Hide panel on error
+            if (chunkDetailsPanel) {
+                chunkDetailsPanel.style.display = 'none';
+            }
+        }
+    }
+    
+    // Load chunks for default (first) strategy
+    const defaultRadio = document.querySelector('input[name="chunk-strategy"]:checked');
+    if (defaultRadio) {
+        loadChunksForStrategy(defaultRadio.value);
+    }
+    
+    function clearChunkHighlights() {
+        // Restore original text
+        if (originalText) {
+            textElement.textContent = originalText;
+        }
+    }
+    
+    function setupChunkHighlights() {
+        if (!currentChunks || currentChunks.length === 0 || !originalText) return;
+        
+        // Sort chunks by start index (ascending), then by end index (descending) for overlaps
+        const sortedChunks = [...currentChunks].sort((a, b) => {
+            const startDiff = (a.char_start_index || 0) - (b.char_start_index || 0);
+            if (startDiff !== 0) return startDiff;
+            return (b.char_end_index || 0) - (a.char_end_index || 0);
+        });
+        
+        // Build a structure to handle overlaps
+        // We'll create segments and track which chunks cover each segment
+        const segments = [];
+        const positions = new Set();
+        
+        // Collect all start and end positions
+        sortedChunks.forEach(chunk => {
+            positions.add(chunk.char_start_index || 0);
+            positions.add(chunk.char_end_index || originalText.length);
+        });
+        
+        const sortedPositions = Array.from(positions).sort((a, b) => a - b);
+        
+        // Create segments between positions
+        for (let i = 0; i < sortedPositions.length - 1; i++) {
+            const start = sortedPositions[i];
+            const end = sortedPositions[i + 1];
+            const coveringChunks = sortedChunks.filter(chunk => {
+                const chunkStart = chunk.char_start_index || 0;
+                const chunkEnd = chunk.char_end_index || originalText.length;
+                return chunkStart <= start && chunkEnd >= end;
+            });
+            segments.push({ start, end, chunks: coveringChunks });
+        }
+        
+        // Build HTML with proper overlap handling
+        let html = '';
+        for (const segment of segments) {
+            const segmentText = originalText.substring(segment.start, segment.end);
+            const numChunks = segment.chunks.length;
+            
+            if (numChunks === 0) {
+                // No chunks cover this segment
+                html += escapeHtml(segmentText);
+            } else if (numChunks === 1) {
+                // Single chunk - simple highlight
+                const chunk = segment.chunks[0];
+                const chunkIndex = (chunk.chunk_index !== null && chunk.chunk_index !== undefined) ? chunk.chunk_index : '';
+                html += `<span class="chunk-highlight chunk-single" data-chunk-index="${chunkIndex}" data-chunk-id="${chunk.id || ''}" title="Chunk #${chunkIndex} (tokens: ${chunk.token_length || 'N/A'})">${escapeHtml(segmentText)}</span>`;
+            } else {
+                // Multiple chunks overlap - use nested spans with different colors
+                const chunkIds = segment.chunks.map(c => {
+                    const idx = c.chunk_index;
+                    return (idx !== null && idx !== undefined) ? idx : '';
+                }).join(',');
+                const chunkTokens = segment.chunks.map(c => c.token_length || 'N/A').join(', ');
+                html += `<span class="chunk-highlight chunk-overlap" data-chunk-indices="${chunkIds}" data-overlap-count="${numChunks}" title="Overlapping chunks: #${chunkIds} (tokens: ${chunkTokens})">${escapeHtml(segmentText)}</span>`;
+            }
+        }
+        
+        // Update content
+        textElement.innerHTML = html;
+        
+        // Add CSS for overlap highlighting
+        if (!document.getElementById('chunk-highlight-styles')) {
+            const style = document.createElement('style');
+            style.id = 'chunk-highlight-styles';
+            style.textContent = `
+                .chunk-highlight {
+                    cursor: pointer;
+                    transition: background-color 0.2s;
+                }
+                .chunk-single {
+                    /* No default background - only show on hover */
+                }
+                .chunk-overlap {
+                    /* No default background - only show on hover */
+                }
+                .chunk-highlight:hover {
+                    background-color: rgba(255, 235, 59, 0.3) !important;
+                }
+                .chunk-overlap:hover {
+                    background-color: rgba(255, 152, 0, 0.4) !important;
+                    border-bottom: 2px solid rgba(255, 152, 0, 0.6) !important;
+                }
+            `;
+            document.head.appendChild(style);
+        }
+        
+        // Add hover event listeners
+        const highlights = textElement.querySelectorAll('.chunk-highlight');
+        highlights.forEach(span => {
+            span.addEventListener('mouseenter', function() {
+                const chunkIndex = this.getAttribute('data-chunk-index');
+                const chunkIndices = this.getAttribute('data-chunk-indices');
+                const overlapCount = parseInt(this.getAttribute('data-overlap-count') || '1');
+                
+                // Handle single or overlapping chunks
+                if (chunkIndex !== null && chunkIndex !== '') {
+                    // Single chunk
+                    const chunkIndexNum = chunkIndex === '' ? null : parseInt(chunkIndex);
+                    const chunk = currentChunks.find(c => {
+                        if (chunkIndexNum !== null) {
+                            return c.chunk_index === chunkIndexNum;
+                        }
+                        return false;
+                    });
+                    if (chunkDetailsContent && chunk) {
+                        const charStart = chunk.char_start_index || 0;
+                        const charEnd = chunk.char_end_index || 0;
+                        const charLength = charEnd - charStart;
+                        const tokenLength = chunk.token_length || 'N/A';
+                        const strategy = chunk.chunk_strategy || currentStrategy || 'N/A';
+                        const displayIndex = (chunk.chunk_index !== null && chunk.chunk_index !== undefined) ? chunk.chunk_index : chunkIndex;
+                        
+                        chunkDetailsContent.innerHTML = `
+                            <div style="line-height: 1.8;">
+                                <div><strong>Chunk Index:</strong> #${displayIndex}</div>
+                                <div><strong>Tokens:</strong> ${tokenLength}</div>
+                                <div><strong>Characters:</strong> ${charLength}</div>
+                                <div><strong>Strategy:</strong> ${escapeHtml(strategy)}</div>
+                            </div>
+                        `;
+                    }
+                    
+                    // Highlight all segments with this chunk
+                    document.querySelectorAll(`.chunk-highlight[data-chunk-index="${chunkIndex}"], .chunk-highlight[data-chunk-indices*="${chunkIndex}"]`).forEach(el => {
+                        el.classList.add('chunk-hover');
+                        el.style.backgroundColor = '#ffeb3b';
+                        el.style.padding = '2px 0';
+                        el.style.borderRadius = '3px';
+                    });
+                } else if (chunkIndices) {
+                    // Overlapping chunks - just show which chunks overlap
+                    const indices = chunkIndices.split(',').map(i => {
+                        const parsed = parseInt(i.trim());
+                        return isNaN(parsed) ? null : parsed;
+                    }).filter(i => i !== null);
+                    
+                    if (chunkDetailsContent && indices.length > 0) {
+                        const chunkNumbers = indices.map(idx => `#${idx}`).join(', ');
+                        chunkDetailsContent.innerHTML = `
+                            <div style="line-height: 1.8;">
+                                <div><strong>Overlapping Chunks:</strong> ${chunkNumbers}</div>
+                            </div>
+                        `;
+                    }
+                    
+                    // Highlight all overlapping segments
+                    document.querySelectorAll(`.chunk-highlight[data-chunk-indices*="${chunkIndices}"]`).forEach(el => {
+                        el.classList.add('chunk-hover');
+                        el.style.backgroundColor = '#ff9800';
+                        el.style.padding = '2px 0';
+                        el.style.borderRadius = '3px';
+                    });
+                }
+            });
+            
+            span.addEventListener('mouseleave', function() {
+                // Remove highlight from all chunks
+                document.querySelectorAll('.chunk-highlight').forEach(el => {
+                    el.classList.remove('chunk-hover');
+                    el.style.backgroundColor = '';
+                    el.style.padding = '';
+                    el.style.borderRadius = '';
+                });
+                
+                // Reset details panel
+                if (chunkDetailsContent) {
+                    chunkDetailsContent.innerHTML = '<p>Hover over a highlighted chunk to see details.</p>';
+                }
+            });
+        });
+    }
+}

@@ -159,6 +159,98 @@ def setup_api_routes(app, session_manager: WebSessionManager):
                 status_code=500
             )
 
+    @app.route("/api/statistics")
+    async def api_statistics(request: Request):
+        """JSON API endpoint for getting statistics grid."""
+        # Check authentication first
+        session_data, error_response = await require_auth_api(request, session_manager, json_response=True)
+        if error_response:
+            return error_response
+
+        # Get query parameters for filtering
+        source_id = request.query_params.get("source_id", "")
+        doc_type = request.query_params.get("doc_type", "")
+
+        try:
+            from ..kb import get_statistics
+            
+            if get_statistics is None:
+                return JSONResponse(
+                    {"error": "Statistics module not available"},
+                    status_code=503
+                )
+            
+            # Get statistics with filters
+            stats = get_statistics(
+                source_id=source_id if source_id else None,
+                doc_type=doc_type if doc_type else None
+            )
+            
+            return JSONResponse(stats)
+
+        except Exception as e:
+            logger.error(f"Error in api_statistics: {e}", exc_info=True)
+            return JSONResponse(
+                {"error": str(e)},
+                status_code=500
+            )
+
+    @app.route("/api/document/{doc_id}/chunks")
+    async def api_get_chunks(request: Request):
+        """JSON API endpoint for getting chunks for a document."""
+        # Check authentication first
+        session_data, error_response = await require_auth_api(request, session_manager, json_response=True)
+        if error_response:
+            return error_response
+
+        doc_id = request.path_params["doc_id"]
+        strategy = request.query_params.get("strategy", None)
+
+        try:
+            # Try to import embedding functions
+            try:
+                from ..kb.embedding import get_chunk_strategies, get_chunks
+            except ImportError:
+                return JSONResponse(
+                    {"error": "Embedding module not available"},
+                    status_code=503
+                )
+
+            # Get chunk strategies for this document
+            strategies = get_chunk_strategies(document_id=doc_id)
+            
+            # Get chunks if strategy is specified
+            chunks = None
+            if strategy:
+                chunks = get_chunks(document_id=doc_id, chunk_strategy=strategy)
+                # get_chunks without session returns dicts, so we can use them directly
+                # But ensure all required fields are present
+                if chunks:
+                    chunks = [
+                        {
+                            "id": chunk.get("id", ""),
+                            "chunk_index": chunk.get("chunk_index", 0),
+                            "chunk_strategy": chunk.get("chunk_strategy", strategy),
+                            "text": chunk.get("text", ""),
+                            "char_start_index": chunk.get("char_start_index", 0),
+                            "char_end_index": chunk.get("char_end_index", 0),
+                            "token_length": chunk.get("token_length", 0),
+                        }
+                        for chunk in chunks
+                    ]
+
+            return JSONResponse({
+                "strategies": strategies,
+                "chunks": chunks,
+            })
+
+        except Exception as e:
+            logger.error(f"Error fetching chunks for document {doc_id}: {e}", exc_info=True)
+            return JSONResponse(
+                {"error": str(e)},
+                status_code=500
+            )
+
     @app.route("/api/options")
     async def api_options(request: Request):
         """JSON API endpoint for getting filter options with filtered counts."""

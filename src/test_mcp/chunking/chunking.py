@@ -225,6 +225,12 @@ def chunk(
     if "model" not in config:
         config["model"] = "cl100k_base"
     
+    # Ensure chunk_size and chunk_overlap have defaults if None or missing
+    if "chunk_size" not in config or config["chunk_size"] is None:
+        config["chunk_size"] = 1000
+    if "chunk_overlap" not in config or config["chunk_overlap"] is None:
+        config["chunk_overlap"] = 200
+    
     encoding = _get_encoding(config["model"])
 
     # Call strategy-specific function

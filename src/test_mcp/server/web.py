@@ -129,6 +129,9 @@ def setup_web_routes(app, oauth_provider, session_manager: WebSessionManager):
     data_dir = os.getenv("DATA_DIR", "data")
     upload_dir = Path(data_dir) / "uploads"
     upload_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Import statistics route
+    from . import web_statistics
 
     @app.route("/web")
     async def web_page(request: Request):
@@ -279,10 +282,79 @@ def setup_web_routes(app, oauth_provider, session_manager: WebSessionManager):
                 else:
                     uri_display = f'<a href="{doc.uri}" target="_blank" rel="noopener noreferrer">{doc.uri}</a>'
 
-            # Format document data
+            # Get chunk strategies for this document
+            chunk_strategies_html = ""
+            default_strategy = None
+            try:
+                from ..kb.embedding import get_chunk_strategies
+                strategies = get_chunk_strategies(document_id=doc.id)
+                if strategies:
+                    # Get first strategy as default
+                    default_strategy = strategies[0].get("strategy", "") if isinstance(strategies[0], dict) else strategies[0].strategy
+                    
+                    strategy_radios = ""
+                    for idx, strategy in enumerate(strategies):
+                        strategy_name = strategy.get("strategy", "") if isinstance(strategy, dict) else strategy.strategy
+                        count = strategy.get("count", 0) if isinstance(strategy, dict) else strategy.count
+                        meta = strategy.get("meta", {}) if isinstance(strategy, dict) else (strategy.meta if hasattr(strategy, 'meta') else {})
+                        
+                        # Build strategy description from meta
+                        strategy_desc = ""
+                        if meta:
+                            if "chunk_size" in meta:
+                                strategy_desc += f"Size: {meta.get('chunk_size')} tokens"
+                            if "chunk_overlap" in meta:
+                                if strategy_desc:
+                                    strategy_desc += ", "
+                                strategy_desc += f"Overlap: {meta.get('chunk_overlap')} tokens"
+                        
+                        checked = 'checked' if idx == 0 else ''
+                        strategy_radios += f'''
+                        <label style="display: block; padding: 8px; margin: 4px 0; border: 1px solid #ddd; border-radius: 4px; cursor: pointer; background: {'#f0f8ff' if idx == 0 else '#fff'};">
+                            <input type="radio" name="chunk-strategy" value="{html_escape(strategy_name)}" {checked} style="margin-right: 8px;">
+                            <strong>{html_escape(strategy_name)}</strong> ({count} chunks)
+                            {f'<span style="color: #666; font-size: 12px; display: block; margin-left: 24px; margin-top: 4px;">{html_escape(strategy_desc)}</span>' if strategy_desc else ''}
+                        </label>
+                        '''
+                    
+                    chunk_strategies_html = f"""
+            <div style="padding: 15px; background: #f9f9f9; border: 1px solid #ddd; border-radius: 4px;">
+                <h3 style="margin-top: 0; margin-bottom: 10px;">Chunking Strategies</h3>
+                <div id="chunk-strategies-container">
+                    {strategy_radios}
+                </div>
+                <div id="chunk-info" style="margin-top: 10px; color: #666; font-size: 14px;"></div>
+            </div>
+                    """
+            except (ImportError, Exception) as e:
+                logger.debug(f"Could not load chunk strategies: {e}")
+                # Chunking module may not be available, that's okay
+
+            # Get available chunking strategies for the re-chunk form
+            rechunk_strategy_options = '<option value="">Default (tokens)</option>'
+            try:
+                from ..kb.embedding import get_chunk_strategies
+                all_strategies = get_chunk_strategies()  # Get all strategies, not just for this document
+                for strategy_info in all_strategies:
+                    strategy_name = strategy_info.get("strategy", "")
+                    if strategy_name:
+                        rechunk_strategy_options += f'<option value="{html_escape(strategy_name)}">{html_escape(strategy_name)}</option>'
+            except (ImportError, Exception) as e:
+                logger.debug(f"Could not load chunk strategies for re-chunk form: {e}")
+                # Fallback to default options
+                rechunk_strategy_options = '<option value="">Default (tokens)</option>'
+                rechunk_strategy_options += '<option value="tokens">tokens</option>'
+                rechunk_strategy_options += '<option value="slide">slide</option>'
+
+            # Format document data with chunk highlighting support
             text_content = ""
             if doc.text:
-                text_content = f'<pre style="white-space: pre-wrap; max-height: 500px; overflow-y: auto;">{doc.text}</pre>'
+                # Wrap text in a div with id for JavaScript to access
+                text_content = f'''
+            <div id="document-text-container" style="position: relative;">
+                <pre id="document-text" style="white-space: pre-wrap; max-height: 600px; overflow-y: auto; position: relative; padding: 10px; background: #f9f9f9; border: 1px solid #ddd; border-radius: 4px; font-family: inherit; line-height: 1.6;">{html_escape(doc.text)}</pre>
+            </div>
+                '''
             
             # Handle image display
             image_html = ""
@@ -351,9 +423,23 @@ def setup_web_routes(app, oauth_provider, session_manager: WebSessionManager):
                         meta_html += f'<tr><td><strong>{key}</strong></td><td><pre>{value}</pre></td></tr>'
                 meta_html += '</table></div>'
 
+            # Get success/error message from query params
+            message_html = ""
+            message = request.query_params.get("message", "")
+            if message:
+                # Message can contain HTML (e.g., links), so don't escape it
+                message_html = f"""
+        <div class="success-box" id="user-message" style="margin-bottom: 20px;">
+            {message}
+            <button onclick="document.getElementById('user-message').style.display='none'" style="float: right; background: none; border: none; color: #155724; font-size: 20px; cursor: pointer; padding: 0 10px; line-height: 1;">×</button>
+        </div>
+                """
+
             content = f"""
             <h1>Document Details</h1>
             <p><a href="/web">← Back to Document List</a></p>
+            
+            {message_html if message_html else ''}
 
             <div class="card">
                 <h2>Document Information</h2>
@@ -381,8 +467,84 @@ def setup_web_routes(app, oauth_provider, session_manager: WebSessionManager):
 
             <div class="card">
                 <h2>Text Content</h2>
+                <div style="display: flex; gap: 20px; margin-bottom: 15px;">
+                    <div style="flex: 1;">
+                        {chunk_strategies_html if chunk_strategies_html else ''}
+                    </div>
+                    <div id="chunk-details-panel" style="width: 300px; height: 150px; padding: 15px; background: #f9f9f9; border: 1px solid #ddd; border-radius: 4px; overflow-y: auto; display: none;">
+                        <div id="chunk-details-content" style="color: #666; font-size: 14px;">
+                            <p>Hover over a highlighted chunk to see details.</p>
+                        </div>
+                    </div>
+                </div>
                 {text_content if text_content else '<div class="info-box">No text content available.</div>'}
             </div>
+            
+            <div class="card">
+                <h2>Document Actions</h2>
+                <div style="display: flex; gap: 15px; align-items: flex-end; flex-wrap: wrap;">
+                    <form id="rechunk-form" method="POST" action="/web/document/{doc.id}/rechunk-embed" style="display: flex; gap: 10px; align-items: flex-end; flex: 1; min-width: 300px;">
+                        <div style="flex: 1; min-width: 200px;">
+                            <label for="rechunk-strategy" style="display: block; margin-bottom: 5px; font-size: 14px; color: #666;">Chunking Strategy:</label>
+                            <select id="rechunk-strategy" name="strategy" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                                {rechunk_strategy_options}
+                            </select>
+                        </div>
+                        <button type="submit" id="rechunk-submit-btn" style="padding: 10px 20px; background-color: #2196F3; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; white-space: nowrap;">Re-chunk and Embed</button>
+                    </form>
+                    <form id="delete-form" method="POST" action="/web/document/{doc.id}/delete" style="display: inline-block;" onsubmit="return confirm('Are you sure you want to delete this document? This will also delete all chunks and embeddings. This action cannot be undone.');">
+                        <button type="submit" id="delete-submit-btn" style="padding: 10px 20px; background-color: #f44336; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; white-space: nowrap;">Delete Document</button>
+                    </form>
+                </div>
+                <div id="rechunk-status" style="margin-top: 10px;"></div>
+                <div id="delete-status" style="margin-top: 10px;"></div>
+            </div>
+            
+            <script>
+            // Initialize chunk highlighting for this document
+            let retryCount = 0;
+            const maxRetries = 20; // 20 * 50ms = 1 second max wait
+            
+            function tryInitChunkHighlighting() {{
+                if (typeof initChunkHighlighting === 'function') {{
+                    initChunkHighlighting("{doc.id}");
+                }} else if (retryCount < maxRetries) {{
+                    retryCount++;
+                    setTimeout(tryInitChunkHighlighting, 50);
+                }} else {{
+                    console.error('initChunkHighlighting function not found after', maxRetries, 'retries');
+                }}
+            }}
+            
+            if (document.readyState === 'loading') {{
+                document.addEventListener('DOMContentLoaded', tryInitChunkHighlighting);
+            }} else {{
+                // DOM is already loaded
+                tryInitChunkHighlighting();
+            }}
+            </script>
+            
+            <script>
+            // Setup loading indicator for re-chunk form
+            document.addEventListener('DOMContentLoaded', function() {{
+                if (typeof setupFormLoadingIndicator === 'function') {{
+                    setupFormLoadingIndicator(
+                        'rechunk-form',
+                        'rechunk-submit-btn',
+                        'rechunk-status',
+                        'Re-chunking and embedding document...'
+                    );
+                    
+                    // Setup loading indicator for delete form
+                    setupFormLoadingIndicator(
+                        'delete-form',
+                        'delete-submit-btn',
+                        'delete-status',
+                        'Deleting document...'
+                    );
+                }}
+            }});
+            </script>
             """
 
             return HTMLResponse(html_templates.base_template(
@@ -406,6 +568,176 @@ def setup_web_routes(app, oauth_provider, session_manager: WebSessionManager):
                 status_code=500
             )
 
+    @app.route("/web/document/{doc_id}/rechunk-embed", methods=["POST"])
+    async def rechunk_embed_document(request: Request):
+        """Re-chunk and embed a document (POST)."""
+        # Check authentication first
+        session_data, redirect = await require_auth_html(request, session_manager)
+        if redirect:
+            return redirect
+        
+        username = session_data.get("username")
+        doc_id = request.path_params["doc_id"]
+        
+        # Get form data
+        form_data = await request.form()
+        strategy = form_data.get("strategy", "").strip() or None
+        
+        # Get document from knowledge base
+        from ..kb import get
+        from ..kb.embedding import chunk_and_embed
+        
+        try:
+            doc = get(uuid=doc_id)
+            if not doc:
+                return HTMLResponse(
+                    html_templates.base_template(
+                        "Document Not Found",
+                        '<div class="error-box"><h2>Document Not Found</h2><p>The requested document could not be found.</p><p><a href="/web">← Back to Document List</a></p></div>',
+                        None,
+                        username
+                    ),
+                    status_code=404
+                )
+            
+            # Check if document has text
+            if not doc.text:
+                return HTMLResponse(
+                    html_templates.base_template(
+                        "Error",
+                        f'<div class="error-box"><h2>Error</h2><p>Document has no text content to chunk.</p><p><a href="/web/document/{doc_id}">← Back to Document</a></p></div>',
+                        None,
+                        username
+                    ),
+                    status_code=400
+                )
+            
+            # Re-chunk and embed
+            try:
+                chunks = chunk_and_embed(doc, strategy=strategy)
+                chunk_count = len(chunks) if chunks else 0
+                
+                # Redirect back to document page with success message
+                from urllib.parse import urlencode
+                success_message = f'Document re-chunked and embedded successfully! Generated {chunk_count} chunks.'
+                redirect_url = f"/web/document/{doc_id}?{urlencode({'message': success_message})}"
+                return RedirectResponse(url=redirect_url, status_code=303)
+                
+            except ValueError as e:
+                # Document might not have text or other validation error
+                error_msg = html_escape(str(e))
+                return HTMLResponse(
+                    html_templates.base_template(
+                        "Error",
+                        f'<div class="error-box"><h2>Error</h2><p>{error_msg}</p><p><a href="/web/document/{doc_id}">← Back to Document</a></p></div>',
+                        None,
+                        username
+                    ),
+                    status_code=400
+                )
+            except Exception as e:
+                logger.error(f"Error re-chunking and embedding document {doc_id}: {e}", exc_info=True)
+                error_msg = html_escape(str(e))
+                return HTMLResponse(
+                    html_templates.base_template(
+                        "Error",
+                        f'<div class="error-box"><h2>Error</h2><p>Failed to re-chunk and embed document: {error_msg}</p><p><a href="/web/document/{doc_id}">← Back to Document</a></p></div>',
+                        None,
+                        username
+                    ),
+                    status_code=500
+                )
+                
+        except Exception as e:
+            logger.error(f"Error processing re-chunk request for {doc_id}: {e}", exc_info=True)
+            error_msg = html_escape(str(e))
+            return HTMLResponse(
+                html_templates.base_template(
+                    "Error",
+                    f'<div class="error-box"><h2>Error</h2><p>{error_msg}</p><p><a href="/web">← Back to Document List</a></p></div>',
+                    None,
+                    username
+                ),
+                status_code=500
+            )
+
+    @app.route("/web/document/{doc_id}/delete", methods=["POST"])
+    async def delete_document_route(request: Request):
+        """Delete a document (POST)."""
+        # Check authentication first
+        session_data, redirect = await require_auth_html(request, session_manager)
+        if redirect:
+            return redirect
+        
+        username = session_data.get("username")
+        doc_id = request.path_params["doc_id"]
+        
+        # Get document from knowledge base
+        from ..kb import get, delete_document
+        
+        try:
+            doc = get(uuid=doc_id)
+            if not doc:
+                return HTMLResponse(
+                    html_templates.base_template(
+                        "Document Not Found",
+                        '<div class="error-box"><h2>Document Not Found</h2><p>The requested document could not be found.</p><p><a href="/web">← Back to Document List</a></p></div>',
+                        None,
+                        username
+                    ),
+                    status_code=404
+                )
+            
+            # Delete the document
+            try:
+                result = delete_document(doc_id)
+                chunk_count = result.get("chunk_count", 0)
+                
+                # Redirect to document list with success message
+                from urllib.parse import urlencode
+                success_message = f'Document deleted successfully.'
+                if chunk_count > 0:
+                    success_message += f' Also deleted {chunk_count} chunk(s) and their embeddings.'
+                redirect_url = f"/web?{urlencode({'message': success_message})}"
+                return RedirectResponse(url=redirect_url, status_code=303)
+                
+            except ValueError as e:
+                error_msg = html_escape(str(e))
+                return HTMLResponse(
+                    html_templates.base_template(
+                        "Error",
+                        f'<div class="error-box"><h2>Error</h2><p>{error_msg}</p><p><a href="/web/document/{doc_id}">← Back to Document</a></p></div>',
+                        None,
+                        username
+                    ),
+                    status_code=400
+                )
+            except Exception as e:
+                logger.error(f"Error deleting document {doc_id}: {e}", exc_info=True)
+                error_msg = html_escape(str(e))
+                return HTMLResponse(
+                    html_templates.base_template(
+                        "Error",
+                        f'<div class="error-box"><h2>Error</h2><p>Failed to delete document: {error_msg}</p><p><a href="/web/document/{doc_id}">← Back to Document</a></p></div>',
+                        None,
+                        username
+                    ),
+                    status_code=500
+                )
+                
+        except Exception as e:
+            logger.error(f"Error processing delete request for {doc_id}: {e}", exc_info=True)
+            error_msg = html_escape(str(e))
+            return HTMLResponse(
+                html_templates.base_template(
+                    "Error",
+                    f'<div class="error-box"><h2>Error</h2><p>{error_msg}</p><p><a href="/web">← Back to Document List</a></p></div>',
+                    None,
+                    username
+                ),
+                status_code=500
+            )
+
     @app.route("/web/upload", methods=["GET"])
     async def upload_page(request: Request):
         """File upload page (requires admin privileges)."""
@@ -416,7 +748,23 @@ def setup_web_routes(app, oauth_provider, session_manager: WebSessionManager):
 
         username = session_data.get("username", "User")
 
-        content = """
+        # Get available chunking strategies
+        chunk_strategy_options = '<option value="">Default (tokens)</option>'
+        try:
+            from ..kb.embedding import get_chunk_strategies
+            strategies = get_chunk_strategies()
+            for strategy_info in strategies:
+                strategy_name = strategy_info.get("strategy", "")
+                if strategy_name:
+                    chunk_strategy_options += f'<option value="{html_escape(strategy_name)}">{html_escape(strategy_name)}</option>'
+        except (ImportError, Exception) as e:
+            logger.debug(f"Could not load chunk strategies: {e}")
+            # Fallback to default options
+            chunk_strategy_options = '<option value="">Default (tokens)</option>'
+            chunk_strategy_options += '<option value="tokens">tokens</option>'
+            chunk_strategy_options += '<option value="slide">slide</option>'
+
+        content = f"""
             <h1>Upload Document</h1>
             <p>Upload a file to add it to the knowledge base. Images will be extracted and described using AI.</p>
             
@@ -436,7 +784,7 @@ def setup_web_routes(app, oauth_provider, session_manager: WebSessionManager):
                     
                     <div style="margin-bottom: 15px;">
                         <label for="meta"><strong>Metadata (optional):</strong></label>
-                        <textarea id="meta" name="meta" rows="6" placeholder='{"author": "John Doe", "tags": ["important", "draft"]}' style="margin-top: 5px; display: block; width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px; font-family: monospace; font-size: 14px;"></textarea>
+                        <textarea id="meta" name="meta" rows="6" placeholder='{{"author": "John Doe", "tags": ["important", "draft"]}}' style="margin-top: 5px; display: block; width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px; font-family: monospace; font-size: 14px;"></textarea>
                         <small style="color: #666;">JSON object with additional metadata (e.g., author, tags, category)</small>
                     </div>
                     
@@ -452,13 +800,45 @@ def setup_web_routes(app, oauth_provider, session_manager: WebSessionManager):
                         <small style="color: #666;">When the document was last updated in the source system</small>
                     </div>
                     
+                    <div style="margin-bottom: 15px; padding: 15px; background: #f9f9f9; border: 1px solid #ddd; border-radius: 4px;">
+                        <label style="display: flex; align-items: center; cursor: pointer;">
+                            <input type="checkbox" id="chunk_and_embed" name="chunk_and_embed" checked style="margin-right: 8px; width: auto;">
+                            <strong>Chunk and embed document after upload</strong>
+                        </label>
+                        <small style="color: #666; display: block; margin-left: 24px; margin-top: 5px;">Automatically chunk the document and generate embeddings</small>
+                    </div>
+                    
+                    <div style="margin-bottom: 15px; margin-left: 24px; padding: 15px; background: #f0f0f0; border: 1px solid #ddd; border-radius: 4px;">
+                        <div style="margin-bottom: 10px;">
+                            <label for="chunk_strategy"><strong>Chunking Strategy:</strong></label>
+                            <select id="chunk_strategy" name="chunk_strategy" style="margin-top: 5px; display: block; width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                                {chunk_strategy_options}
+                            </select>
+                            <small style="color: #666;">Strategy for chunking the document text (default: tokens)</small>
+                        </div>
+                    </div>
+                    
                     <div style="margin-bottom: 15px;">
-                        <button type="submit" style="padding: 10px 20px; background-color: #4CAF50; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 16px;">Upload</button>
+                        <button type="submit" id="upload-submit-btn" style="padding: 10px 20px; background-color: #4CAF50; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 16px;">Upload</button>
                     </div>
                 </form>
             </div>
             
             <div id="upload-status" style="margin-top: 20px;"></div>
+            
+            <script>
+            // Setup loading indicator for upload form
+            document.addEventListener('DOMContentLoaded', function() {{
+                if (typeof setupFormLoadingIndicator === 'function') {{
+                    setupFormLoadingIndicator(
+                        'upload-form',
+                        'upload-submit-btn',
+                        'upload-status',
+                        'Uploading and processing file...'
+                    );
+                }}
+            }});
+            </script>
         """
 
         html = html_templates.base_template(
@@ -487,6 +867,8 @@ def setup_web_routes(app, oauth_provider, session_manager: WebSessionManager):
             meta_text = form.get("meta")
             creating_time_str = form.get("creating_time")
             update_time_str = form.get("update_time")
+            chunk_and_embed = form.get("chunk_and_embed") == "on"  # Checkbox returns "on" when checked
+            chunk_strategy = form.get("chunk_strategy")  # Can be None if checkbox unchecked
             
             # Parse metadata JSON if provided
             meta = None
@@ -662,20 +1044,53 @@ def setup_web_routes(app, oauth_provider, session_manager: WebSessionManager):
                 
                 doc_count = len(docs)
                 
+                # Chunk and embed if requested, track chunk counts
+                chunk_counts = {}
+                if chunk_and_embed:
+                    try:
+                        from ..kb.embedding import chunk_and_embed
+                        for doc in docs:
+                            # Chunk and embed all documents (chunk_and_embed will handle documents without text gracefully)
+                            try:
+                                chunks = chunk_and_embed(
+                                    doc,
+                                    strategy=chunk_strategy if chunk_strategy else None
+                                )
+                                chunk_counts[doc.id] = len(chunks) if chunks else 0
+                            except ValueError as e:
+                                # Document might not have text, skip it
+                                logger.debug(f"Skipping chunk_and_embed for document {doc.id}: {e}")
+                                chunk_counts[doc.id] = 0
+                                continue
+                    except Exception as e:
+                        logger.warning(f"Error chunking and embedding documents: {e}", exc_info=True)
+                        # Don't fail the upload if chunking/embedding fails
+                
                 # Build success message with links to documents
                 doc_ids = [doc.id for doc in docs]
                 doc_links = []
                 for doc in docs:
-                    doc_links.append(f'<a href="/web/document/{doc.id}">Document {doc.id}</a> ({doc.doc_type})')
+                    chunk_info = ""
+                    if chunk_and_embed and doc.id in chunk_counts:
+                        chunk_count = chunk_counts[doc.id]
+                        if chunk_count > 0:
+                            chunk_info = f" ({chunk_count} chunk{'s' if chunk_count != 1 else ''})"
+                    doc_links.append(f'<a href="/web/document/{doc.id}">Document {doc.id}</a> ({doc.doc_type}){chunk_info}')
                 
                 # Security: Escape filename in success message to prevent XSS
                 safe_filename = html_escape(filename)
+                chunk_status = " and chunked/embedded" if chunk_and_embed else ""
                 if doc_count == 1:
                     doc = docs[0]
-                    success_message = f'Upload successful! File "{safe_filename}" added as <a href="/web/document/{doc.id}">Document {doc.id}</a> ({doc.doc_type}).'
+                    chunk_info = ""
+                    if chunk_and_embed and doc.id in chunk_counts:
+                        chunk_count = chunk_counts[doc.id]
+                        if chunk_count > 0:
+                            chunk_info = f" ({chunk_count} chunk{'s' if chunk_count != 1 else ''})"
+                    success_message = f'Upload successful! File "{safe_filename}" added as <a href="/web/document/{doc.id}">Document {doc.id}</a> ({doc.doc_type}){chunk_info}{chunk_status}.'
                 else:
                     doc_list = ", ".join(doc_links)
-                    success_message = f'Upload successful! File "{safe_filename}" created {doc_count} documents: {doc_list}.'
+                    success_message = f'Upload successful! File "{safe_filename}" created {doc_count} documents: {doc_list}{chunk_status}.'
                 
                 # Redirect to knowledge base explorer with success message and filter to upload source
                 from urllib.parse import urlencode
@@ -743,3 +1158,8 @@ def setup_web_routes(app, oauth_provider, session_manager: WebSessionManager):
                 ),
                 status_code=500
             )
+
+    @app.route("/web/statistics")
+    async def web_statistics_route(request: Request):
+        """Statistics page route."""
+        return await web_statistics.web_statistics(request, session_manager)

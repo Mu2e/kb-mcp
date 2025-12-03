@@ -158,17 +158,18 @@ def _save_chunks_to_session(chunks: List[Chunk], session, commit: bool = False) 
     #    session.expunge(chunk_obj)
 
 
-def get_chunk_strategies(session=None) -> List[Dict[str, Any]]:
-    """Get all chunking strategies used in the database.
+def get_chunk_strategies(document_id: Optional[str] = None, session=None) -> List[Dict[str, Any]]:
+    """Get chunking strategies, optionally filtered by document.
 
     Args:
+        document_id: Optional UUID of the document. If None, returns all strategies.
         session: Optional database session. If None, creates a new session.
 
     Returns:
         List of dictionaries with:
         - strategy: str - The chunking strategy identifier
         - meta: dict - Strategy configuration parameters
-        - count: int - Number of chunks using this strategy
+        - count: int - Number of chunks using this strategy (for the document if document_id provided)
         - created_time: str - ISO format timestamp
     """
     from .core import Chunk, ChunkStrategy
@@ -176,15 +177,22 @@ def get_chunk_strategies(session=None) -> List[Dict[str, Any]]:
     from sqlalchemy import func
 
     def _query(sess):
-        # Join ChunkStrategy with Chunk counts
-        results = sess.query(
+        # Build base query
+        query = sess.query(
             ChunkStrategy.strategy,
             ChunkStrategy.meta,
             ChunkStrategy.created_time,
             func.count(Chunk.id).label('count')
         ).outerjoin(
             Chunk, ChunkStrategy.strategy == Chunk.chunk_strategy
-        ).group_by(
+        )
+        
+        # Filter by document if provided
+        if document_id is not None:
+            query = query.filter(Chunk.document_id == document_id)
+        
+        # Group and order
+        results = query.group_by(
             ChunkStrategy.strategy,
             ChunkStrategy.meta,
             ChunkStrategy.created_time
