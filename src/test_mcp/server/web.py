@@ -197,9 +197,9 @@ def setup_web_routes(app, oauth_provider, session_manager: WebSessionManager):
             <h2>Filters</h2>
             <div class="filters">
                 <div class="filter-row">
-                    <div class="filter-group">
-                        <label for="search-input">Search Text:</label>
-                        <input type="search" id="search-input" name="search" value="{search}" placeholder="Search in document text...">
+                    <div class="filter-group" style="flex: 1;">
+                        <label for="search-input">Search Query (Semantic Search):</label>
+                        <input type="search" id="search-input" name="search" value="{search}" placeholder="Enter search query for semantic search...">
                     </div>
                     <div class="filter-group">
                         <label for="source-filter">Source:</label>
@@ -212,6 +212,45 @@ def setup_web_routes(app, oauth_provider, session_manager: WebSessionManager):
                         <select id="type-filter" name="doc_type">
                             {doc_type_options}
                         </select>
+                    </div>
+                </div>
+                <div class="filter-row" id="metadata-filters-row" style="margin-top: 15px; padding-top: 15px; border-top: 1px solid #ddd;">
+                    <div style="flex: 1;">
+                        <h3 style="margin: 0 0 10px 0; font-size: 14px; font-weight: normal;">Metadata Filters</h3>
+                        
+                        <!-- Date range filters (compact) -->
+                        <div style="display: flex; gap: 10px; align-items: center; margin-bottom: 10px;">
+                            <label for="date-type" style="font-size: 12px; white-space: nowrap;">Date Type:</label>
+                            <select id="date-type" style="padding: 4px 8px; font-size: 12px;">
+                                <option value="insert_time">Insertion</option>
+                                <option value="creating_time">Creation</option>
+                                <option value="update_time">Update</option>
+                            </select>
+                            <label for="date-from" style="font-size: 12px; white-space: nowrap;">From:</label>
+                            <input type="date" id="date-from" style="padding: 4px 8px; font-size: 12px;">
+                            <label for="date-to" style="font-size: 12px; white-space: nowrap;">To:</label>
+                            <input type="date" id="date-to" style="padding: 4px 8px; font-size: 12px;">
+                        </div>
+                        
+                        <!-- Metadata filter input -->
+                        <div style="display: flex; gap: 5px; align-items: center; margin-bottom: 10px;">
+                            <select id="metadata-key-input" style="width: 120px; padding: 4px 8px; font-size: 12px;">
+                                <option value="">Select key...</option>
+                            </select>
+                            <select id="metadata-operation" style="padding: 4px 8px; font-size: 12px;">
+                                <option value="term">equals</option>
+                                <option value="match">contains</option>
+                                <option value="gte">≥</option>
+                                <option value="lte">≤</option>
+                                <option value="gt">></option>
+                                <option value="lt"><</option>
+                            </select>
+                            <input type="text" id="metadata-value-input" placeholder="Value" style="width: 150px; padding: 4px 8px; font-size: 12px;">
+                            <button type="button" id="add-metadata-filter" class="btn" style="padding: 4px 12px; font-size: 12px;">Add</button>
+                        </div>
+                        
+                        <!-- Active filters display -->
+                        <div id="metadata-filters-list" style="display: flex; flex-wrap: wrap; gap: 5px; align-items: center; margin-top: 5px;"></div>
                     </div>
                 </div>
                 <button type="button" id="apply-filters" class="btn">Apply Filters</button>
@@ -1158,6 +1197,12 @@ def setup_web_routes(app, oauth_provider, session_manager: WebSessionManager):
                 ),
                 status_code=500
             )
+
+    @app.route("/web/logs")
+    async def web_logs_route(request: Request):
+        """Search logs page."""
+        from .web_logs import web_logs
+        return await web_logs(request, session_manager)
 
     @app.route("/web/statistics")
     async def web_statistics_route(request: Request):

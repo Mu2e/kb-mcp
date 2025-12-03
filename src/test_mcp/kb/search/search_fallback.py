@@ -54,6 +54,7 @@ def _search_fallback(
             chunk_alias.id.label("chunk_id_full"),
             chunk_alias.document_id,
             chunk_alias.chunk_index,
+            chunk_alias.chunk_strategy,
             chunk_alias.char_start_index,
             chunk_alias.char_end_index,
             chunk_alias.token_length,
@@ -151,6 +152,7 @@ def _search_fallback(
                 "chunk_id": row.chunk_id,
                 "document_id": row.doc_id,
                 "chunk_index": row.chunk_index,
+                "chunk_strategy": row.chunk_strategy,
                 "char_start": row.char_start_index,
                 "char_end": row.char_end_index,
                 "token_length": row.token_length,
@@ -192,13 +194,12 @@ def _search_fallback(
             doc_results[doc_id] = {
                 "document": doc,
                 "chunks": [],
-                "best_distance": result["similarity"],
-                "best_chunk": None,
             }
 
         chunk_info = {
             "chunk_id": result["chunk_id"],
             "chunk_index": result["chunk_index"],
+            "chunk_strategy": result.get("chunk_strategy"),
             "similarity": result["similarity"],
             "char_start": result["char_start"],
             "char_end": result["char_end"],
@@ -206,14 +207,15 @@ def _search_fallback(
         }
         doc_results[doc_id]["chunks"].append(chunk_info)
 
-        if result["similarity"] >= doc_results[doc_id]["best_distance"]:
-            doc_results[doc_id]["best_distance"] = result["similarity"]
-            doc_results[doc_id]["best_chunk"] = chunk_info
-
     final_results = list(doc_results.values())
     time_deduplication = time.time() - dedup_start
 
-    final_results.sort(key=lambda x: x["best_distance"], reverse=True)
+    # Sort chunks within each document by similarity (best first)
+    for result in final_results:
+        result["chunks"].sort(key=lambda x: x["similarity"], reverse=True)
+
+    # Sort documents by best similarity (first chunk's similarity)
+    final_results.sort(key=lambda x: x["chunks"][0]["similarity"] if x["chunks"] else 0, reverse=True)
 
     # Limit to max_results documents
     final_results = final_results[:max_results]

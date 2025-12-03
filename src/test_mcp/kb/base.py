@@ -648,24 +648,96 @@ def _get(
             query = query.filter(Document.doc_id == doc_id)
 
         # Apply filter_dict filters (takes precedence if both provided)
+        # Also support Elasticsearch-style filter parameter
+        es_filter = None
         if filter_dict:
-            if "source_id" in filter_dict and filter_dict["source_id"]:
-                query = query.filter(Document.source_id == filter_dict["source_id"])
-            if "doc_id" in filter_dict and filter_dict["doc_id"]:
-                query = query.filter(Document.doc_id == filter_dict["doc_id"])
-            if "doc_type" in filter_dict and filter_dict["doc_type"]:
-                query = query.filter(Document.doc_type == filter_dict["doc_type"])
-            if "source_type" in filter_dict and filter_dict["source_type"]:
-                query = query.filter(Document.source_type == filter_dict["source_type"])
-            if "text_contains" in filter_dict and filter_dict["text_contains"]:
-                query = query.filter(Document.text.contains(filter_dict["text_contains"]))
+            # Check if filter_dict contains an Elasticsearch-style filter
+            if "filter" in filter_dict:
+                es_filter = filter_dict["filter"]
+            else:
+                # Legacy filter_dict format
+                if "source_id" in filter_dict and filter_dict["source_id"]:
+                    query = query.filter(Document.source_id == filter_dict["source_id"])
+                if "doc_id" in filter_dict and filter_dict["doc_id"]:
+                    query = query.filter(Document.doc_id == filter_dict["doc_id"])
+                if "doc_type" in filter_dict and filter_dict["doc_type"]:
+                    query = query.filter(Document.doc_type == filter_dict["doc_type"])
+                if "source_type" in filter_dict and filter_dict["source_type"]:
+                    query = query.filter(Document.source_type == filter_dict["source_type"])
+                if "text_contains" in filter_dict and filter_dict["text_contains"]:
+                    query = query.filter(Document.text.contains(filter_dict["text_contains"]))
+        
+        # Apply Elasticsearch-style filters using the filter helper functions
+        if es_filter:
+            try:
+                from .search.filters import get_filters_fallback
+                from sqlalchemy.orm import aliased
+                from sqlalchemy import and_
+                
+                # Create an alias for Document to use with filter functions
+                doc_alias = aliased(Document)
+                
+                # Get dialect name
+                dialect_name = session.bind.dialect.name if session.bind else None
+                
+                # Extract source_id and doc_type from filter_dict if not already set
+                filter_source_id = source_id if source_id else (filter_dict.get("source_id") if filter_dict else None)
+                filter_doc_type = filter_dict.get("doc_type") if filter_dict else None
+                
+                # Extract metadata filters (all keys except known filter keys)
+                items_to_iterate = filter_dict.items() if filter_dict else {}
+                metadata_kwargs = {k: v for k, v in items_to_iterate 
+                                  if k not in ["source_id", "doc_id", "doc_type", "source_type", "text_contains", "filter"]}
+                
+                # Build filters using the same helper as search
+                # Note: get_filters_fallback expects an alias, but we can pass Document directly
+                # and it will work since we're building conditions on the same model
+                filter_conditions = get_filters_fallback(
+                    Document,  # Pass Document class directly
+                    source_id=filter_source_id,
+                    doc_type=filter_doc_type,
+                    filter=es_filter,
+                    dialect_name=dialect_name,
+                    **metadata_kwargs
+                )
+                
+                # Apply all filter conditions
+                if filter_conditions:
+                    # Combine with existing query filters
+                    if len(filter_conditions) == 1:
+                        query = query.filter(filter_conditions[0])
+                    else:
+                        query = query.filter(and_(*filter_conditions))
+            except ImportError:
+                # If search module not available, skip Elasticsearch-style filters
+                logger.warning("Search module not available, skipping Elasticsearch-style filters")
 
         # If count_only, return count early
         if count_only:
             return query.count()
 
-        # Apply ordering (default: by insert_time descending)
-        query = query.order_by(Document.insert_time.desc())
+        # Determine ordering field based on date filter if present
+        # If filtering by a specific date field, order by that field; otherwise use insert_time
+        order_field = Document.insert_time  # Default to insert_time (newest first)
+        
+        if filter_dict and "filter" in filter_dict:
+            es_filter = filter_dict["filter"]
+            # Check if filter contains a range query on a date field
+            if isinstance(es_filter, dict) and "bool" in es_filter:
+                bool_filter = es_filter["bool"]
+                if "must" in bool_filter:
+                    for condition in bool_filter["must"]:
+                        if isinstance(condition, dict) and "range" in condition:
+                            range_filter = condition["range"]
+                            for field_name in range_filter.keys():
+                                if field_name in ["insert_time", "creating_time", "update_time"]:
+                                    order_field = getattr(Document, field_name)
+                                    break
+                            if order_field != Document.insert_time:
+                                break
+        
+        # Apply ordering (newest first - descending order)
+        query = query.order_by(order_field.desc())
 
         # Apply pagination
         if offset is not None:

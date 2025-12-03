@@ -8,6 +8,7 @@ from ..database import get_db_session
 from ..embedding.embedding import _get_embedding_table, _convert_embedding_to_list
 from ..embedding.utils import get_embedder
 
+from .core import SearchLog
 from .search_pgvector import _search_pgvector
 from .search_fallback import _search_fallback
 
@@ -108,9 +109,7 @@ def search(
         Dictionary containing:
         - results: List of dictionaries, each containing:
             - document: Document object
-            - chunks: List of matching chunks with their distances
-            - best_distance: Best (highest) cosine similarity score for this document
-            - best_chunk: The chunk with the best similarity score
+            - chunks: List of matching chunks with their distances (sorted by similarity, best first)
         - metadata: Dictionary with search metadata:
             - time_search_total: Total time taken to execute the search (in seconds)
             - time_embedding: Time taken to generate the query embedding (in seconds)
@@ -126,8 +125,9 @@ def search(
     
         >>> # Access results
         >>> for result in response['results']:
-        ...     print(f"Document: {result['document'].id}, Score: {result['best_distance']:.3f}")
-        ...     print(f"  Best chunk: {result['chunks'][0]['chunk_id']}")
+        ...     print(f"Document: {result['document'].id}")
+        ...     if result['chunks']:
+        ...         print(f"  Best chunk: {result['chunks'][0]['chunk_id']}, Score: {result['chunks'][0]['similarity']:.3f}")
         
         >>> # Check timing information
         >>> print(f"Total search time: {response['metadata']['time_search_total']:.3f}s")
@@ -138,6 +138,9 @@ def search(
         session = get_db_session().__enter__()
     
     try:
+        # Track total time from the beginning
+        total_start = time.time()
+        
         # Time the embedding generation separately
         embedding_start = time.time()
         
@@ -164,7 +167,7 @@ def search(
         
         # Dispatch to appropriate search implementation
         if dialect_name == "postgresql":
-            return _search_pgvector(
+            result = _search_pgvector(
                 session=session,
                 embedding_table=embedding_table,
                 query_embedding=query_embedding,
@@ -180,7 +183,7 @@ def search(
                 **kwargs
             )
         else:
-            return _search_fallback(
+            result = _search_fallback(
                 session=session,
                 embedding_table=embedding_table,
                 query_embedding=query_embedding,
@@ -194,6 +197,67 @@ def search(
                 start_time=search_start,
                 **kwargs
             )
+        session.expunge_all()
+        
+        # Update time_search_total to include the entire operation
+        result['metadata']['time_search_total'] = time.time() - total_start
+        
+        # Log search to database
+        # Extract document IDs while session is still active to avoid detachment issues
+        try:
+            # Build results list with document_id and chunk_ids for each result
+            # Extract document IDs while session is still active
+            results_data = []
+            for doc_result in result['results']:
+                doc = doc_result['document']
+                # Extract ID while session is active
+                doc_id = doc.id
+                results_data.append({
+                    "document_id": doc_id,
+                    "chunk_ids": [chunk['chunk_id'] for chunk in doc_result['chunks']]
+                })
+
+            best_similarity = None
+            if result['results'] and result['results'][0]['chunks']:
+                best_similarity = result['results'][0]['chunks'][0]['similarity']
+
+
+            search_log = SearchLog(
+                query=query,
+                embedding_name=embedding_name,
+                max_results=max_results,
+                source_id=source_id,
+                doc_type=doc_type,
+                chunking_strategy=chunking_strategy,
+                filter_params=filter,
+                metadata_filters=kwargs if kwargs else None,
+                results=results_data,
+                best_similarity=result['results'][0]['chunks'][0]['similarity'] if result['results'] and result['results'][0]['chunks'] else None,
+                total_results=result['metadata']['total_results'],
+                time_search_total=result['metadata']['time_search_total'],
+                time_embedding=result['metadata'].get('time_embedding'),
+                time_deduplication=result['metadata'].get('time_deduplication'),
+                time_db_fetch=result['metadata'].get('time_db_fetch'),
+                time_distance_calc=result['metadata'].get('time_distance_calc'),
+                time_sort=result['metadata'].get('time_sort'),
+            )
+
+            session.add(search_log)
+            
+            # Only commit if we own the session; otherwise let caller handle it
+            if own_session:
+                session.commit()
+            
+        except Exception as e:
+            # Don't fail the search if logging fails
+            logger.warning(f"Failed to log search to database: {e}", exc_info=True)
+            if own_session:
+                try:
+                    session.rollback()
+                except Exception:
+                    pass  # Ignore rollback errors
+        
+        return result
         
     except Exception as e:
         logger.error(f"Error during search: {e}", exc_info=True)

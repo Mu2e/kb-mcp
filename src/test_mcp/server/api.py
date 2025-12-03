@@ -35,15 +35,49 @@ def setup_api_routes(app, session_manager: WebSessionManager):
         limit = int(request.query_params.get("limit", "10"))
         offset = int(request.query_params.get("offset", "0"))
         include_text = request.query_params.get("include_text", "false").lower() == "true"
-
-        # Build filter_dict for get() function
+        
+        # Parse metadata filters (key=value pairs)
+        metadata_filters = {}
+        metadata_params = request.query_params.getlist("metadata")
+        for meta_pair in metadata_params:
+            if "=" in meta_pair:
+                # Support both "key=value" and "key:operation=value" formats
+                if ":" in meta_pair and "=" in meta_pair:
+                    # Format: "key:operation=value"
+                    key_op, value = meta_pair.split("=", 1)
+                    if ":" in key_op:
+                        key, operation = key_op.split(":", 1)
+                        # For now, we'll use simple metadata filters
+                        # Full Elasticsearch support would require filter parameter
+                        metadata_filters[key] = value
+                else:
+                    # Format: "key=value"
+                    key, value = meta_pair.split("=", 1)
+                    metadata_filters[key] = value
+        
+        # Parse Elasticsearch-style filter if provided
         filter_dict = {}
+        filter_json = request.query_params.get("filter", None)
+        if filter_json:
+            try:
+                import json
+                filter_dict["filter"] = json.loads(filter_json)
+            except json.JSONDecodeError:
+                return JSONResponse(
+                    {"error": "Invalid JSON in filter parameter"},
+                    status_code=400
+                )
+        
+        # Build filter_dict for get() function
         if source_id:
             filter_dict["source_id"] = source_id
         if doc_type:
             filter_dict["doc_type"] = doc_type
         if search:
             filter_dict["text_contains"] = search
+        
+        # Add metadata filters to filter_dict (will be passed as kwargs to get_filters_fallback)
+        filter_dict.update(metadata_filters)
 
         try:
             # Query documents from knowledge base
@@ -482,5 +516,169 @@ def setup_api_routes(app, session_manager: WebSessionManager):
                 content=f"Error: {str(e)}".encode(),
                 status_code=500,
                 media_type="text/plain"
+            )
+
+    @app.route("/api/search")
+    async def api_search(request: Request):
+        """JSON API endpoint for vector similarity search."""
+        # Check authentication first
+        session_data, error_response = await require_auth_api(request, session_manager, json_response=True)
+        if error_response:
+            return error_response
+
+        # Get query parameters
+        query = request.query_params.get("query", "")
+        if not query:
+            return JSONResponse(
+                {"error": "Query parameter is required"},
+                status_code=400
+            )
+        
+        embedding_name = request.query_params.get("embedding_name", None)
+        max_results = int(request.query_params.get("max_results", "10"))
+        source_id = request.query_params.get("source_id", None)
+        doc_type = request.query_params.get("doc_type", None)
+        chunking_strategy = request.query_params.get("chunking_strategy", None)
+        
+        # Parse metadata filters (key=value pairs)
+        metadata_filters = {}
+        metadata_params = request.query_params.getlist("metadata")
+        for meta_pair in metadata_params:
+            if "=" in meta_pair:
+                key, value = meta_pair.split("=", 1)
+                metadata_filters[key] = value
+        
+        # Parse Elasticsearch-style filter if provided
+        filter_dict = None
+        filter_json = request.query_params.get("filter", None)
+        if filter_json:
+            try:
+                import json
+                filter_dict = json.loads(filter_json)
+            except json.JSONDecodeError:
+                return JSONResponse(
+                    {"error": "Invalid JSON in filter parameter"},
+                    status_code=400
+                )
+
+        try:
+            # Import search function
+            try:
+                from ..kb.search import search
+            except ImportError:
+                return JSONResponse(
+                    {"error": "Search module not available"},
+                    status_code=503
+                )
+            
+            # Perform search
+            result = search(
+                query=query,
+                embedding_name=embedding_name,
+                max_results=max_results,
+                source_id=source_id,
+                doc_type=doc_type,
+                chunking_strategy=chunking_strategy,
+                filter=filter_dict,
+                **metadata_filters
+            )
+            
+            # Convert results to document dictionaries
+            documents_data = []
+            for doc_result in result.get('results', []):
+                doc = doc_result.get('document')
+                if doc:
+                    doc_dict = document_to_dict(doc, include_text=False)
+                    # Add search-specific information
+                    doc_dict['chunks'] = doc_result.get('chunks', [])
+                    doc_dict['best_similarity'] = doc_result['chunks'][0]['similarity'] if doc_result.get('chunks') else None
+                    documents_data.append(doc_dict)
+            
+            return JSONResponse({
+                "documents": documents_data,
+                "total_results": result.get('metadata', {}).get('total_results', 0),
+                "query": query,
+                "embedding_name": result.get('metadata', {}).get('embedding_name'),
+                "timing": {
+                    "total": result.get('metadata', {}).get('time_search_total'),
+                    "embedding": result.get('metadata', {}).get('time_embedding'),
+                }
+            })
+
+        except Exception as e:
+            logger.error(f"Error in api_search: {e}", exc_info=True)
+            return JSONResponse(
+                {"error": str(e)},
+                status_code=500
+            )
+
+    @app.route("/api/metadata-keys")
+    async def api_metadata_keys(request: Request):
+        """JSON API endpoint for getting all available metadata keys."""
+        # Check authentication first
+        session_data, error_response = await require_auth_api(request, session_manager, json_response=True)
+        if error_response:
+            return error_response
+
+        try:
+            from ..kb.utils import get_metadata_keys
+            
+            # Get all unique metadata keys
+            keys = get_metadata_keys()
+            
+            return JSONResponse({
+                "keys": keys
+            })
+
+        except Exception as e:
+            logger.error(f"Error in api_metadata_keys: {e}", exc_info=True)
+            return JSONResponse(
+                {"error": str(e)},
+                status_code=500
+            )
+
+    @app.route("/api/logs")
+    async def api_logs(request: Request):
+        """JSON API endpoint for getting search logs with filters."""
+        # Check authentication first
+        session_data, error_response = await require_auth_api(request, session_manager, json_response=True)
+        if error_response:
+            return error_response
+
+        try:
+            from ..kb.search.logs import get_search_logs
+            
+            # Get query parameters
+            limit = int(request.query_params.get("limit", "20"))
+            offset = int(request.query_params.get("offset", "0"))
+            query = request.query_params.get("query", None)
+            embedding_name = request.query_params.get("embedding_name", None)
+            date_from = request.query_params.get("date_from", None)
+            date_to = request.query_params.get("date_to", None)
+            min_time = request.query_params.get("min_time_search_total", None)
+            min_time_search_total = float(min_time) if min_time else None
+            
+            # Get logs
+            logs = get_search_logs(
+                limit=limit,
+                offset=offset,
+                query=query,
+                embedding_name=embedding_name,
+                date_from=date_from,
+                date_to=date_to,
+                min_time_search_total=min_time_search_total,
+            )
+            
+            return JSONResponse({
+                "logs": logs,
+                "limit": limit,
+                "offset": offset,
+            })
+
+        except Exception as e:
+            logger.error(f"Error in api_logs: {e}", exc_info=True)
+            return JSONResponse(
+                {"error": str(e)},
+                status_code=500
             )
 

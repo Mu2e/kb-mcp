@@ -182,6 +182,67 @@ def find_all_duplicates(
     ]
 
 
+def get_metadata_keys(session=None, limit: int = 1000) -> List[str]:
+    """
+    Get all unique metadata keys from documents.
+    
+    This function extracts all distinct keys from the `meta` JSON field
+    across all documents in the database. It uses efficient database
+    queries for both PostgreSQL and SQLite.
+    
+    Note: For better performance with large databases, consider implementing
+    a cache table that stores metadata keys and is updated when documents
+    are added/updated. This would avoid scanning documents on each call.
+    
+    Args:
+        session: Optional database session. If not provided, creates a new one.
+        limit: Maximum number of documents to scan for SQLite (PostgreSQL uses
+               efficient JSON operators and doesn't need this limit).
+    
+    Returns:
+        List of unique metadata keys, sorted alphabetically.
+    
+    Examples:
+        >>> keys = get_metadata_keys()
+        >>> print(keys)
+        ['author', 'category', 'date', 'title']
+    """
+    own_session = session is None
+    if own_session:
+        session = get_db_session().__enter__()
+    
+    try:
+        dialect_name = session.bind.dialect.name if session.bind else None
+        all_keys = set()
+        
+        if dialect_name == "postgresql":
+            # PostgreSQL: use jsonb_object_keys for efficient extraction
+            from sqlalchemy import text
+            result = session.execute(text("""
+                SELECT DISTINCT jsonb_object_keys(meta) as key
+                FROM documents
+                WHERE meta IS NOT NULL AND meta != '{}'::jsonb
+            """))
+            all_keys = {row[0] for row in result}
+        else:
+            # SQLite: query documents and extract keys
+            documents = session.query(Document).filter(
+                Document.meta.isnot(None)
+            ).limit(limit).all()
+            
+            for doc in documents:
+                if doc.meta and isinstance(doc.meta, dict):
+                    all_keys.update(doc.meta.keys())
+        
+        # Sort keys alphabetically
+        sorted_keys = sorted(list(all_keys))
+        return sorted_keys
+    
+    finally:
+        if own_session:
+            session.close()
+
+
 def deduplicate(
     by_hash: bool = True,
     by_id: bool = False,

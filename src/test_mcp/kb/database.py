@@ -19,6 +19,13 @@ except ImportError:
     # Embedding module may not be available if dependencies aren't installed
     pass
 
+# Import search models to ensure they're registered with Base.metadata
+try:
+    from .search.core import SearchLog  # noqa: F401
+except ImportError:
+    # Search module may not be available if dependencies aren't installed
+    pass
+
 logger = logging.getLogger(__name__)
 
 
@@ -141,7 +148,7 @@ def init_db(create_tables: bool = True) -> None:
     logger.info(f"Initializing database: {database_url.split('@')[-1] if '@' in database_url else database_url}")
 
     if create_tables:
-        # Create all tables
+        # Create all tables (including SearchLog from search module)
         Base.metadata.create_all(bind=engine)
         logger.info("Database tables created/verified")
 

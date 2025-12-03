@@ -95,6 +95,7 @@ def _search_pgvector(
                 c.id AS chunk_id,
                 c.document_id AS parent_id,
                 c.chunk_index,
+                c.chunk_strategy,
                 c.char_start_index,
                 c.char_end_index,
                 c.token_length,
@@ -105,35 +106,24 @@ def _search_pgvector(
             WHERE {where_clause_sql}
             ORDER BY e.embedding <=> CAST(:query_embedding AS vector)
             LIMIT :initial_limit
-        ),
-        best_chunks AS (
-            SELECT DISTINCT ON (parent_id)
-                chunk_id,
-                parent_id,
-                chunk_index,
-                char_start_index,
-                char_end_index,
-                token_length,
-                score
-            FROM similarity_scores
-            ORDER BY parent_id, score DESC
         )
         SELECT 
-            bc.chunk_id,
-            bc.parent_id,
-            bc.chunk_index,
-            bc.char_start_index,
-            bc.char_end_index,
-            bc.token_length,
-            bc.score,
+            ss.chunk_id,
+            ss.parent_id,
+            ss.chunk_index,
+            ss.chunk_strategy,
+            ss.char_start_index,
+            ss.char_end_index,
+            ss.token_length,
+            ss.score,
             d.id AS doc_id,
             d.source_id,
             d.doc_type,
             d.meta
-        FROM best_chunks bc
-        JOIN documents d ON bc.parent_id = d.id
-        ORDER BY bc.score DESC
-        LIMIT :max_results
+        FROM similarity_scores ss
+        JOIN documents d ON ss.parent_id = d.id
+        ORDER BY ss.score DESC
+        LIMIT :initial_limit
     """
 
     # Set PostgreSQL session parameters for optimal query performance
@@ -180,6 +170,7 @@ def _search_pgvector(
                 "chunk_id": row.chunk_id,
                 "document_id": row.doc_id,
                 "chunk_index": row.chunk_index,
+                "chunk_strategy": row.chunk_strategy,
                 "char_start": row.char_start_index,
                 "char_end": row.char_end_index,
                 "token_length": row.token_length,
@@ -225,13 +216,12 @@ def _search_pgvector(
             doc_results[doc_id] = {
                 "document": doc,
                 "chunks": [],
-                "best_distance": result["similarity"],
-                "best_chunk": None,
             }
 
         chunk_info = {
             "chunk_id": result["chunk_id"],
             "chunk_index": result["chunk_index"],
+            "chunk_strategy": result.get("chunk_strategy"),
             "similarity": result["similarity"],
             "char_start": result["char_start"],
             "char_end": result["char_end"],
@@ -239,17 +229,18 @@ def _search_pgvector(
         }
         doc_results[doc_id]["chunks"].append(chunk_info)
 
-        if result["similarity"] >= doc_results[doc_id]["best_distance"]:
-            doc_results[doc_id]["best_distance"] = result["similarity"]
-            doc_results[doc_id]["best_chunk"] = chunk_info
-
     final_results = list(doc_results.values())
     time_deduplication = time.time() - dedup_start
 
-    final_results.sort(key=lambda x: x["best_distance"], reverse=True)
-
+    # Sort chunks within each document by similarity (best first)
     for result in final_results:
         result["chunks"].sort(key=lambda x: x["similarity"], reverse=True)
+
+    # Sort documents by best similarity (first chunk's similarity)
+    final_results.sort(key=lambda x: x["chunks"][0]["similarity"] if x["chunks"] else 0, reverse=True)
+    
+    # Limit to max_results documents
+    final_results = final_results[:max_results]
 
     time_search_total = time.time() - start_time
     return {

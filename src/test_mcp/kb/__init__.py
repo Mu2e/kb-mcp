@@ -3,7 +3,7 @@
 from .base import add, add_from_path, add_many, add_source, get, get_count, get_options, get_children, delete_document
 from .core import Document, Source
 from .database import get_db_session, init_db
-from .utils import deduplicate, find_all_duplicates, get_stats, list_sources
+from .utils import deduplicate, find_all_duplicates, get_stats, list_sources, get_metadata_keys
 
 # Import statistics if available
 try:
@@ -34,6 +34,7 @@ __all__ = [
     "find_all_duplicates",
     "get_stats",
     "list_sources",
+    "get_metadata_keys",
     "Document",
     "Source",
     "get_db_session",
@@ -54,4 +55,5 @@ try:
     __all__.append("search")
 except ImportError:
     search = None
+
 

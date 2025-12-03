@@ -123,15 +123,32 @@ def _parse_elasticsearch_filter(
             if not isinstance(range_params, dict):
                 raise ValueError("range parameters must be a dictionary")
             
+            # Check if this is a direct Document column (insert_time, creating_time, update_time)
+            # vs a metadata field
+            direct_columns = {"insert_time", "creating_time", "update_time"}
+            is_direct_column = field in direct_columns
+            
             conditions = []
             if "gte" in range_params:
-                conditions.append(build_meta_filter(field, range_params["gte"], operator=">="))
+                if is_direct_column:
+                    conditions.append(getattr(doc_alias, field) >= range_params["gte"])
+                else:
+                    conditions.append(build_meta_filter(field, range_params["gte"], operator=">="))
             if "gt" in range_params:
-                conditions.append(build_meta_filter(field, range_params["gt"], operator=">"))
+                if is_direct_column:
+                    conditions.append(getattr(doc_alias, field) > range_params["gt"])
+                else:
+                    conditions.append(build_meta_filter(field, range_params["gt"], operator=">"))
             if "lte" in range_params:
-                conditions.append(build_meta_filter(field, range_params["lte"], operator="<="))
+                if is_direct_column:
+                    conditions.append(getattr(doc_alias, field) <= range_params["lte"])
+                else:
+                    conditions.append(build_meta_filter(field, range_params["lte"], operator="<="))
             if "lt" in range_params:
-                conditions.append(build_meta_filter(field, range_params["lt"], operator="<"))
+                if is_direct_column:
+                    conditions.append(getattr(doc_alias, field) < range_params["lt"])
+                else:
+                    conditions.append(build_meta_filter(field, range_params["lt"], operator="<"))
             
             if not conditions:
                 raise ValueError("range query must have at least one range parameter (gte, gt, lte, lt)")
