@@ -38,6 +38,9 @@ EMBEDDER_CLASSES: Dict[str, Type] = {
     "st": SentenceTransformersEmbedder,  # Short alias
 }
 
+# Cache for embedder instances - keyed by (provider, model) tuple
+_EMBEDDER_CACHE: Dict[tuple, Any] = {}
+
 
 def get_embedder(
     embedding_name: Optional[str] = None,
@@ -146,11 +149,21 @@ def get_embedder(
             f"Set EMBEDDING_MODEL env var or pass model parameter."
         )
 
+    # Check cache first (only if no kwargs, as kwargs might change behavior)
+    cache_key = (provider_lower, model)
+    if not kwargs and cache_key in _EMBEDDER_CACHE:
+        logger.debug(f"Using cached embedder for {provider_lower}/{model}")
+        return _EMBEDDER_CACHE[cache_key]
 
     embedder_class = EMBEDDER_CLASSES[provider_lower]
 
     try:
-        return embedder_class(model_name=model, **kwargs)
+        embedder = embedder_class(model_name=model, **kwargs)
+        # Cache the embedder instance (only if no kwargs, as kwargs might change behavior)
+        if not kwargs:
+            _EMBEDDER_CACHE[cache_key] = embedder
+            logger.debug(f"Cached embedder instance for {provider_lower}/{model}")
+        return embedder
     except Exception as e:
         logger.error(f"Error creating embedder '{provider}': {e}")
         raise
