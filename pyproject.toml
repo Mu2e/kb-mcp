@@ -60,6 +60,19 @@ llm = [
     "openai>=1.0.0",
 ]
 
+# Chunking module: Text chunking dependencies
+chunking = [
+    "tiktoken>=0.5.0",  # Token counting for chunking
+]
+
+# Embedding module: Embedding generation dependencies
+embedding = [
+    "openai>=1.0.0",  # OpenAI embeddings (shared with llm)
+    "sentence-transformers>=2.2.0",  # SentenceTransformers embeddings
+    "pgvector>=0.2.0",  # PostgreSQL vector extension support (optional, for PostgreSQL only)
+    "tiktoken>=0.5.0",  # Token counting for chunking
+]
+
 [project.scripts]
 # Server module CLI commands
 test-mcp = "test_mcp.server:main"

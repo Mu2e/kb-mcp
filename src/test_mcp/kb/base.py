@@ -536,6 +536,7 @@ def _get(
     limit: int | None = None,
     offset: int | None = None,
     count_only: bool = False,
+    session = None,
 ) -> Document | list[Document] | int | None:
     """Get document(s) by various criteria.
 
@@ -592,6 +593,7 @@ def _get(
         limit: Maximum number of documents to return (ignored if count_only=True)
         offset: Number of documents to skip (ignored if count_only=True)
         count_only: If True, return count instead of documents
+        session: Optional database session. If None, creates a new session.
 
     Returns:
         - If count_only=True: int (count of matching documents)
@@ -602,7 +604,13 @@ def _get(
     """
     _ensure_db_initialized()
 
-    with get_db_session() as session:
+    # Determine if we need to create our own session
+    own_session = session is None
+
+    if own_session:
+        session = get_db_session().__enter__()
+
+    try:
         query = session.query(Document)
 
         # Handle explicit uuid parameter (highest priority)
@@ -668,17 +676,23 @@ def _get(
         # Execute query
         documents = query.all()
 
-        # Detach all results from session
-        for doc in documents:
-            session.expunge(doc)
+        # Only detach from session if we created it
+        if own_session:
+            for doc in documents:
+                session.expunge(doc)
 
-    # Return appropriate type
-    if len(documents) == 0:
-        return None
-    elif len(documents) == 1:
-        return documents[0]
-    else:
-        return documents
+        # Return appropriate type
+        if len(documents) == 0:
+            return None
+        elif len(documents) == 1:
+            return documents[0]
+        else:
+            return documents
+
+    finally:
+        # Close session if we created it
+        if own_session:
+            session.close()
 
 
 def get(
@@ -690,6 +704,7 @@ def get(
     filter_dict: Dict[str, Any] | None = None,
     limit: int | None = None,
     offset: int | None = None,
+    session = None,
 ) -> Document | list[Document] | None:
     """Get document(s) by various criteria.
 
@@ -742,6 +757,8 @@ def get(
                     - text_contains: Filter documents containing text (case-insensitive)
         limit: Maximum number of documents to return
         offset: Number of documents to skip (for pagination)
+        session: Optional database session. If provided, documents remain attached to session.
+                If None, creates a new session and detaches documents.
 
     Returns:
         - Single Document if one match found
@@ -757,6 +774,7 @@ def get(
         limit=limit,
         offset=offset,
         count_only=False,
+        session=session,
     )
     # Type narrowing: when count_only=False, result is never int
     if isinstance(result, int):
@@ -888,6 +906,63 @@ def add_source(
     return source
 
 
+
+
+def delete_document(
+    document_id: str,
+    session: Optional[Any] = None,
+) -> Dict[str, Any]:
+    """Delete a document and return information about what was deleted.
+    
+    Args:
+        document_id: UUID of the document to delete
+        session: Optional database session (creates new one if not provided)
+    
+    Returns:
+        Dictionary with:
+        - deleted: bool - Whether the document was deleted
+        - document_id: str - The document ID
+        - chunk_count: int - Number of chunks that were cascade deleted (if available)
+    
+    Raises:
+        ValueError: If document not found
+    """
+    own_session = session is None
+    if own_session:
+        session = get_db_session().__enter__()
+    
+    try:
+        document = session.query(Document).filter(Document.id == document_id).first()
+        if not document:
+            raise ValueError(f"Document {document_id} not found")
+        
+        # Get chunk count before deletion (if embedding module available)
+        chunk_count = 0
+        try:
+            from .embedding import get_chunks
+            chunks = get_chunks(document_id=document_id)
+            chunk_count = len(chunks) if chunks else 0
+        except (ImportError, Exception):
+            pass
+        
+        # Delete the document (chunks and embeddings will be cascade deleted)
+        session.delete(document)
+        
+        if own_session:
+            session.commit()
+        
+        return {
+            "deleted": True,
+            "document_id": document_id,
+            "chunk_count": chunk_count,
+        }
+    except Exception:
+        if own_session:
+            session.rollback()
+        raise
+    finally:
+        if own_session:
+            session.close()
 
 
 def get_options() -> Dict[str, Any]:

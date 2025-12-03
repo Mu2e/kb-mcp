@@ -11,6 +11,14 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from .core import Base
 
+# Import embedding models to ensure they're registered with Base.metadata
+# This ensures database tables are created when init_db() is called
+try:
+    from .embedding.core import Chunk, EmbeddingConfig  # noqa: F401
+except ImportError:
+    # Embedding module may not be available if dependencies aren't installed
+    pass
+
 logger = logging.getLogger(__name__)
 
 

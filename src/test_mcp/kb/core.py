@@ -18,6 +18,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
+from sqlalchemy.inspection import inspect as sqlalchemy_inspect
 
 Base = declarative_base()
 
@@ -150,6 +151,156 @@ class Document(Base):
         return (
             f"<Document(id={self.id}, source_id={self.source_id}, "
             f"doc_id={self.doc_id}, uri={self.uri})>"
+        )
+
+    def chunk(self, strategy: Optional[str] = None, config: Optional[dict] = None):
+        """Chunk this document and save chunks to the database.
+
+        This is a convenience method that calls chunk_document() from the embedding module.
+        Uses the object's session if attached, otherwise creates a new session.
+
+        Args:
+            strategy: Optional chunking strategy ("tokens" or "slide").
+                     If None, reads from CHUNK_STRATEGY env var, defaults to "tokens".
+            config: Optional chunking configuration
+
+        Returns:
+            List of Chunk objects (saved to database)
+
+        Example:
+            >>> doc = get(uuid="abc-123")
+            >>> chunks = doc.chunk(strategy="tokens", config={"chunk_size": 500})
+        """
+        try:
+            from .embedding import chunk_document
+        except ImportError:
+            raise ImportError(
+                "Embedding module not available. Install with: pip install -e '.[embedding]'"
+            )
+
+        # Use object's session if attached, otherwise None (will create new session)
+        obj_state = sqlalchemy_inspect(self)
+        session = obj_state.session if obj_state.session is not None else None
+
+        return chunk_document(self, strategy=strategy, config=config, session=session)
+
+    def get_chunks(self, chunk_strategy: Optional[str] = None):
+        """Get all chunks for this document.
+
+        This is a convenience method that calls get_chunks() from the embedding module.
+        Uses the object's session if attached, otherwise creates a new session.
+
+        Args:
+            chunk_strategy: Optional filter for specific chunking strategy
+
+        Returns:
+            If object has session: List of Chunk objects (attached to session)
+            If no session: List of chunk dictionaries
+
+        Example:
+            >>> doc = get(uuid="abc-123")
+            >>> chunks = doc.get_chunks(chunk_strategy="tokens_1000_200")
+        """
+        try:
+            from .embedding import get_chunks
+        except ImportError:
+            raise ImportError(
+                "Embedding module not available. Install with: pip install -e '.[embedding]'"
+            )
+
+        # Use object's session if attached, otherwise None (will create new session)
+        obj_state = sqlalchemy_inspect(self)
+        session = obj_state.session if obj_state.session is not None else None
+
+        return get_chunks(document_id=self.id, chunk_strategy=chunk_strategy, session=session)
+
+    def drop_chunks(self, chunk_strategy: Optional[str] = None) -> int:
+        """Drop chunks for this document.
+
+        This is a convenience method that calls drop_chunks() from the embedding module.
+        Uses the object's session if attached, otherwise creates a new session.
+
+        Args:
+            chunk_strategy: Optional filter for specific chunking strategy.
+                           If provided, only drops chunks with this strategy.
+                           If None, drops ALL chunks for the document.
+
+        Returns:
+            Number of chunks deleted
+
+        Example:
+            >>> doc = get(uuid="abc-123")
+            >>> count = doc.drop_chunks(chunk_strategy="tokens_1000_200")
+            >>> print(f"Deleted {count} chunks")
+        """
+        try:
+            from .embedding import drop_chunks
+        except ImportError:
+            raise ImportError(
+                "Embedding module not available. Install with: pip install -e '.[embedding]'"
+            )
+
+        # Use object's session if attached, otherwise None (will create new session)
+        obj_state = sqlalchemy_inspect(self)
+        session = obj_state.session if obj_state.session is not None else None
+
+        return drop_chunks(document_id=self.id, chunk_strategy=chunk_strategy, session=session)
+
+    def chunk_and_embed(
+        self,
+        strategy: Optional[str] = None,
+        chunk_config: Optional[dict] = None,
+        embedding_name: Optional[str] = None,
+        provider: Optional[str] = None,
+        model: Optional[str] = None,
+        batch_size: Optional[int] = None,
+        **kwargs,
+    ):
+        """Chunk this document and embed all chunks.
+
+        This is a convenience method that calls chunk_and_embed() from the embedding module.
+        Similar to doc.chunk() but also embeds the chunks after creating them.
+        Uses the object's session if attached, otherwise creates a new session.
+
+        Args:
+            strategy: Optional chunking strategy ("tokens" or "slide").
+                     If None, reads from CHUNK_STRATEGY env var, defaults to "tokens".
+            chunk_config: Optional chunking configuration
+            embedding_name: Optional short name for the embedding config (e.g., "openai-small")
+                           If None, uses provider/model or env vars.
+            provider: Optional provider name (used if embedding_name is not provided)
+            model: Optional model name (used if embedding_name is not provided)
+            batch_size: Optional batch size for embedding generation
+            **kwargs: Additional parameters passed to embedder
+
+        Returns:
+            List of Chunk objects (saved to database and embedded)
+
+        Example:
+            >>> doc = get(uuid="abc-123")
+            >>> chunks = doc.chunk_and_embed(embedding_name="openai-small")
+        """
+        try:
+            from .embedding import chunk_and_embed
+        except ImportError:
+            raise ImportError(
+                "Embedding module not available. Install with: pip install -e '.[embedding]'"
+            )
+
+        # Use object's session if attached, otherwise None
+        obj_state = sqlalchemy_inspect(self)
+        session = obj_state.session if obj_state.session is not None else None
+
+        return chunk_and_embed(
+            self,
+            strategy=strategy,
+            chunk_config=chunk_config,
+            embedding_name=embedding_name,
+            provider=provider,
+            model=model,
+            batch_size=batch_size,
+            session=session,
+            **kwargs
         )
 
     @classmethod

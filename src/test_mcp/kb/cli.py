@@ -2,16 +2,91 @@
 """CLI tool for knowledge base operations."""
 
 import argparse
+import json
 import os
 import shutil
 import sys
 from pathlib import Path
 
-from . import add, add_from_path, add_source, deduplicate, get, get_stats, list_sources
+
+class GroupedHelpFormatter(argparse.RawDescriptionHelpFormatter):
+    """Custom formatter that groups commands with spacing."""
+    
+    def _format_action(self, action):
+        """Format individual actions, adding spacing for groups."""
+        if isinstance(action, argparse._SubParsersAction):
+            # Custom formatting for subparsers
+            parts = []
+            
+            # Build a map of command name to help text
+            # Get help from choice actions (these are the actions created when adding subparsers)
+            cmd_help = {}
+            for choice_action in action._choices_actions:
+                cmd_name = choice_action.dest
+                help_text = getattr(choice_action, 'help', '') or ''
+                cmd_help[cmd_name] = help_text
+            
+            # Find aliases by checking which parsers are the same
+            # Aliases point to the same parser object
+            parser_to_cmds = {}
+            for cmd_name, parser in action._name_parser_map.items():
+                parser_id = id(parser)  # Use object id to identify same parser
+                if parser_id not in parser_to_cmds:
+                    parser_to_cmds[parser_id] = []
+                parser_to_cmds[parser_id].append(cmd_name)
+            
+            # Define groups with their commands in order (only primary names, aliases shown separately)
+            command_groups = [
+                ("Document Operations", ["add", "get", "embed", "drop"]),
+                ("Chunks, Embeddings & Sources", ["source", "chunks", "embedding"]),  # "emb" is an alias, will be shown
+                ("Tools & Statistics", ["tools", "stats"]),
+            ]
+            
+            for group_name, command_names in command_groups:
+                # Add spacing before each group (except the first)
+                if parts:
+                    parts.append("")
+                
+                # Add group header
+                parts.append(f"  {group_name}:")
+                
+                # Add commands in this group
+                for cmd_name in command_names:
+                    if cmd_name in action._name_parser_map:
+                        help_text = cmd_help.get(cmd_name, "")
+                        # Find aliases for this command
+                        parser = action._name_parser_map[cmd_name]
+                        parser_id = id(parser)
+                        aliases = [c for c in parser_to_cmds.get(parser_id, []) if c != cmd_name]
+                        # Format aliases
+                        if aliases:
+                            alias_str = f" ({', '.join(aliases)})"
+                        else:
+                            alias_str = ""
+                        parts.append(f"    {cmd_name:<18}{alias_str:<10} {help_text}")
+            
+            return "\n".join(parts) + "\n"
+        
+        return super()._format_action(action)
+
+from . import add, add_from_path, add_source, deduplicate, get, get_stats, list_sources, delete_document
 from .utils import find_all_duplicates
 from .core import Document, Source
 from .database import get_db_session
 from ..parser import parse
+
+# Import embedding functions (may not be available if dependencies not installed)
+try:
+    from .embedding import (
+        get_chunk_strategies, get_chunks, drop_chunks, get_embedding_names,
+        embed_chunk, embed_chunks, chunk_and_embed, get_embeddings, get_embedding_vector,
+        drop_embedding, drop_embedding_table
+    )
+    from .embedding.core import Chunk
+    EMBEDDING_AVAILABLE = True
+except ImportError:
+    EMBEDDING_AVAILABLE = False
+    Chunk = None
 
 
 def _interactive_dedup_choice(existing_by_id, existing_by_hash, new_doc):
@@ -179,6 +254,35 @@ def cmd_add(args):
                 print(f"    URI: {doc.uri}")
             if doc.text:
                 print(f"    Text length: {len(doc.text)} characters")
+        
+        # Automatically chunk and embed if not suppressed
+        if args.no_embed:
+            print("\n(Skipping chunking and embedding)")
+        elif not EMBEDDING_AVAILABLE:
+            print("\n(Skipping chunking and embedding - embedding module not available)")
+        else:
+            try:
+                from .embedding import chunk_and_embed
+                
+                for doc in documents:
+                    print(f"\nChunking and embedding document {doc.id}...")
+                    chunks = chunk_and_embed(
+                        doc,
+                        strategy=args.strategy,
+                        chunk_config={
+                            "chunk_size": args.chunk_size,
+                            "chunk_overlap": args.chunk_overlap,
+                        } if args.chunk_size or args.chunk_overlap else None,
+                        embedding_name=args.embedding_name,
+                        provider=args.provider,
+                        model=args.model,
+                        batch_size=args.batch_size,
+                    )
+                    print(f"  ✓ Chunked and embedded {len(chunks)} chunk(s)")
+            except Exception as e:
+                print(f"Warning: Could not chunk and embed documents: {e}")
+                import traceback
+                traceback.print_exc()
     except Exception as e:
         print(f"Error adding document: {e}")
         import traceback
@@ -194,6 +298,8 @@ def cmd_get(args):
             uuid=args.uuid,
             source_id=args.source_id,
             doc_id=args.doc_id,
+            limit=args.limit,
+            offset=args.offset,
         )
 
         if result is None:
@@ -337,14 +443,384 @@ def cmd_deduplicate(args):
     print("  (Keeping oldest document in each duplicate group, deleting others)")
     
     result = deduplicate()
-    
+
     print(f"✓ Deduplication complete:")
     print(f"  Deleted: {result['deleted']} duplicate document(s)")
 
 
+def cmd_chunks_list(args):
+    """List all chunk strategies."""
+    if not EMBEDDING_AVAILABLE:
+        print("Error: Embedding module not available. Install with: pip install tiktoken")
+        sys.exit(1)
+
+    strategies = get_chunk_strategies()
+
+    if args.json:
+        print(json.dumps(strategies, indent=2))
+        return
+
+    if not strategies:
+        print("No chunk strategies found.")
+        return
+
+    print(f"Chunk Strategies ({len(strategies)}):")
+    print()
+    for strategy in strategies:
+        print(f"  Strategy: {strategy['strategy']}")
+        print(f"  Count: {strategy['count']} chunk(s)")
+        if strategy['meta']:
+            print(f"  Config: {json.dumps(strategy['meta'])}")
+        print(f"  Created: {strategy['created_time']}")
+        print()
+
+
+def cmd_chunks_get(args):
+    """Get chunks for a document."""
+    if not EMBEDDING_AVAILABLE:
+        print("Error: Embedding module not available. Install with: pip install tiktoken")
+        sys.exit(1)
+
+    chunks = get_chunks(
+        document_id=args.document_id,
+        chunk_strategy=args.strategy,
+        limit=args.limit,
+        offset=args.offset,
+    )
+
+    if args.json:
+        print(json.dumps(chunks, indent=2))
+        return
+
+    if not chunks:
+        print(f"No chunks found for document {args.document_id}")
+        if args.strategy:
+            print(f"  (with strategy: {args.strategy})")
+        return
+
+    print(f"Chunks for document {args.document_id}: ({len(chunks)} chunk(s))")
+    if args.strategy:
+        print(f"  Strategy filter: {args.strategy}")
+    print()
+
+    for chunk in chunks:
+        print(f"  Chunk #{chunk['chunk_index']}")
+        print(f"    ID: {chunk['id']}")
+        print(f"    Strategy: {chunk['chunk_strategy']}")
+        print(f"    Token length: {chunk['token_length']}")
+        print(f"    Char range: {chunk['char_start_index']}-{chunk['char_end_index']}")
+        text_preview = chunk['text'][:100] + "..." if len(chunk['text']) > 100 else chunk['text']
+        print(f"    Text: {text_preview}")
+        print()
+
+
+def cmd_chunks_drop(args):
+    """Drop chunks for a document."""
+    if not EMBEDDING_AVAILABLE:
+        print("Error: Embedding module not available. Install with: pip install tiktoken")
+        sys.exit(1)
+
+    # Get confirmation unless --yes is specified
+    if not args.yes:
+        strategy_msg = f" with strategy '{args.strategy}'" if args.strategy else ""
+        confirmation = input(f"Drop all chunks{strategy_msg} for document {args.document_id}? [y/N]: ")
+        if confirmation.lower() not in ['y', 'yes']:
+            print("Cancelled.")
+            return
+
+    count = drop_chunks(
+        document_id=args.document_id,
+        chunk_strategy=args.strategy,
+    )
+
+    strategy_msg = f" with strategy '{args.strategy}'" if args.strategy else ""
+    print(f"✓ Deleted {count} chunk(s){strategy_msg}")
+
+
+def cmd_chunks_chunk(args):
+    """Chunk a document."""
+    if not EMBEDDING_AVAILABLE:
+        print("Error: Embedding module not available. Install with: pip install tiktoken")
+        sys.exit(1)
+
+    from .embedding import chunk_document
+
+    # Get the document
+    doc = get(uuid=args.document_id)
+    if not doc:
+        print(f"Error: Document {args.document_id} not found")
+        sys.exit(1)
+
+    # Build config from arguments
+    config = {}
+    if args.chunk_size:
+        config['chunk_size'] = args.chunk_size
+    if args.chunk_overlap:
+        config['chunk_overlap'] = args.chunk_overlap
+
+    print(f"Chunking document {args.document_id} ({doc.source_id}/{doc.doc_id})...")
+    print(f"  Strategy: {args.strategy}")
+    if config:
+        print(f"  Config: {json.dumps(config)}")
+
+    try:
+        chunks = chunk_document(doc, strategy=args.strategy, config=config if config else None)
+        print(f"✓ Created {len(chunks)} chunk(s)")
+
+        if not args.quiet:
+            for i, chunk in enumerate(chunks[:5]):  # Show first 5 chunks
+                print(f"\n  Chunk #{i}:")
+                print(f"    Tokens: {chunk.token_length}")
+                text_preview = chunk.text[:80] + "..." if len(chunk.text) > 80 else chunk.text
+                print(f"    Text: {text_preview}")
+
+            if len(chunks) > 5:
+                print(f"\n  ... and {len(chunks) - 5} more chunks")
+    except Exception as e:
+        print(f"Error chunking document: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+
+def cmd_embedding_list(args):
+    """List all embedding configurations."""
+    if not EMBEDDING_AVAILABLE:
+        print("Error: Embedding module not available.")
+        sys.exit(1)
+
+    configs = get_embedding_names()
+
+    if args.json:
+        print(json.dumps(configs, indent=2))
+        return
+
+    if not configs:
+        print("No embedding configurations found.")
+        return
+
+    print(f"Embedding Configurations ({len(configs)}):")
+    print()
+    for config in configs:
+        print(f"  Short name: {config['short_name']}")
+        print(f"  Provider: {config['provider']}")
+        print(f"  Model: {config['model']}")
+        print(f"  Dimension: {config['dimension']}")
+        print(f"  Table: {config['table_name']}")
+        print(f"  Count: {config.get('count', 0)} embeddings")
+        if config['meta']:
+            print(f"  Meta: {json.dumps(config['meta'])}")
+        print(f"  Created: {config['created_time']}")
+        print()
+
+
+def cmd_embed(args):
+    """Chunk and embed a document (top-level command)."""
+    if not EMBEDDING_AVAILABLE:
+        print("Error: Embedding module not available.")
+        sys.exit(1)
+
+    try:
+        # Get the document
+        from .core import Document
+        with get_db_session() as session:
+            document = session.query(Document).filter(Document.id == args.document_id).first()
+            if not document:
+                print(f"Error: Document {args.document_id} not found")
+                sys.exit(1)
+
+            print(f"Chunking and embedding document {args.document_id}...")
+            
+            # Chunk and embed the document
+            chunks = chunk_and_embed(
+                document,
+                strategy=args.strategy,
+                chunk_config={
+                    "chunk_size": args.chunk_size,
+                    "chunk_overlap": args.chunk_overlap,
+                } if args.chunk_size or args.chunk_overlap else None,
+                embedding_name=args.embedding_name,
+                provider=args.provider,
+                model=args.model,
+                batch_size=args.batch_size,
+                session=session
+            )
+            
+            print(f"Successfully chunked and embedded {len(chunks)} chunk(s)")
+    except Exception as e:
+        print(f"Error chunking and embedding document: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+
+def cmd_drop(args):
+    """Delete a document (top-level command)."""
+    try:
+        # Get confirmation unless --yes is specified
+        if not args.yes:
+            confirmation = input(f"Delete document {args.document_id} and all its chunks/embeddings? [y/N]: ")
+            if confirmation.lower() not in ['y', 'yes']:
+                print("Cancelled.")
+                return
+
+        result = delete_document(args.document_id)
+        
+        print(f"✓ Deleted document {args.document_id}")
+        if result.get("chunk_count", 0) > 0:
+            print(f"  (Also deleted {result['chunk_count']} chunk(s) and their embeddings)")
+    except ValueError as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+    except Exception as e:
+        print(f"Error deleting document: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+
+def cmd_embedding_get(args):
+    """Get embeddings for a chunk or document."""
+    if not EMBEDDING_AVAILABLE:
+        print("Error: Embedding module not available.")
+        sys.exit(1)
+
+    try:
+        if args.chunk_id:
+            # Get embeddings for a specific chunk
+            if args.vector:
+                # Get embedding vector
+                if not args.embedding_name:
+                    print("Error: --embedding-name is required when using --vector")
+                    sys.exit(1)
+                embedding = get_embedding_vector(args.chunk_id, args.embedding_name)
+                if embedding is None:
+                    print(f"No embedding found for chunk {args.chunk_id} with embedding '{args.embedding_name}'")
+                    sys.exit(1)
+                
+                if args.json:
+                    print(json.dumps(embedding, indent=2))
+                else:
+                    print(f"Embedding vector (dimension: {len(embedding)}):")
+                    print(f"  First 10 values: {embedding[:10]}...")
+            else:
+                # Get embedding metadata
+                embeddings = get_embeddings(args.chunk_id, embedding_name=args.embedding_name)
+                if not embeddings:
+                    print(f"No embeddings found for chunk {args.chunk_id}")
+                    sys.exit(1)
+                
+                if args.json:
+                    print(json.dumps(embeddings, indent=2))
+                else:
+                    print(f"Embeddings for chunk {args.chunk_id}:")
+                    for emb_name, emb_data in embeddings.items():
+                        print(f"  {emb_name}:")
+                        print(f"    ID: {emb_data['id']}")
+        elif args.document_id:
+            # Get embeddings for all chunks in a document
+            chunks = get_chunks(document_id=args.document_id)
+            if not chunks:
+                print(f"No chunks found for document {args.document_id}")
+                sys.exit(1)
+
+            all_embeddings = {}
+            for chunk in chunks:
+                chunk_id = chunk['id'] if isinstance(chunk, dict) else chunk.id
+                embeddings = get_embeddings(chunk_id, embedding_name=args.embedding_name)
+                if embeddings:
+                    all_embeddings[chunk_id] = embeddings
+
+            if not all_embeddings:
+                print(f"No embeddings found for any chunks in document {args.document_id}")
+                sys.exit(1)
+
+            if args.json:
+                print(json.dumps(all_embeddings, indent=2))
+            else:
+                print(f"Embeddings for document {args.document_id} ({len(all_embeddings)} chunks with embeddings):")
+                for chunk_id, embeddings in all_embeddings.items():
+                    print(f"  Chunk {chunk_id[:8]}...: {len(embeddings)} embedding(s)")
+                    for emb_name, emb_data in embeddings.items():
+                        print(f"    {emb_name}: ID {emb_data['id']}")
+        else:
+            print("Error: Either --chunk-id or --document-id must be provided")
+            sys.exit(1)
+    except Exception as e:
+        print(f"Error getting embeddings: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+
+def cmd_embedding_embed(args):
+    """Embed a specific chunk."""
+    if not EMBEDDING_AVAILABLE:
+        print("Error: Embedding module not available.")
+        sys.exit(1)
+
+    try:
+        with get_db_session() as session:
+            chunk = session.query(Chunk).filter(Chunk.id == args.chunk_id).first()
+            if not chunk:
+                print(f"Error: Chunk {args.chunk_id} not found")
+                sys.exit(1)
+
+            print(f"Embedding chunk {args.chunk_id}...")
+            embedding = embed_chunk(
+                chunk,
+                embedding_name=args.embedding_name,
+                provider=args.provider,
+                model=args.model,
+                session=session
+            )
+            print(f"Successfully embedded chunk (dimension: {len(embedding)})")
+    except Exception as e:
+        print(f"Error embedding chunk: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+
+def cmd_embedding_drop(args):
+    """Drop embeddings for a specific chunk."""
+    if not EMBEDDING_AVAILABLE:
+        print("Error: Embedding module not available.")
+        sys.exit(1)
+
+    try:
+        count = drop_embedding(args.chunk_id, embedding_name=args.embedding_name)
+        print(f"Dropped {count} embedding(s) for chunk {args.chunk_id}")
+    except Exception as e:
+        print(f"Error dropping embeddings: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+
+def cmd_embedding_drop_table(args):
+    """Drop an embedding table and configuration."""
+    if not EMBEDDING_AVAILABLE:
+        print("Error: Embedding module not available.")
+        sys.exit(1)
+
+    try:
+        result = drop_embedding_table(args.embedding_name)
+        print(f"Dropped embedding table '{result['table_name']}'")
+        print(f"  Removed {result['count']} embedding(s)")
+    except Exception as e:
+        print(f"Error dropping embedding table: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+
 def main():
     """Main CLI entry point."""
-    parser = argparse.ArgumentParser(description="Knowledge base CLI")
+    parser = argparse.ArgumentParser(
+        description="Knowledge base CLI",
+        formatter_class=GroupedHelpFormatter
+    )
     subparsers = parser.add_subparsers(dest="command", help="Commands")
 
     # Add command
@@ -378,6 +854,42 @@ def main():
         action="store_true",
         help="Copy file to DATA_DIR/local and set URI to local://local/FILENAME"
     )
+    add_parser.add_argument(
+        "--no-embed",
+        action="store_true",
+        help="Skip automatic chunking and embedding after adding document"
+    )
+    add_parser.add_argument(
+        "--strategy",
+        help="Chunking strategy (default: from CHUNK_STRATEGY env var or 'tokens')"
+    )
+    add_parser.add_argument(
+        "--chunk-size",
+        type=int,
+        help="Chunk size in tokens (default: 1000)"
+    )
+    add_parser.add_argument(
+        "--chunk-overlap",
+        type=int,
+        help="Chunk overlap in tokens (default: 200)"
+    )
+    add_parser.add_argument(
+        "--embedding-name",
+        help="Embedding name (e.g., 'openai-small')"
+    )
+    add_parser.add_argument(
+        "--provider",
+        help="Embedding provider (e.g., 'openai')"
+    )
+    add_parser.add_argument(
+        "--model",
+        help="Model name (e.g., 'text-embedding-3-small')"
+    )
+    add_parser.add_argument(
+        "--batch-size",
+        type=int,
+        help="Batch size for embedding generation"
+    )
 
     # Get command
     get_parser = subparsers.add_parser("get", help="Get a document")
@@ -385,15 +897,125 @@ def main():
     get_parser.add_argument("--uuid", help="Document UUID")
     get_parser.add_argument("--source-id", help="Source identifier")
     get_parser.add_argument("--doc-id", help="Document ID")
+    get_parser.add_argument("--limit", type=int, help="Maximum number of documents to return")
+    get_parser.add_argument("--offset", type=int, help="Number of documents to skip (for pagination)")
     get_parser.add_argument("--show-text", action="store_true", help="Show document text content")
 
-    # Stats command
-    stats_parser = subparsers.add_parser("stats", help="Show knowledge base statistics")
-    stats_parser.add_argument(
+    # Embed command (top-level, for documents)
+    embed_parser = subparsers.add_parser("embed", help="Chunk and embed a document")
+    embed_parser.add_argument("document_id", help="Document ID (UUID)")
+    embed_parser.add_argument("--strategy", help="Chunking strategy (default: from CHUNK_STRATEGY env var or 'tokens')")
+    embed_parser.add_argument("--chunk-size", type=int, help="Chunk size in tokens (default: 1000)")
+    embed_parser.add_argument("--chunk-overlap", type=int, help="Chunk overlap in tokens (default: 200)")
+    embed_parser.add_argument("--embedding-name", help="Embedding name (e.g., 'openai-small')")
+    embed_parser.add_argument("--provider", help="Embedding provider (e.g., 'openai')")
+    embed_parser.add_argument("--model", help="Model name (e.g., 'text-embedding-3-small')")
+    embed_parser.add_argument("--batch-size", type=int, help="Batch size for embedding generation")
+
+    # Drop command (top-level, for documents)
+    drop_parser = subparsers.add_parser("drop", help="Delete a document (and all its chunks and embeddings)")
+    drop_parser.add_argument("document_id", help="Document ID (UUID)")
+    drop_parser.add_argument("--yes", action="store_true", help="Skip confirmation prompt")
+
+    # Chunks command
+    chunks_parser = subparsers.add_parser("chunks", help="Manage document chunks")
+    chunks_subparsers = chunks_parser.add_subparsers(dest="chunks_command", help="Chunks commands")
+
+    chunks_list_parser = chunks_subparsers.add_parser("list", help="List chunk strategies")
+    chunks_list_parser.add_argument(
         "--json",
         action="store_true",
-        help="Output statistics as JSON"
+        help="Output as JSON"
     )
+
+    chunks_chunk_parser = chunks_subparsers.add_parser("chunk", help="Chunk a document")
+    chunks_chunk_parser.add_argument("document_id", help="Document UUID")
+    chunks_chunk_parser.add_argument(
+        "--strategy",
+        default="tokens",
+        help="Chunking strategy (default: 'tokens')"
+    )
+    chunks_chunk_parser.add_argument(
+        "--chunk-size",
+        type=int,
+        help="Chunk size in tokens (default: 1000)"
+    )
+    chunks_chunk_parser.add_argument(
+        "--chunk-overlap",
+        type=int,
+        help="Chunk overlap in tokens (default: 200)"
+    )
+    chunks_chunk_parser.add_argument(
+        "--quiet",
+        action="store_true",
+        help="Don't show chunk previews"
+    )
+
+    chunks_get_parser = chunks_subparsers.add_parser("get", help="Get chunks for a document")
+    chunks_get_parser.add_argument("document_id", help="Document UUID")
+    chunks_get_parser.add_argument(
+        "--strategy",
+        help="Filter by chunk strategy (e.g., 'tokens_1000_200')"
+    )
+    chunks_get_parser.add_argument(
+        "--limit",
+        type=int,
+        help="Limit number of chunks returned"
+    )
+    chunks_get_parser.add_argument(
+        "--offset",
+        type=int,
+        help="Offset for pagination"
+    )
+    chunks_get_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output as JSON"
+    )
+
+    chunks_drop_parser = chunks_subparsers.add_parser("drop", help="Drop chunks for a document")
+    chunks_drop_parser.add_argument("document_id", help="Document UUID")
+    chunks_drop_parser.add_argument(
+        "--strategy",
+        help="Only drop chunks with this strategy (default: drop all)"
+    )
+    chunks_drop_parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Skip confirmation prompt"
+    )
+
+    # Embedding command
+    embedding_parser = subparsers.add_parser("embedding", aliases=["emb"], help="Manage embeddings")
+    embedding_subparsers = embedding_parser.add_subparsers(dest="embedding_command", help="Embedding commands")
+
+    embedding_list_parser = embedding_subparsers.add_parser("list", help="List embedding configurations")
+    embedding_list_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output as JSON"
+    )
+    
+    embedding_embed_parser = embedding_subparsers.add_parser("embed", help="Embed a specific chunk")
+    embedding_embed_parser.add_argument("chunk_id", help="Chunk ID (UUID)")
+    embedding_embed_parser.add_argument("--embedding-name", help="Embedding name (e.g., 'openai-small')")
+    embedding_embed_parser.add_argument("--provider", help="Embedding provider (e.g., 'openai')")
+    embedding_embed_parser.add_argument("--model", help="Model name (e.g., 'text-embedding-3-small')")
+    
+    embedding_get_parser = embedding_subparsers.add_parser("get", help="Get embeddings for a chunk or document")
+    embedding_get_group = embedding_get_parser.add_mutually_exclusive_group(required=True)
+    embedding_get_group.add_argument("--chunk-id", help="Chunk ID (UUID)")
+    embedding_get_group.add_argument("--document-id", help="Document ID (UUID) - gets embeddings for all chunks")
+    embedding_get_parser.add_argument("--embedding-name", help="Specific embedding name (optional)")
+    embedding_get_parser.add_argument("--vector", action="store_true", help="Get embedding vector instead of metadata (requires --chunk-id and --embedding-name)")
+    embedding_get_parser.add_argument("--json", action="store_true", help="Output as JSON")
+    
+    embedding_drop_parser = embedding_subparsers.add_parser("drop", help="Drop embeddings for a specific chunk")
+    embedding_drop_parser.add_argument("chunk_id", help="Chunk ID (UUID)")
+    embedding_drop_parser.add_argument("--embedding-name", help="Specific embedding name (optional, drops all if not provided)")
+    
+    embedding_drop_table_parser = embedding_subparsers.add_parser("drop-table", help="Drop an embedding table and configuration")
+    embedding_drop_table_parser.add_argument("embedding_name", help="Embedding name (e.g., 'openai-small')")
 
     # Source command
     source_parser = subparsers.add_parser("source", help="Manage sources")
@@ -412,11 +1034,11 @@ def main():
         help="Output as JSON"
     )
 
-    # DB Admin command
-    db_admin_parser = subparsers.add_parser("db-admin", help="Database administration commands")
-    db_admin_subparsers = db_admin_parser.add_subparsers(dest="db_command", help="DB admin commands")
-    
-    dedup_parser = db_admin_subparsers.add_parser("deduplicate", help="Find and remove duplicate documents")
+    # Tools command (renamed from db-admin)
+    tools_parser = subparsers.add_parser("tools", help="Utility tools and functions")
+    tools_subparsers = tools_parser.add_subparsers(dest="tools_command", help="Tools commands")
+
+    dedup_parser = tools_subparsers.add_parser("deduplicate", help="Find and remove duplicate documents")
     dedup_parser.add_argument(
         "--dry-run",
         action="store_true",
@@ -426,6 +1048,14 @@ def main():
         "--apply",
         action="store_true",
         help="Apply deduplication (required to make changes)"
+    )
+
+    # Stats command
+    stats_parser = subparsers.add_parser("stats", help="Show knowledge base statistics")
+    stats_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output statistics as JSON"
     )
 
     args = parser.parse_args()
@@ -438,8 +1068,36 @@ def main():
         cmd_add(args)
     elif args.command == "get":
         cmd_get(args)
-    elif args.command == "stats":
-        cmd_stats(args)
+    elif args.command == "embed":
+        cmd_embed(args)
+    elif args.command == "drop":
+        cmd_drop(args)
+    elif args.command == "chunks":
+        if args.chunks_command == "list":
+            cmd_chunks_list(args)
+        elif args.chunks_command == "chunk":
+            cmd_chunks_chunk(args)
+        elif args.chunks_command == "get":
+            cmd_chunks_get(args)
+        elif args.chunks_command == "drop":
+            cmd_chunks_drop(args)
+        else:
+            chunks_parser.print_help()
+            sys.exit(1)
+    elif args.command == "embedding" or args.command == "emb":
+        if args.embedding_command == "list":
+            cmd_embedding_list(args)
+        elif args.embedding_command == "embed":
+            cmd_embedding_embed(args)
+        elif args.embedding_command == "get":
+            cmd_embedding_get(args)
+        elif args.embedding_command == "drop":
+            cmd_embedding_drop(args)
+        elif args.embedding_command == "drop-table":
+            cmd_embedding_drop_table(args)
+        else:
+            embedding_parser.print_help()
+            sys.exit(1)
     elif args.command == "source":
         if args.source_command == "add":
             try:
@@ -460,12 +1118,14 @@ def main():
         else:
             source_parser.print_help()
             sys.exit(1)
-    elif args.command == "db-admin":
-        if args.db_command == "deduplicate":
+    elif args.command == "tools":
+        if args.tools_command == "deduplicate":
             cmd_deduplicate(args)
         else:
-            db_admin_parser.print_help()
+            tools_parser.print_help()
             sys.exit(1)
+    elif args.command == "stats":
+        cmd_stats(args)
     else:
         parser.print_help()
         sys.exit(1)
