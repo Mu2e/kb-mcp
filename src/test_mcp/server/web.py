@@ -305,6 +305,11 @@ def setup_web_routes(app, oauth_provider, session_manager: WebSessionManager):
                     status_code=404
                 )
 
+            # Build display title: include metadata title if available
+            doc_title_display = doc.doc_id or "N/A"
+            if doc.meta and doc.meta.get("title"):
+                doc_title_display = f"{doc.meta.get('title')} ({doc.doc_id or doc.id})"
+            
             # Format URI as link if it exists
             uri_display = "N/A"
             if doc.uri:
@@ -485,7 +490,7 @@ def setup_web_routes(app, oauth_provider, session_manager: WebSessionManager):
                 <table>
                     <tr><th>ID</th><td><code>{doc.id}</code></td></tr>
                     <tr><th>Source ID</th><td>{doc.source_id}</td></tr>
-                    <tr><th>Document ID</th><td>{doc.doc_id or "N/A"}</td></tr>
+                    <tr><th>Document ID</th><td>{doc_title_display}</td></tr>
                     <tr><th>URI</th><td>{uri_display}</td></tr>
                     <tr><th>Source Type</th><td>{doc.source_type}</td></tr>
                     <tr><th>Document Type</th><td>{doc.doc_type}</td></tr>
@@ -586,8 +591,13 @@ def setup_web_routes(app, oauth_provider, session_manager: WebSessionManager):
             </script>
             """
 
+            # Build page title with metadata title if available
+            page_title = doc.doc_id or doc.id
+            if doc.meta and doc.meta.get("title"):
+                page_title = f"{doc.meta.get('title')} ({doc.doc_id or doc.id})"
+            
             return HTMLResponse(html_templates.base_template(
-                f"Document: {doc.doc_id or doc.id}",
+                f"Document: {page_title}",
                 content,
                 None,
                 username

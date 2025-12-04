@@ -684,11 +684,17 @@ function createDocumentElement(doc, isSearchResult = false, showSimilarity = tru
             return `<a href="${escapeHtml(uriHref)}" target="_blank" rel="noopener noreferrer" class="btn">Open URI</a>`;
         })() : '';
     
+    // Build display title: include metadata title if available
+    let displayTitle = doc.doc_id || doc.id;
+    if (doc.meta && doc.meta.title && doc.meta.title.trim()) {
+        displayTitle = `${doc.meta.title} (${doc.doc_id || doc.id})`;
+    }
+    
     div.innerHTML = `
         <div class="document-header">
             <div>
                 <h3 style="margin: 0;">
-                    <a href="/web/document/${doc.id}">${escapeHtml(doc.doc_id || doc.id)}</a>
+                    <a href="/web/document/${doc.id}">${escapeHtml(displayTitle)}</a>
                 </h3>
                 <div class="document-meta">
                     <strong>Source:</strong> ${escapeHtml(doc.source_id)} | 
