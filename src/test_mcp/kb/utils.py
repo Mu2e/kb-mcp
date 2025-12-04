@@ -1,9 +1,22 @@
 """Utility functions for knowledge base operations."""
 
 import hashlib
+import logging
 from typing import Dict, Any, List, Tuple, Optional
 from .database import get_db_session
 from .core import Document, Source
+from .base import get
+
+logger = logging.getLogger(__name__)
+
+# Import embedding functions (may not be available)
+try:
+    from .embedding import chunk_and_embed, get_chunks
+    EMBEDDING_AVAILABLE = True
+except ImportError:
+    EMBEDDING_AVAILABLE = False
+    chunk_and_embed = None
+    get_chunks = None
 
 
 def get_stats() -> Dict[str, Any]:
@@ -314,4 +327,5 @@ def deduplicate(
         "by_id_count": by_id_count,
         "by_hash_count": by_hash_count,
     }
+
 

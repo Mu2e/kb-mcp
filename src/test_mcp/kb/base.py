@@ -72,7 +72,7 @@ def _find_duplicates(
     return existing_by_id, existing_by_hash
 
 
-def _update_document(existing: Document, new: Document, session: Any, update_hash: bool = False) -> Document:
+def _update_document(existing: Document, new: Document, session: Any, update_hash: bool = False, commit: bool = True) -> Document:
     """Update existing document with new document's data.
     
     Args:
@@ -80,9 +80,10 @@ def _update_document(existing: Document, new: Document, session: Any, update_has
         new: New document with updated data
         session: Database session
         update_hash: If True, also update content_hash; otherwise keep existing hash
+        commit: If True, commit the session. If False, caller is responsible for committing.
     
     Returns:
-        Updated document (detached from session)
+        Updated document (detached from session if commit=True, otherwise attached)
     """
     existing.source_id = new.source_id
     existing.doc_id = new.doc_id
@@ -97,9 +98,13 @@ def _update_document(existing: Document, new: Document, session: Any, update_has
     existing.parent_id = new.parent_id
     if update_hash:
         existing.content_hash = new.content_hash
-    session.commit()
-    session.refresh(existing)
-    session.expunge(existing)
+    if commit:
+        session.commit()
+        session.refresh(existing)
+        session.expunge(existing)
+    else:
+        session.flush()  # Flush changes but don't commit
+        session.refresh(existing)
     return existing
 
 
@@ -109,6 +114,7 @@ def _handle_duplicate(
     existing_by_hash: Optional[Document],
     dedup_level: int,
     session: Any,
+    commit: bool = True,
 ) -> Optional[Document]:
     """Handle duplicate document based on deduplication level.
     
@@ -143,7 +149,7 @@ def _handle_duplicate(
     # Level 2: Overwrite if same hash
     if dedup_level == DEDUP_LEVEL_OVERWRITE_HASH:
         if existing_by_hash:
-            updated = _update_document(existing_by_hash, document, session, update_hash=False)
+            updated = _update_document(existing_by_hash, document, session, update_hash=False, commit=commit)
             logger.warning(
                 f"Replaced document {updated.id} (same content_hash: {document.content_hash[:16] if document.content_hash else 'N/A'}...)"
             )
@@ -158,7 +164,7 @@ def _handle_duplicate(
                 f"(existing: {existing_by_id.id}), but different content_hash"
             )
         if existing_by_hash:
-            updated = _update_document(existing_by_hash, document, session, update_hash=False)
+            updated = _update_document(existing_by_hash, document, session, update_hash=False, commit=commit)
             logger.warning(
                 f"Replaced document {updated.id} (same content_hash: {document.content_hash[:16] if document.content_hash else 'N/A'}...)"
             )
@@ -168,14 +174,14 @@ def _handle_duplicate(
     # Level 4: Overwrite same hash and same source_id, doc_id
     if dedup_level == DEDUP_LEVEL_OVERWRITE_ALL:
         if existing_by_id:
-            updated = _update_document(existing_by_id, document, session, update_hash=True)
+            updated = _update_document(existing_by_id, document, session, update_hash=True, commit=commit)
             logger.warning(
                 f"Replaced document {updated.id} "
                 f"(same source_id+doc_id: {document.source_id}/{document.doc_id})"
             )
             return updated
         if existing_by_hash:
-            updated = _update_document(existing_by_hash, document, session, update_hash=False)
+            updated = _update_document(existing_by_hash, document, session, update_hash=False, commit=commit)
             logger.warning(
                 f"Replaced document {updated.id} (same content_hash: {document.content_hash[:16] if document.content_hash else 'N/A'}...)"
             )
@@ -215,6 +221,7 @@ def add(
     data: Union[Document, Dict[str, Any]],
     *,
     dedup_level: Optional[int] = None,
+    session: Optional[Any] = None,
 ) -> Document:
     """Add a new document to the database.
 
@@ -241,6 +248,8 @@ def add(
                      - 2: Overwrite if same hash (default)
                      - 3: Same as 2 but with warnings for existing source_id, doc_id
                      - 4: Overwrite same hash and same source_id, doc_id
+        session: Optional database session. If provided, uses this session instead of creating a new one.
+                When a session is provided, the caller is responsible for committing the transaction.
 
     Returns:
         Created or updated Document object
@@ -277,7 +286,11 @@ def add(
     _compute_hash(document)
 
     # Save to database
-    with get_db_session() as session:
+    own_session = session is None
+    if own_session:
+        session = get_db_session().__enter__()
+    
+    try:
         # Check that source exists
         source = session.query(Source).filter(Source.id == document.source_id).first()
         if not source:
@@ -294,24 +307,34 @@ def add(
         
         # Handle duplicate based on level
         existing_doc = _handle_duplicate(
-            document, existing_by_id, existing_by_hash, dedup_level, session
+            document, existing_by_id, existing_by_hash, dedup_level, session, commit=own_session
         )
         
         if existing_doc is not None:
             # Document was updated, return it
+            # If we own the session, expunge was already done in _update_document
+            # If session was provided, document remains attached
+            if not own_session:
+                # Document is still attached to provided session, don't expunge
+                pass
             return existing_doc
         
         # No duplicate or level 0/1 - proceed with insert
         session.add(document)
         session.flush()  # Get the ID
-        session.commit()
+        if own_session:
+            session.commit()
         # Refresh to ensure all attributes are loaded
         session.refresh(document)
         # Store values we need for logging before expunging
         doc_id = document.id
         doc_source_id = document.source_id
-        # Expunge to detach from session (prevents DetachedInstanceError)
-        session.expunge(document)
+        # Only expunge if we own the session (prevents DetachedInstanceError)
+        if own_session:
+            session.expunge(document)
+    finally:
+        if own_session:
+            session.close()
 
     logger.info(f"Added document: {doc_id} from {doc_source_id}")
 
@@ -322,6 +345,7 @@ def add_many(
     documents: List[Document],
     *,
     dedup_level: Optional[int] = None,
+    session: Optional[Any] = None,
 ) -> List[Document]:
     """Add multiple documents to the database.
     
@@ -341,6 +365,8 @@ def add_many(
                      - 2: Overwrite if same hash (default)
                      - 3: Same as 2 but with warnings for existing source_id, doc_id
                      - 4: Overwrite same hash and same source_id, doc_id
+        session: Optional database session. If provided, uses this session instead of creating a new one.
+                When a session is provided, the caller is responsible for committing the transaction.
 
     Returns:
         List of created or updated Document objects
@@ -363,7 +389,7 @@ def add_many(
             parent_id = ids.get(doc.meta["parent_doc_id"])
             if parent_id:
                 doc.parent_id = parent_id
-        added_doc = add(doc, dedup_level=dedup_level)
+        added_doc = add(doc, dedup_level=dedup_level, session=session)
         ids[added_doc.doc_id] = added_doc.id
         result.append(added_doc)
 
@@ -379,6 +405,7 @@ def add_from_path(
     parse_image_additional_doc: Optional[bool] = None,
     parse_image_llm_description: Optional[bool] = None,
     dedup_level: Optional[int] = None,
+    session: Optional[Any] = None,
 ) -> List[Document]:
     """Parse a file and add extracted document(s) to the knowledge base.
     
@@ -439,6 +466,7 @@ def add_from_path(
                      - 2: Overwrite if same hash (default)
                      - 3: Same as 2 but with warnings for existing source_id, doc_id
                      - 4: Overwrite same hash and same source_id, doc_id
+        session: Optional database session. If provided, uses this session instead of creating a new one.
     
     Returns:
         List of created Document objects:
@@ -514,7 +542,7 @@ def add_from_path(
     documents = [Document.from_dict(doc_dict) for doc_dict in doc_dicts]
     
     # Add all documents to the database
-    result = add_many(documents, dedup_level=dedup_level)
+    result = add_many(documents, dedup_level=dedup_level, session=session)
     
     final_source_id = parse_data["source_id"]
     final_doc_id = parse_data["doc_id"]
@@ -934,6 +962,7 @@ def add_source(
     description: str | None = None,
     base_uri: str | None = None,
     meta: Dict[str, Any] | None = None,
+    session: Optional[Any] = None,
 ) -> Source:
     """Add or update a source.
 
@@ -952,13 +981,19 @@ def add_source(
         description: Description of the source
         base_uri: Base URI for this source
         meta: Additional metadata as dictionary
+        session: Optional database session. If provided, uses this session instead of creating a new one.
+                When a session is provided, the caller is responsible for committing the transaction.
 
     Returns:
         Source object (created or updated)
     """
     _ensure_db_initialized()
 
-    with get_db_session() as session:
+    own_session = session is None
+    if own_session:
+        session = get_db_session().__enter__()
+    
+    try:
         # Use merge to create or update (upsert pattern)
         source = Source(
             id=source_id,
@@ -968,11 +1003,16 @@ def add_source(
             meta=meta or {},
         )
         source = session.merge(source)
-        session.commit()
+        if own_session:
+            session.commit()
         # Refresh to ensure all attributes are loaded
         session.refresh(source)
-        # Expunge to detach from session (prevents DetachedInstanceError)
-        session.expunge(source)
+        # Only expunge if we own the session
+        if own_session:
+            session.expunge(source)
+    finally:
+        if own_session:
+            session.close()
 
     logger.info(f"Added/updated source: {source_id}")
     return source

@@ -1,7 +1,10 @@
 """Chunking utilities for embedding module."""
 
+import logging
 from typing import List, Optional, Dict, Any
 from .core import Chunk, Document
+
+logger = logging.getLogger(__name__)
 
 
 def chunk_document(
@@ -79,7 +82,7 @@ def chunk_document(
 
             if deleted_count > 0:
                 strategy_list = ", ".join(sorted(strategy_names))
-                print(f"Replacing {deleted_count} existing chunk(s) for document {document.id[:8]}... (strategies: {strategy_list})")
+                logger.info(f"Replacing {deleted_count} existing chunk(s) for document {document.id[:8]}... (strategies: {strategy_list})")
                 session.flush()  # Ensure deletions are committed before inserts
 
         # Ensure ChunkStrategy records exist for all chunk strategies
