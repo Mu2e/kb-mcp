@@ -593,6 +593,37 @@ def cmd_logs_parsing(args):
             print(f"    Text Length: {log['text_length'] or 0} characters")
 
 
+def cmd_chunk_and_embed_all(args):
+    """Chunk and embed all documents for a source_id that don't have chunks yet."""
+    if not EMBEDDING_AVAILABLE:
+        print("Error: Embedding module not available. Install with: pip install -e '.[embedding]'")
+        sys.exit(1)
+    
+    try:
+        from .tools import chunk_and_embed_all
+        
+        print(f"Chunking and embedding all documents for source_id: {args.source_id}")
+        if args.strategy:
+            print(f"Using chunking strategy: {args.strategy}")
+        
+        result = chunk_and_embed_all(
+            source_id=args.source_id,
+            strategy=args.strategy,
+        )
+        
+        print(f"\n  Completed:")
+        print(f"  Processed: {result['processed']} document(s)")
+        print(f"  Chunked: {result['chunked']} document(s)")
+        print(f"  Skipped: {result['skipped']} document(s)")
+        if result['errors'] > 0:
+            print(f"  Errors: {result['errors']} document(s)")
+    except Exception as e:
+        print(f"Error: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+
 def cmd_drop_table(args):
     """Drop a database table by name."""
     table_name = args.table_name
@@ -606,7 +637,7 @@ def cmd_drop_table(args):
     
     try:
         from sqlalchemy import text
-        from .database import get_db_session
+        from .database import get_db_session, get_database_url
         
         with get_db_session() as session:
             # Check if table exists
@@ -619,8 +650,17 @@ def cmd_drop_table(args):
                 print(f"Available tables: {', '.join(sorted(existing_tables))}")
                 sys.exit(1)
             
+            # Determine database type and use appropriate DROP TABLE syntax
+            database_url = get_database_url()
+            if database_url.startswith("sqlite"):
+                # SQLite doesn't support CASCADE
+                drop_sql = f'DROP TABLE IF EXISTS "{table_name}"'
+            else:
+                # PostgreSQL supports CASCADE
+                drop_sql = f'DROP TABLE IF EXISTS "{table_name}" CASCADE'
+            
             # Drop the table
-            session.execute(text(f'DROP TABLE IF EXISTS "{table_name}" CASCADE'))
+            session.execute(text(drop_sql))
             session.commit()
             
             print(f"✓ Dropped table '{table_name}'")
@@ -1336,10 +1376,6 @@ def main():
     tools_subparsers = tools_parser.add_subparsers(dest="tools_command", help="Tools commands")
     
     dedup_parser = tools_subparsers.add_parser("deduplicate", help="Find and remove duplicate documents")
-    
-    drop_table_parser = tools_subparsers.add_parser("drop-table", help="Drop a database table by name")
-    drop_table_parser.add_argument("table_name", help="Name of the table to drop")
-    drop_table_parser.add_argument("--yes", action="store_true", help="Skip confirmation prompt")
     dedup_parser.add_argument(
         "--dry-run",
         action="store_true",
@@ -1350,6 +1386,23 @@ def main():
         action="store_true",
         help="Apply deduplication (required to make changes)"
     )
+    dedup_parser.set_defaults(func=cmd_deduplicate)
+    
+    chunk_embed_all_parser = tools_subparsers.add_parser(
+        "chunk-and-embed-all",
+        help="Chunk and embed all documents for a source_id that don't have chunks yet"
+    )
+    chunk_embed_all_parser.add_argument("source_id", help="Source identifier to process documents for")
+    chunk_embed_all_parser.add_argument(
+        "--strategy",
+        help="Chunking strategy (e.g., 'tokens' or 'slide'). If not specified, uses default."
+    )
+    chunk_embed_all_parser.set_defaults(func=cmd_chunk_and_embed_all)
+    
+    drop_table_parser = tools_subparsers.add_parser("drop-table", help="Drop a database table by name")
+    drop_table_parser.add_argument("table_name", help="Name of the table to drop")
+    drop_table_parser.add_argument("--yes", action="store_true", help="Skip confirmation prompt")
+    drop_table_parser.set_defaults(func=cmd_drop_table)
 
     # Stats command
     stats_parser = subparsers.add_parser("stats", help="Show knowledge base statistics")
@@ -1424,6 +1477,8 @@ def main():
     elif args.command == "tools":
         if args.tools_command == "deduplicate":
             cmd_deduplicate(args)
+        elif args.tools_command == "chunk-and-embed-all":
+            cmd_chunk_and_embed_all(args)
         elif args.tools_command == "drop-table":
             cmd_drop_table(args)
         else:

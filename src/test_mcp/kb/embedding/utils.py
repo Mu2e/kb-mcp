@@ -2,6 +2,7 @@
 
 import os
 import logging
+import threading
 from pathlib import Path
 from typing import List, Optional, Type, Dict, Any, Union
 
@@ -38,8 +39,12 @@ EMBEDDER_CLASSES: Dict[str, Type] = {
     "st": SentenceTransformersEmbedder,  # Short alias
 }
 
-# Cache for embedder instances - keyed by (provider, model) tuple
+# Thread-safe cache for embedder instances - keyed by (provider, model) tuple
+# Note: SentenceTransformers models are generally thread-safe for inference,
+# but loading them is expensive, so we cache them. OpenAI clients are stateless
+# and can be shared across threads.
 _EMBEDDER_CACHE: Dict[tuple, Any] = {}
+_EMBEDDER_CACHE_LOCK = threading.Lock()
 
 
 def get_embedder(
@@ -150,19 +155,30 @@ def get_embedder(
         )
 
     # Check cache first (only if no kwargs, as kwargs might change behavior)
+    # Use thread-safe access to cache
     cache_key = (provider_lower, model)
-    if not kwargs and cache_key in _EMBEDDER_CACHE:
-        logger.debug(f"Using cached embedder for {provider_lower}/{model}")
-        return _EMBEDDER_CACHE[cache_key]
+    if not kwargs:
+        with _EMBEDDER_CACHE_LOCK:
+            if cache_key in _EMBEDDER_CACHE:
+                logger.debug(f"Using cached embedder for {provider_lower}/{model}")
+                return _EMBEDDER_CACHE[cache_key]
 
     embedder_class = EMBEDDER_CLASSES[provider_lower]
 
     try:
         embedder = embedder_class(model_name=model, **kwargs)
         # Cache the embedder instance (only if no kwargs, as kwargs might change behavior)
+        # Use thread-safe access to cache
         if not kwargs:
-            _EMBEDDER_CACHE[cache_key] = embedder
-            logger.debug(f"Cached embedder instance for {provider_lower}/{model}")
+            with _EMBEDDER_CACHE_LOCK:
+                # Double-check pattern: another thread might have created it while we were loading
+                if cache_key not in _EMBEDDER_CACHE:
+                    _EMBEDDER_CACHE[cache_key] = embedder
+                    logger.debug(f"Cached embedder instance for {provider_lower}/{model}")
+                else:
+                    # Another thread created it, use the cached one instead
+                    logger.debug(f"Using embedder cached by another thread for {provider_lower}/{model}")
+                    embedder = _EMBEDDER_CACHE[cache_key]
         return embedder
     except Exception as e:
         logger.error(f"Error creating embedder '{provider}': {e}")

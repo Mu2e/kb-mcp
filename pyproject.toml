@@ -73,6 +73,12 @@ embedding = [
     "tiktoken>=0.5.0",  # Token counting for chunking
 ]
 
+# Import module: Document import dependencies
+# Note: Import uses KB features, so typically install with: pip install -e ".[imports,kb]"
+imports = [
+    "httpx>=0.27.0",  # HTTP client for API requests
+]
+
 [project.scripts]
 # Server module CLI commands
 test-mcp = "test_mcp.server:main"
@@ -80,6 +86,9 @@ test-mcp-manage-keys = "test_mcp.server.cli_manage_keys:main"
 
 # Knowledge Base module CLI commands
 kb = "test_mcp.kb.cli:main"
+
+# Import module CLI commands
+kb-import = "test_mcp.imports.cli:main"
 
 # Parser module CLI commands
 kb-parse = "test_mcp.parser.cli:main"
