@@ -239,6 +239,7 @@ def chunk_and_embed(
         ...     # Chunk and embed (creates its own session if not provided)
         ...     chunks = chunk_and_embed(doc, embedding_name="openai-small")
     """
+    import time
     from .chunking import chunk_document
 
     # Create session if not provided
@@ -247,16 +248,21 @@ def chunk_and_embed(
         session = get_db_session().__enter__()
 
     try:
-        # Chunk the document first
+        # Measure chunking time
+        chunk_start = time.time()
         chunks = chunk_document(
             document,
             strategy=strategy,
             config=chunk_config,
             session=session
         )
+        chunk_time = time.time() - chunk_start
 
-        # Then embed all the chunks
+        # Measure embedding time and count embeddings
+        embed_time = 0.0
+        num_embeddings = 0
         if chunks:
+            embed_start = time.time()
             embed_chunks(
                 chunks,
                 embedding_name=embedding_name,
@@ -266,6 +272,32 @@ def chunk_and_embed(
                 session=session,
                 **kwargs
             )
+            embed_time = time.time() - embed_start
+            
+            # Count embeddings created (one per chunk if embedding succeeded)
+            # Since embed_chunks succeeded, we assume one embedding per chunk
+            # For accuracy, we could query the embedding table, but this is simpler and sufficient
+            num_embeddings = len(chunks)
+
+        # Create log entry for this operation
+        from .core import ChunkEmbeddingLog
+        import socket
+        
+        total_time = chunk_time + embed_time
+        hostname = socket.gethostname()
+        
+        log_entry = ChunkEmbeddingLog(
+            document_id=document.id,
+            chunking_time_seconds=round(chunk_time, 3),
+            embedding_time_seconds=round(embed_time, 3),
+            total_time_seconds=round(total_time, 3),
+            num_chunks=len(chunks) if chunks else 0,
+            num_embeddings=num_embeddings,
+            chunk_strategy=strategy,
+            embedding_name=embedding_name or (provider and model and f"{provider}/{model}") or None,
+            hostname=hostname,
+        )
+        session.add(log_entry)
 
         # Commit if we created the session
         if own_session:

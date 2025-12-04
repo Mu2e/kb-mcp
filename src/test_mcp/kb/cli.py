@@ -82,15 +82,18 @@ try:
         embed_chunk, embed_chunks, chunk_and_embed, get_embeddings, get_embedding_vector,
         drop_embedding, drop_embedding_table
     )
-    from .embedding.core import Chunk
+    from .embedding.core import Chunk, ChunkEmbeddingLog, ParsingLog
     EMBEDDING_AVAILABLE = True
 except ImportError:
     EMBEDDING_AVAILABLE = False
     Chunk = None
+    ChunkEmbeddingLog = None
+    ParsingLog = None
 
 # Import search function (may not be available if dependencies not installed)
 try:
-    from .search import search, get_search_logs
+    from .search import search
+    from .logs import get_search_logs
     SEARCH_AVAILABLE = True
 except ImportError:
     SEARCH_AVAILABLE = False
@@ -521,6 +524,109 @@ def cmd_chunks_get(args):
         text_preview = chunk['text'][:100] + "..." if len(chunk['text']) > 100 else chunk['text']
         print(f"    Text: {text_preview}")
         print()
+
+
+def cmd_logs_chunking(args):
+    """Show chunk_and_embed operation logs for a document."""
+    from .logs import get_chunking_logs
+    
+    logs = get_chunking_logs(args.document_id, limit=args.limit)
+    
+    if not logs:
+        print(f"No chunk_and_embed logs found for document {args.document_id}")
+        return
+    
+    if args.json:
+        import json
+        print(json.dumps(logs, indent=2))
+    else:
+        print(f"Chunk_and_Embed Logs for Document {args.document_id} ({len(logs)} log(s)):")
+        print("=" * 80)
+        
+        for i, log in enumerate(logs, 1):
+            print(f"\n  Log #{i}:")
+            print(f"    ID: {log['id']}")
+            print(f"    Insertion Time: {log['insertion_time']}")
+            print(f"    Hostname: {log['hostname'] or 'N/A'}")
+            print(f"    Timing:")
+            print(f"      Chunking: {log['chunking_time_seconds']:.3f}s")
+            print(f"      Embedding: {log['embedding_time_seconds']:.3f}s")
+            print(f"      Total: {log['total_time_seconds']:.3f}s")
+            print(f"    Counts:")
+            print(f"      Chunks: {log['num_chunks']}")
+            print(f"      Embeddings: {log['num_embeddings']}")
+            print(f"    Configuration:")
+            print(f"      Strategy: {log['chunk_strategy'] or 'N/A'}")
+            print(f"      Embedding: {log['embedding_name'] or 'N/A'}")
+
+
+def cmd_logs_parsing(args):
+    """Show text extraction/parsing operation logs for a document."""
+    from .logs import get_parsing_logs
+    
+    logs = get_parsing_logs(args.document_id, limit=args.limit)
+    
+    if not logs:
+        print(f"No parsing logs found for document {args.document_id}")
+        return
+    
+    if args.json:
+        import json
+        print(json.dumps(logs, indent=2))
+    else:
+        print(f"Parsing/Extraction Logs for Document {args.document_id} ({len(logs)} log(s)):")
+        print("=" * 80)
+        
+        for i, log in enumerate(logs, 1):
+            print(f"\n  Log #{i}:")
+            print(f"    ID: {log['id']}")
+            print(f"    Insertion Time: {log['insertion_time']}")
+            print(f"    Hostname: {log['hostname'] or 'N/A'}")
+            print(f"    File Path: {log['file_path'] or 'N/A'}")
+            print(f"    Source Type: {log['source_type'] or 'N/A'}")
+            print(f"    Timing:")
+            print(f"      Text Extraction: {log['text_extraction_time_seconds']:.3f}s")
+            if log['image_description_time_seconds'] is not None:
+                print(f"      Image Description: {log['image_description_time_seconds']:.3f}s")
+            print(f"      Total: {log['total_time_seconds']:.3f}s")
+            print(f"    Documents Extracted: {log['num_documents']}")
+            print(f"    Text Length: {log['text_length'] or 0} characters")
+
+
+def cmd_drop_table(args):
+    """Drop a database table by name."""
+    table_name = args.table_name
+    
+    # Get confirmation unless --yes is specified
+    if not args.yes:
+        confirmation = input(f"Drop table '{table_name}'? This action cannot be undone. [y/N]: ")
+        if confirmation.lower() not in ['y', 'yes']:
+            print("Cancelled.")
+            return
+    
+    try:
+        from sqlalchemy import text
+        from .database import get_db_session
+        
+        with get_db_session() as session:
+            # Check if table exists
+            from sqlalchemy import inspect
+            inspector = inspect(session.bind)
+            existing_tables = inspector.get_table_names()
+            
+            if table_name not in existing_tables:
+                print(f"Error: Table '{table_name}' does not exist.")
+                print(f"Available tables: {', '.join(sorted(existing_tables))}")
+                sys.exit(1)
+            
+            # Drop the table
+            session.execute(text(f'DROP TABLE IF EXISTS "{table_name}" CASCADE'))
+            session.commit()
+            
+            print(f"✓ Dropped table '{table_name}'")
+    except Exception as e:
+        print(f"Error dropping table: {e}")
+        sys.exit(1)
 
 
 def cmd_chunks_drop(args):
@@ -1083,15 +1189,30 @@ def main():
     search_parser.add_argument("--metadata", action="append", help="Simple metadata filter (key=value, can be used multiple times)")
     search_parser.set_defaults(func=cmd_search)
 
-    # Search logs command
-    logs_parser = subparsers.add_parser("logs", help="List recent search logs")
-    logs_parser.add_argument("--limit", type=int, default=10, help="Maximum number of logs to show (default: 10)")
-    logs_parser.add_argument("--offset", type=int, default=0, help="Number of logs to skip (default: 0)")
-    logs_parser.add_argument("--query", help="Filter by query text (partial match)")
-    logs_parser.add_argument("--embedding-name", help="Filter by embedding name")
-    logs_parser.add_argument("--json", action="store_true", help="Output as JSON")
-    logs_parser.add_argument("--verbose", "-v", action="store_true", help="Show detailed information including document IDs")
-    logs_parser.set_defaults(func=cmd_search_logs)
+    # Logs command with subcommands
+    logs_parser = subparsers.add_parser("logs", help="View operation logs")
+    logs_subparsers = logs_parser.add_subparsers(dest="logs_command", help="Log types")
+    
+    # Search logs subcommand
+    logs_search_parser = logs_subparsers.add_parser("search", help="List recent search logs")
+    logs_search_parser.add_argument("--limit", type=int, default=10, help="Maximum number of logs to show (default: 10)")
+    logs_search_parser.add_argument("--offset", type=int, default=0, help="Number of logs to skip (default: 0)")
+    logs_search_parser.add_argument("--query", help="Filter by query text (partial match)")
+    logs_search_parser.add_argument("--embedding-name", help="Filter by embedding name")
+    logs_search_parser.add_argument("--json", action="store_true", help="Output as JSON")
+    logs_search_parser.add_argument("--verbose", "-v", action="store_true", help="Show detailed information including document IDs")
+    
+    # Chunking logs subcommand
+    logs_chunking_parser = logs_subparsers.add_parser("chunking", help="Show chunk_and_embed operation logs for a document")
+    logs_chunking_parser.add_argument("document_id", help="Document ID to show logs for")
+    logs_chunking_parser.add_argument("--json", action="store_true", help="Output as JSON")
+    logs_chunking_parser.add_argument("--limit", type=int, help="Maximum number of logs to show (default: all)")
+    
+    # Parsing logs subcommand
+    logs_parsing_parser = logs_subparsers.add_parser("parsing", help="Show text extraction/parsing logs for a document")
+    logs_parsing_parser.add_argument("document_id", help="Document ID to show logs for")
+    logs_parsing_parser.add_argument("--json", action="store_true", help="Output as JSON")
+    logs_parsing_parser.add_argument("--limit", type=int, help="Maximum number of logs to show (default: all)")
 
     # Chunks command
     chunks_parser = subparsers.add_parser("chunks", help="Manage document chunks")
@@ -1213,8 +1334,12 @@ def main():
     # Tools command (renamed from db-admin)
     tools_parser = subparsers.add_parser("tools", help="Utility tools and functions")
     tools_subparsers = tools_parser.add_subparsers(dest="tools_command", help="Tools commands")
-
+    
     dedup_parser = tools_subparsers.add_parser("deduplicate", help="Find and remove duplicate documents")
+    
+    drop_table_parser = tools_subparsers.add_parser("drop-table", help="Drop a database table by name")
+    drop_table_parser.add_argument("table_name", help="Name of the table to drop")
+    drop_table_parser.add_argument("--yes", action="store_true", help="Skip confirmation prompt")
     dedup_parser.add_argument(
         "--dry-run",
         action="store_true",
@@ -1299,13 +1424,23 @@ def main():
     elif args.command == "tools":
         if args.tools_command == "deduplicate":
             cmd_deduplicate(args)
+        elif args.tools_command == "drop-table":
+            cmd_drop_table(args)
         else:
             tools_parser.print_help()
             sys.exit(1)
     elif args.command == "stats":
         cmd_stats(args)
     elif args.command == "logs":
-        cmd_search_logs(args)
+        if args.logs_command == "search":
+            cmd_search_logs(args)
+        elif args.logs_command == "chunking":
+            cmd_logs_chunking(args)
+        elif args.logs_command == "parsing":
+            cmd_logs_parsing(args)
+        else:
+            logs_parser.print_help()
+            sys.exit(1)
     else:
         parser.print_help()
         sys.exit(1)

@@ -528,6 +528,9 @@ def add_from_path(
         parse_data["doc_id"] = file_path.stem
     
     # Parse the file - returns List[dict]
+    import time
+    import socket
+    
     doc_dicts = parse(
         file_path,
         data=parse_data,
@@ -538,11 +541,53 @@ def add_from_path(
     if not doc_dicts:
         raise ValueError(f"No documents extracted from {file_path}")
     
+    # Extract timing information from first document's meta (if available)
+    timing_info = None
+    if doc_dicts and isinstance(doc_dicts[0].get("meta"), dict):
+        timing_info = doc_dicts[0]["meta"].pop("_parsing_timing", None)
+    
     # Convert dicts to Document objects
     documents = [Document.from_dict(doc_dict) for doc_dict in doc_dicts]
     
     # Add all documents to the database
     result = add_many(documents, dedup_level=dedup_level, session=session)
+    
+    # Log parsing operation (one entry per file parse, linked to first document)
+    if result and session:
+        try:
+            from .embedding.core import ParsingLog
+            
+            # Calculate total text length across all extracted documents
+            total_text_length = sum(len(doc.text) if doc.text else 0 for doc in result)
+            
+            # Create one log entry for the file parse operation
+            # Link to first document if available
+            first_doc = result[0] if result else None
+            
+            # Use timing info from parse() if available, otherwise use 0
+            if timing_info:
+                text_extraction_time = timing_info.get("text_extraction_time_seconds", 0.0)
+                image_description_time = timing_info.get("image_description_time_seconds")
+                total_time = timing_info.get("total_time_seconds", text_extraction_time + (image_description_time or 0.0))
+            else:
+                # Fallback if timing info not available
+                text_extraction_time = 0.0
+                image_description_time = None
+                total_time = 0.0
+            
+            log_entry = ParsingLog(
+                document_id=first_doc.id if first_doc else None,
+                text_extraction_time_seconds=round(text_extraction_time, 3),
+                image_description_time_seconds=round(image_description_time, 3) if image_description_time is not None else None,
+                total_time_seconds=round(total_time, 3),
+                num_documents=len(result),
+                text_length=total_text_length,
+                hostname=socket.gethostname(),
+            )
+            session.add(log_entry)
+        except ImportError:
+            # ParsingLog might not be available if embedding module not installed
+            pass
     
     final_source_id = parse_data["source_id"]
     final_doc_id = parse_data["doc_id"]

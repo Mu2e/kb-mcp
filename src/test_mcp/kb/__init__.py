@@ -5,6 +5,7 @@ from .core import Document, Source
 from .database import get_db_session, init_db
 from .utils import deduplicate, find_all_duplicates, get_stats, list_sources, get_metadata_keys
 from .tools import chunk_and_embed_all
+from .logs import get_search_logs, get_parsing_logs, get_chunking_logs, get_all_logs_for_document
 
 # Import statistics if available
 try:

@@ -8,6 +8,7 @@ from sqlalchemy import (
     JSON,
     Column,
     DateTime,
+    Float,
     ForeignKey,
     Index,
     Integer,
@@ -246,6 +247,141 @@ class ChunkStrategy(Base):
             "meta": self.meta if self.meta else {},
             "created_time": self.created_time.isoformat() if self.created_time else None,
         }
+
+
+class ParsingLog(Base):
+    """Log table for tracking document parsing/text extraction operations."""
+
+    __tablename__ = "parsing_logs"
+
+    # Primary key - UUID stored as string
+    id = Column(
+        String(36),
+        primary_key=True,
+        default=lambda: str(uuid.uuid4()),
+        index=True,
+    )
+
+    # Foreign key to document table (nullable since document might not exist yet during parsing)
+    # No CASCADE - logs should persist even if document is deleted
+    document_id = Column(
+        String(36),
+        ForeignKey("documents.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
+    # Timing information
+    text_extraction_time_seconds = Column(Float, nullable=False)  # Time for text extraction only
+    image_description_time_seconds = Column(Float, nullable=True)  # Time for image description generation (if enabled)
+    total_time_seconds = Column(Float, nullable=False)  # Total parsing time
+
+    # Counts
+    num_documents = Column(Integer, nullable=False, default=1)  # Number of documents extracted
+    text_length = Column(Integer, nullable=True)  # Total text length extracted
+
+    # Hostname of the machine where operation was performed
+    hostname = Column(String(256), nullable=True, index=True)
+
+    # Timestamp when operation completed
+    insertion_time = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=func.now(),
+        server_default=func.now(),
+        index=True,
+    )
+
+    # Additional metadata (JSON)
+    meta = Column(JSON, nullable=True, default=dict)
+
+    # Relationships
+    document = relationship("Document", backref="parsing_logs")
+
+    # Indexes
+    __table_args__ = (
+        Index("idx_parsing_logs_document_id", "document_id"),
+        Index("idx_parsing_logs_insertion_time", "insertion_time"),
+        Index("idx_parsing_logs_hostname", "hostname"),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<ParsingLog(id={self.id}, document_id={self.document_id}, "
+            f"total_time={self.total_time_seconds}s, "
+            f"text_extraction={self.text_extraction_time_seconds}s, "
+            f"image_description={self.image_description_time_seconds}s, "
+            f"num_documents={self.num_documents}, hostname={self.hostname})>"
+        )
+
+
+class ChunkEmbeddingLog(Base):
+    """Log table for tracking chunking and embedding operations."""
+
+    __tablename__ = "chunk_embedding_logs"
+
+    # Primary key - UUID stored as string
+    id = Column(
+        String(36),
+        primary_key=True,
+        default=lambda: str(uuid.uuid4()),
+        index=True,
+    )
+
+    # Foreign key to document table
+    document_id = Column(
+        String(36),
+        ForeignKey("documents.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    # Timing information
+    chunking_time_seconds = Column(Float, nullable=False)
+    embedding_time_seconds = Column(Float, nullable=False)
+    total_time_seconds = Column(Float, nullable=False)
+
+    # Counts
+    num_chunks = Column(Integer, nullable=False, default=0)
+    num_embeddings = Column(Integer, nullable=False, default=0)
+
+    # Configuration used
+    chunk_strategy = Column(String(128), nullable=True, index=True)
+    embedding_name = Column(String(64), nullable=True, index=True)
+
+    # Hostname of the machine where operation was performed
+    hostname = Column(String(256), nullable=True, index=True)
+
+    # Timestamp when operation completed
+    insertion_time = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=func.now(),
+        server_default=func.now(),
+        index=True,
+    )
+
+    # Additional metadata (JSON)
+    meta = Column(JSON, nullable=True, default=dict)
+
+    # Relationships
+    document = relationship("Document", backref="chunk_embedding_logs")
+
+    # Indexes
+    __table_args__ = (
+        Index("idx_chunk_embedding_logs_document_id", "document_id"),
+        Index("idx_chunk_embedding_logs_insertion_time", "insertion_time"),
+        Index("idx_chunk_embedding_logs_strategy", "chunk_strategy"),
+        Index("idx_chunk_embedding_logs_embedding_name", "embedding_name"),
+        Index("idx_chunk_embedding_logs_hostname", "hostname"),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<ChunkEmbeddingLog(id={self.id}, document_id={self.document_id}, "
+            f"total_time={self.total_time_seconds}s, chunks={self.num_chunks}, "
+            f"embeddings={self.num_embeddings}, hostname={self.hostname})>"
+        )
 
 
 class Chunk(Base):

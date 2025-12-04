@@ -589,6 +589,75 @@ def setup_web_routes(app, oauth_provider, session_manager: WebSessionManager):
                 }}
             }});
             </script>
+            
+            <div id="document-logs" class="card" style="margin-top: 20px;">
+                <h2>Operation Logs</h2>
+                <div id="logs-content" style="color: #666;">Loading logs...</div>
+            </div>
+            
+            <script>
+            // Load and display document logs
+            async function loadDocumentLogs() {{
+                try {{
+                    const docId = '{html_escape(doc.id)}';
+                    const response = await fetch('/api/logs/' + docId);
+                    if (!response.ok) {{
+                        throw new Error('Failed to load logs');
+                    }}
+                    const logs = await response.json();
+                    
+                    let logsHtml = '';
+                    
+                    // Parsing logs
+                    if (logs.parsing && logs.parsing.length > 0) {{
+                        logsHtml += '<h3>Parsing/Extraction Logs</h3><table style="width: 100%; border-collapse: collapse;"><thead><tr><th style="text-align: left; padding: 8px; border-bottom: 2px solid #ddd;">Time</th><th style="text-align: left; padding: 8px; border-bottom: 2px solid #ddd;">Text Extraction</th><th style="text-align: left; padding: 8px; border-bottom: 2px solid #ddd;">Image Description</th><th style="text-align: left; padding: 8px; border-bottom: 2px solid #ddd;">Total</th><th style="text-align: left; padding: 8px; border-bottom: 2px solid #ddd;">Documents</th><th style="text-align: left; padding: 8px; border-bottom: 2px solid #ddd;">Hostname</th></tr></thead><tbody>';
+                        for (const log of logs.parsing) {{
+                            const time = log.insertion_time ? new Date(log.insertion_time).toLocaleString() : 'N/A';
+                            const textTime = log.text_extraction_time_seconds ? log.text_extraction_time_seconds.toFixed(3) + 's' : 'N/A';
+                            const imgTime = log.image_description_time_seconds ? log.image_description_time_seconds.toFixed(3) + 's' : 'N/A';
+                            const totalTime = log.total_time_seconds ? log.total_time_seconds.toFixed(3) + 's' : 'N/A';
+                            logsHtml += `<tr><td style="padding: 8px; border-bottom: 1px solid #eee;">${{time}}</td><td style="padding: 8px; border-bottom: 1px solid #eee;">${{textTime}}</td><td style="padding: 8px; border-bottom: 1px solid #eee;">${{imgTime}}</td><td style="padding: 8px; border-bottom: 1px solid #eee;">${{totalTime}}</td><td style="padding: 8px; border-bottom: 1px solid #eee;">${{log.num_documents}}</td><td style="padding: 8px; border-bottom: 1px solid #eee;">${{log.hostname || 'N/A'}}</td></tr>`;
+                        }}
+                        logsHtml += '</tbody></table>';
+                    }} else {{
+                        logsHtml += '<p style="color: #666;">No parsing logs found.</p>';
+                    }}
+                    
+                    // Chunking logs
+                    if (logs.chunking && logs.chunking.length > 0) {{
+                        logsHtml += '<h3 style="margin-top: 20px;">Chunking/Embedding Logs</h3><table style="width: 100%; border-collapse: collapse;"><thead><tr><th style="text-align: left; padding: 8px; border-bottom: 2px solid #ddd;">Time</th><th style="text-align: left; padding: 8px; border-bottom: 2px solid #ddd;">Chunking</th><th style="text-align: left; padding: 8px; border-bottom: 2px solid #ddd;">Embedding</th><th style="text-align: left; padding: 8px; border-bottom: 2px solid #ddd;">Total</th><th style="text-align: left; padding: 8px; border-bottom: 2px solid #ddd;">Chunks</th><th style="text-align: left; padding: 8px; border-bottom: 2px solid #ddd;">Strategy</th><th style="text-align: left; padding: 8px; border-bottom: 2px solid #ddd;">Hostname</th></tr></thead><tbody>';
+                        for (const log of logs.chunking) {{
+                            const time = log.insertion_time ? new Date(log.insertion_time).toLocaleString() : 'N/A';
+                            const chunkTime = log.chunking_time_seconds ? log.chunking_time_seconds.toFixed(3) + 's' : 'N/A';
+                            const embedTime = log.embedding_time_seconds ? log.embedding_time_seconds.toFixed(3) + 's' : 'N/A';
+                            const totalTime = log.total_time_seconds ? log.total_time_seconds.toFixed(3) + 's' : 'N/A';
+                            logsHtml += `<tr><td style="padding: 8px; border-bottom: 1px solid #eee;">${{time}}</td><td style="padding: 8px; border-bottom: 1px solid #eee;">${{chunkTime}}</td><td style="padding: 8px; border-bottom: 1px solid #eee;">${{embedTime}}</td><td style="padding: 8px; border-bottom: 1px solid #eee;">${{totalTime}}</td><td style="padding: 8px; border-bottom: 1px solid #eee;">${{log.num_chunks}}</td><td style="padding: 8px; border-bottom: 1px solid #eee;">${{log.chunk_strategy || 'N/A'}}</td><td style="padding: 8px; border-bottom: 1px solid #eee;">${{log.hostname || 'N/A'}}</td></tr>`;
+                        }}
+                        logsHtml += '</tbody></table>';
+                    }} else {{
+                        logsHtml += '<p style="color: #666; margin-top: 20px;">No chunking logs found.</p>';
+                    }}
+                    
+                    if (!logs.parsing || logs.parsing.length === 0) {{
+                        if (!logs.chunking || logs.chunking.length === 0) {{
+                            logsHtml = '<p style="color: #666;">No logs found for this document.</p>';
+                        }}
+                    }}
+                    
+                    document.getElementById('logs-content').innerHTML = logsHtml;
+                }} catch (error) {{
+                    console.error('Error loading logs:', error);
+                    document.getElementById('logs-content').innerHTML = '<p style="color: #d32f2f;">Error loading logs: ' + error.message + '</p>';
+                }}
+            }}
+            
+            // Load logs when page is ready
+            if (document.readyState === 'loading') {{
+                document.addEventListener('DOMContentLoaded', loadDocumentLogs);
+            }} else {{
+                loadDocumentLogs();
+            }}
+            </script>
             """
 
             # Build page title with metadata title if available

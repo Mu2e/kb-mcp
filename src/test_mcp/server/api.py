@@ -637,6 +637,28 @@ def setup_api_routes(app, session_manager: WebSessionManager):
                 status_code=500
             )
 
+    @app.route("/api/logs/{doc_id}")
+    async def api_logs_document(request: Request):
+        """JSON API endpoint for getting all logs for a document."""
+        # Check authentication first
+        session_data, error_response = await require_auth_api(request, session_manager, json_response=True)
+        if error_response:
+            return error_response
+
+        doc_id = request.path_params["doc_id"]
+        
+        try:
+            from ..kb.logs import get_all_logs_for_document
+            
+            logs = get_all_logs_for_document(doc_id)
+            return JSONResponse(logs)
+        except Exception as e:
+            logger.error(f"Error fetching logs for document {doc_id}: {e}", exc_info=True)
+            return JSONResponse(
+                {"error": str(e)},
+                status_code=500
+            )
+
     @app.route("/api/logs")
     async def api_logs(request: Request):
         """JSON API endpoint for getting search logs with filters."""
@@ -646,7 +668,7 @@ def setup_api_routes(app, session_manager: WebSessionManager):
             return error_response
 
         try:
-            from ..kb.search.logs import get_search_logs
+            from ..kb.logs import get_search_logs
             
             # Get query parameters
             limit = int(request.query_params.get("limit", "20"))

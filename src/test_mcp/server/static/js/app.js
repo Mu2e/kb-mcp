@@ -1183,21 +1183,42 @@ async function loadLogs(reset = false) {
         const logsList = document.getElementById('logs-list');
         if (logsList) {
             if (reset) {
-                logsList.innerHTML = '';
+                // Create table structure on first load
+                logsList.innerHTML = `
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Query</th>
+                                <th>Time</th>
+                                <th>Parameters</th>
+                                <th>Embed Time</th>
+                                <th>Search Time</th>
+                                <th>Similarity</th>
+                                <th>Results</th>
+                                <th>Result Preview</th>
+                            </tr>
+                        </thead>
+                        <tbody id="logs-table-body">
+                        </tbody>
+                    </table>
+                `;
                 logsOffset = 0;
                 logsHasMore = true;
             }
             
-            if (logs.length > 0) {
-                logs.forEach(log => {
-                    logsList.appendChild(createLogElement(log));
-                });
-                
-                logsOffset += logs.length;
-                logsHasMore = logs.length === 20; // If we got a full page, there might be more
-            } else if (reset) {
-                logsList.innerHTML = '<div class="info-box">No logs found.</div>';
-                logsHasMore = false;
+            const tbody = document.getElementById('logs-table-body');
+            if (tbody) {
+                if (logs.length > 0) {
+                    logs.forEach(log => {
+                        tbody.appendChild(createLogRow(log));
+                    });
+                    
+                    logsOffset += logs.length;
+                    logsHasMore = logs.length === 20; // If we got a full page, there might be more
+                } else if (reset) {
+                    logsList.innerHTML = '<div class="info-box">No logs found.</div>';
+                    logsHasMore = false;
+                }
             }
         }
     } catch (error) {
@@ -1214,27 +1235,15 @@ async function loadLogs(reset = false) {
     }
 }
 
-// Create log element
-function createLogElement(log) {
-    const div = document.createElement('div');
-    div.className = 'document-item';
-    div.style.padding = '12px';
-    div.style.marginBottom = '12px';
-    div.style.borderBottom = '1px solid #eee';
+// Create log table row
+function createLogRow(log) {
+    const tr = document.createElement('tr');
     
     const time = log.created_time ? new Date(log.created_time).toLocaleString() : 'N/A';
     const searchTime = log.time_search_total ? `${log.time_search_total.toFixed(3)}s` : 'N/A';
     const embedTime = log.time_embedding ? `${log.time_embedding.toFixed(3)}s` : 'N/A';
     const similarity = log.best_similarity ? `${(log.best_similarity * 100).toFixed(2)}%` : 'N/A';
     const resultsCount = log.total_results || 0;
-    
-    // Build parameters list
-    const params = [];
-    if (log.embedding_name) params.push(`Embedding: ${escapeHtml(log.embedding_name)}`);
-    if (log.max_results) params.push(`Max Results: ${log.max_results}`);
-    if (log.source_id) params.push(`Source: ${escapeHtml(log.source_id)}`);
-    if (log.doc_type) params.push(`Type: ${escapeHtml(log.doc_type)}`);
-    if (log.chunking_strategy) params.push(`Strategy: ${escapeHtml(log.chunking_strategy)}`);
     
     // Build search URL with all parameters
     const searchParams = new URLSearchParams();
@@ -1249,7 +1258,6 @@ function createLogElement(log) {
     let dateFrom = '';
     let dateTo = '';
     if (log.filter_params && typeof log.filter_params === 'object') {
-        // Check if filter_params contains a bool.must with range queries
         if (log.filter_params.bool && log.filter_params.bool.must) {
             log.filter_params.bool.must.forEach(condition => {
                 if (condition.range) {
@@ -1269,9 +1277,7 @@ function createLogElement(log) {
     if (dateTo) searchParams.set('date_to', dateTo);
     if (dateType !== 'insert_time') searchParams.set('date_type', dateType);
     
-    // Add filters to URL (excluding date filters which we've already extracted)
     if (log.filter_params) {
-        // Create a copy of filter_params without date range filters
         const filterCopy = JSON.parse(JSON.stringify(log.filter_params));
         if (filterCopy.bool && filterCopy.bool.must) {
             filterCopy.bool.must = filterCopy.bool.must.filter(condition => {
@@ -1290,7 +1296,6 @@ function createLogElement(log) {
         }
     }
     if (log.metadata_filters) {
-        // Add metadata filters as key=value pairs
         Object.entries(log.metadata_filters).forEach(([key, value]) => {
             searchParams.append('metadata', `${key}=${value}`);
         });
@@ -1298,49 +1303,86 @@ function createLogElement(log) {
     
     const searchUrl = `/web?${searchParams.toString()}`;
     
-    // Build filters display
-    let filtersHtml = '';
-    if (log.filter_params || log.metadata_filters) {
-        const filters = log.filter_params || log.metadata_filters || {};
-        filtersHtml = `<div style="margin-top: 6px; padding: 4px 8px; background: #f5f5f5; border-radius: 3px; font-size: 11px; color: #555;">
-            <strong>Filters:</strong> ${escapeHtml(JSON.stringify(filters))}
-        </div>`;
-    }
+    // Build parameters display
+    const params = [];
+    if (log.embedding_name) params.push(escapeHtml(log.embedding_name));
+    if (log.source_id) params.push(`src:${escapeHtml(log.source_id)}`);
+    if (log.doc_type) params.push(`type:${escapeHtml(log.doc_type)}`);
+    if (log.chunking_strategy) params.push(`strategy:${escapeHtml(log.chunking_strategy)}`);
     
-    // Build results list
-    let resultsHtml = '';
+    // Build results preview (first few document IDs)
+    const logId = log.id || `log-${Math.random().toString(36).substr(2, 9)}`;
+    const expandedId = `expanded-${logId}`;
+    let resultsPreview = '';
+    let expandedResults = '';
+    let hasExpandableResults = false;
+    
     if (log.results && Array.isArray(log.results) && log.results.length > 0) {
-        resultsHtml = '<div style="margin-top: 8px;"><strong style="font-size: 12px;">Results:</strong><ul style="margin: 4px 0 0 0; padding-left: 20px; font-size: 12px;">';
-        log.results.forEach(result => {
+        hasExpandableResults = true;
+        const previewDocs = log.results.slice(0, 3).map(r => {
+            const docId = r.document_id || r.id || 'N/A';
+            return `<a href="/web/document/${docId}" style="color: #2196F3; text-decoration: underline;">${escapeHtml(docId.substring(0, 8))}...</a>`;
+        }).join(', ');
+        const moreCount = log.results.length > 3 ? ` +${log.results.length - 3} more` : '';
+        resultsPreview = previewDocs + moreCount;
+        
+        // Build expanded results list
+        expandedResults = '<div style="max-height: 300px; overflow-y: auto; margin-top: 8px; padding: 8px; background: #f9f9f9; border-radius: 4px; border: 1px solid #ddd;">';
+        log.results.forEach((result, idx) => {
             const docId = result.document_id || result.id || 'N/A';
             const chunkCount = result.chunk_ids ? result.chunk_ids.length : 0;
-            resultsHtml += `<li><a href="/web/document/${docId}" style="color: #1976d2; text-decoration: none;">${escapeHtml(docId)}</a>${chunkCount > 0 ? ` <span style="color: #666;">(${chunkCount})</span>` : ''}</li>`;
+            const similarity = result.similarity !== undefined ? ` <span style="color: #666; font-size: 11px;">(${(result.similarity * 100).toFixed(1)}%)</span>` : '';
+            expandedResults += `<div style="padding: 4px 0; border-bottom: ${idx < log.results.length - 1 ? '1px solid #eee' : 'none'};">
+                <a href="/web/document/${docId}" style="color: #2196F3; text-decoration: underline; font-weight: 500;">${escapeHtml(docId)}</a>
+                ${chunkCount > 0 ? ` <span style="color: #666; font-size: 11px;">(${chunkCount} chunk${chunkCount !== 1 ? 's' : ''})</span>` : ''}
+                ${similarity}
+            </div>`;
         });
-        resultsHtml += '</ul></div>';
+        expandedResults += '</div>';
     } else if (resultsCount > 0) {
-        resultsHtml = `<div style="margin-top: 8px; font-size: 12px; color: #666;">${resultsCount} result${resultsCount !== 1 ? 's' : ''}</div>`;
+        resultsPreview = `${resultsCount} result${resultsCount !== 1 ? 's' : ''}`;
+    } else {
+        resultsPreview = '0 results';
     }
     
-    div.innerHTML = `
-        <div style="display: grid; grid-template-columns: 1fr auto; gap: 10px;">
-            <div>
-                <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 4px;">
-                    <div style="font-size: 14px; font-weight: bold; flex: 1;">${escapeHtml(log.query || '(empty query)')}</div>
-                    <a href="${searchUrl}" style="font-size: 11px; color: #1976d2; text-decoration: none; padding: 4px 8px; border: 1px solid #1976d2; border-radius: 3px; white-space: nowrap;">View Search →</a>
-                </div>
-                <div style="font-size: 11px; color: #666; line-height: 1.4;">
-                    <div>${time}</div>
-                    <div>${params.length > 0 ? params.join(' | ') : 'No parameters'}</div>
-                    <div>Time: Embed ${embedTime} | Search ${searchTime} | Similarity: ${similarity} | Results: ${resultsCount}</div>
-                </div>
-                ${filtersHtml}
-                ${resultsHtml}
+    tr.innerHTML = `
+        <td style="max-width: 300px; word-wrap: break-word;">
+            <a href="${searchUrl}" style="color: #2196F3; text-decoration: underline; font-weight: 500;">${escapeHtml(log.query || '(empty query)')}</a>
+        </td>
+        <td>${time}</td>
+        <td>${params.length > 0 ? params.join(', ') : '-'}</td>
+        <td>${embedTime}</td>
+        <td>${searchTime}</td>
+        <td>${similarity}</td>
+        <td>${resultsCount}</td>
+        <td style="max-width: 200px; word-wrap: break-word; font-size: 12px; position: relative;">
+            <div id="preview-${logId}" style="cursor: ${hasExpandableResults ? 'pointer' : 'default'}; ${hasExpandableResults ? 'color: #2196F3; text-decoration: underline;' : ''}" ${hasExpandableResults ? `onclick="toggleResultsExpansion('${logId}'); event.stopPropagation();"` : ''}>
+                ${resultsPreview}
             </div>
-        </div>
+            ${hasExpandableResults ? `<div id="${expandedId}" style="display: none; position: absolute; z-index: 10; background: white; box-shadow: 0 2px 8px rgba(0,0,0,0.15); border-radius: 4px; margin-top: 4px; min-width: 300px; max-width: 500px;">${expandedResults}</div>` : ''}
+        </td>
     `;
     
-    return div;
+    return tr;
 }
+
+// Toggle results expansion for a log entry
+window.toggleResultsExpansion = function(logId) {
+    const expandedEl = document.getElementById(`expanded-${logId}`);
+    const previewEl = document.getElementById(`preview-${logId}`);
+    
+    if (!expandedEl || !previewEl) return;
+    
+    if (expandedEl.style.display === 'none') {
+        expandedEl.style.display = 'block';
+        previewEl.style.fontWeight = 'bold';
+        previewEl.style.color = '#1976d2';
+    } else {
+        expandedEl.style.display = 'none';
+        previewEl.style.fontWeight = 'normal';
+        previewEl.style.color = '';
+    }
+};
 
 // Handle scroll for logs page
 function handleLogsScroll() {

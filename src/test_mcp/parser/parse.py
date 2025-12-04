@@ -181,6 +181,9 @@ def parse(
             generate_llm_descriptions = parse_image_llm_description
         
         # Extract text and images (if enabled)
+        import time
+        text_extraction_start = time.time()
+        
         if hasattr(parser, 'extract_text_and_images_dict') and (create_additional_docs or generate_llm_descriptions):
             # Parser supports image extraction (e.g., PDF)
             # Extract images if we need them for either additional docs or descriptions
@@ -191,12 +194,17 @@ def parse(
             text = parser.get_text()
             image_dicts = []
         
+        text_extraction_time = time.time() - text_extraction_start
+        
         # Generate image descriptions in parallel if enabled
+        image_description_time = 0.0
         if generate_llm_descriptions and image_dicts:
             from .image_descriptions import generate_image_descriptions
             
+            image_description_start = time.time()
             # Generate descriptions and update image dicts
             image_dicts = generate_image_descriptions(text, image_dicts)
+            image_description_time = time.time() - image_description_start
             
             # Replace placeholders in main text with descriptions
             for img_dict in image_dicts:
@@ -224,6 +232,16 @@ def parse(
         doc_data["text"] = text
         if "doc_type" not in doc_data:
             doc_data["doc_type"] = "text"
+        
+        # Store timing information in meta for retrieval
+        # This allows add_from_path to extract timing without breaking the API
+        if "meta" not in doc_data:
+            doc_data["meta"] = {}
+        doc_data["meta"]["_parsing_timing"] = {
+            "text_extraction_time_seconds": round(text_extraction_time, 3),
+            "image_description_time_seconds": round(image_description_time, 3) if image_description_time > 0 else None,
+            "total_time_seconds": round(text_extraction_time + image_description_time, 3),
+        }
         
         # Return main document dict + image document dicts
         if create_additional_docs:

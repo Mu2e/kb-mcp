@@ -71,7 +71,7 @@ async def web_logs(request: Request, session_manager: WebSessionManager):
     
     <div class="card">
         <h2>Logs</h2>
-        <div id="logs-list" style="display: flex; flex-direction: column; gap: 15px;">
+        <div id="logs-list">
             <div style="text-align: center; padding: 20px; color: #666;">Loading logs...</div>
         </div>
         <div id="logs-loading" style="text-align: center; padding: 20px; display: none;">
