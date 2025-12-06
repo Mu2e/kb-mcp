@@ -704,3 +704,104 @@ def setup_api_routes(app, session_manager: WebSessionManager):
                 status_code=500
             )
 
+    @app.route("/api/similar")
+    async def api_similar(request: Request):
+        """JSON API endpoint for finding similar documents to a chunk or document."""
+        # Check authentication first
+        session_data, error_response = await require_auth_api(request, session_manager, json_response=True)
+        if error_response:
+            return error_response
+
+        # Get query parameters
+        chunk_id = request.query_params.get("chunk_id", None)
+        document_id = request.query_params.get("document_id", None)
+        
+        if not chunk_id and not document_id:
+            return JSONResponse(
+                {"error": "Either chunk_id or document_id parameter is required"},
+                status_code=400
+            )
+        
+        if chunk_id and document_id:
+            return JSONResponse(
+                {"error": "Cannot provide both chunk_id and document_id"},
+                status_code=400
+            )
+        
+        embedding_name = request.query_params.get("embedding_name", None)
+        max_results = int(request.query_params.get("max_results", "5"))
+        source_id = request.query_params.get("source_id", None)
+        doc_type = request.query_params.get("doc_type", None)
+        chunking_strategy = request.query_params.get("chunking_strategy", None)
+        
+        # Parse metadata filters (key=value pairs)
+        metadata_filters = {}
+        metadata_params = request.query_params.getlist("metadata")
+        for meta_pair in metadata_params:
+            if "=" in meta_pair:
+                key, value = meta_pair.split("=", 1)
+                metadata_filters[key] = value
+        
+        # Parse Elasticsearch-style filter if provided
+        filter_dict = None
+        filter_json = request.query_params.get("filter", None)
+        if filter_json:
+            try:
+                import json
+                filter_dict = json.loads(filter_json)
+            except json.JSONDecodeError:
+                return JSONResponse(
+                    {"error": "Invalid JSON in filter parameter"},
+                    status_code=400
+                )
+
+        try:
+            # Import get_similar function
+            try:
+                from ..kb.search import get_similar
+            except ImportError:
+                return JSONResponse(
+                    {"error": "Search module not available"},
+                    status_code=503
+                )
+            
+            # Perform similarity search
+            result = get_similar(
+                chunk_id=chunk_id,
+                document_id=document_id,
+                embedding_name=embedding_name,
+                max_results=max_results,
+                source_id=source_id,
+                doc_type=doc_type,
+                chunking_strategy=chunking_strategy,
+                filter=filter_dict,
+                **metadata_filters
+            )
+            
+            # Convert results to document dictionaries
+            documents_data = []
+            for doc_result in result.get('results', []):
+                doc = doc_result.get('document')
+                if doc:
+                    doc_dict = document_to_dict(doc, include_text=False)
+                    # Add search-specific information
+                    doc_dict['chunks'] = doc_result.get('chunks', [])
+                    doc_dict['best_similarity'] = doc_result['chunks'][0]['similarity'] if doc_result.get('chunks') else None
+                    documents_data.append(doc_dict)
+            
+            return JSONResponse({
+                "documents": documents_data,
+                "total_results": result.get('metadata', {}).get('total_results', 0),
+                "embedding_name": result.get('metadata', {}).get('embedding_name'),
+                "timing": {
+                    "total": result.get('metadata', {}).get('time_search_total'),
+                }
+            })
+
+        except Exception as e:
+            logger.error(f"Error in api_similar: {e}", exc_info=True)
+            return JSONResponse(
+                {"error": str(e)},
+                status_code=500
+            )
+

@@ -393,11 +393,31 @@ def setup_web_routes(app, oauth_provider, session_manager: WebSessionManager):
             # Format document data with chunk highlighting support
             text_content = ""
             if doc.text:
-                # Wrap text in a div with id for JavaScript to access
+                # Wrap text in a div with id for JavaScript to access, with expand/collapse
                 text_content = f'''
             <div id="document-text-container" style="position: relative;">
-                <pre id="document-text" style="white-space: pre-wrap; max-height: 600px; overflow-y: auto; position: relative; padding: 10px; background: #f9f9f9; border: 1px solid #ddd; border-radius: 4px; font-family: inherit; line-height: 1.6;">{html_escape(doc.text)}</pre>
+                <div id="text-expanded" style="display: block;">
+                    <pre id="document-text" style="white-space: pre-wrap; max-height: 600px; overflow-y: auto; position: relative; padding: 10px; background: #f9f9f9; border: 1px solid #ddd; border-radius: 4px; font-family: inherit; line-height: 1.6;">{html_escape(doc.text)}</pre>
+                    <span onclick="toggleTextContent()" style="position: absolute; top: 10px; right: 10px; cursor: pointer; font-size: 16px; color: #666; user-select: none; background: white; padding: 2px 6px; border-radius: 3px;">−</span>
+                </div>
+                <div id="text-collapsed" style="display: none;">
+                    <div style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding: 10px; background: #f9f9f9; border: 1px solid #ddd; border-radius: 4px; position: relative;">{html_escape(doc.text[:200])}...</div>
+                    <span onclick="toggleTextContent()" style="position: absolute; top: 10px; right: 10px; cursor: pointer; font-size: 16px; color: #666; user-select: none; background: white; padding: 2px 6px; border-radius: 3px;">+</span>
+                </div>
             </div>
+            <script>
+            function toggleTextContent() {{
+                const expanded = document.getElementById('text-expanded');
+                const collapsed = document.getElementById('text-collapsed');
+                if (expanded.style.display === 'none') {{
+                    expanded.style.display = 'block';
+                    collapsed.style.display = 'none';
+                }} else {{
+                    expanded.style.display = 'none';
+                    collapsed.style.display = 'block';
+                }}
+            }}
+            </script>
                 '''
             
             # Handle image display
@@ -459,13 +479,84 @@ def setup_web_routes(app, oauth_provider, session_manager: WebSessionManager):
 
             meta_html = ""
             if doc.meta:
-                meta_html = '<div class="card"><h2>Metadata</h2><table><tr><th>Key</th><th>Value</th></tr>'
+                meta_html = '<div class="card"><h2>Metadata</h2><div style="max-height: 400px; overflow-y: auto; border: 1px solid #ddd; border-radius: 4px;"><table style="width: 100%;"><tr><th style="text-align: left; padding: 8px; border-bottom: 1px solid #ddd; position: sticky; top: 0; background: white;">Key</th><th style="text-align: left; padding: 8px; border-bottom: 1px solid #ddd; position: sticky; top: 0; background: white;">Value</th></tr>'
+                field_index = 0
                 for key, value in doc.meta.items():
-                    if isinstance(value, (str, int, float, bool)):
-                        meta_html += f'<tr><td><strong>{key}</strong></td><td>{value}</td></tr>'
+                    field_id = f"meta-field-{field_index}"
+                    # Format value based on type
+                    if isinstance(value, list):
+                        # Special handling for authors or other lists
+                        if key.lower() == 'author' or key.lower() == 'authors':
+                            # Format as comma-separated list
+                            formatted_value = ', '.join(str(v) for v in value)
+                            full_value = formatted_value
+                        else:
+                            # Format other lists as bullet points
+                            list_items = ''.join(f'<li>{html_escape(str(v))}</li>' for v in value)
+                            formatted_value = f'<ul style="margin: 0; padding-left: 20px;">{list_items}</ul>'
+                            full_value = formatted_value
+                    elif isinstance(value, dict):
+                        # Format dict as JSON-like structure
+                        import json
+                        formatted_value = f'<pre style="margin: 0; white-space: pre-wrap;">{html_escape(json.dumps(value, indent=2))}</pre>'
+                        full_value = formatted_value
+                    elif isinstance(value, (str, int, float, bool)):
+                        formatted_value = html_escape(str(value))
+                        full_value = formatted_value
                     else:
-                        meta_html += f'<tr><td><strong>{key}</strong></td><td><pre>{value}</pre></td></tr>'
-                meta_html += '</table></div>'
+                        formatted_value = html_escape(str(value))
+                        full_value = f'<pre style="margin: 0;">{formatted_value}</pre>'
+                    
+                    # Create expandable field - check if content is long enough to need truncation
+                    # For text content, check length; for HTML (lists/dicts), always allow expansion
+                    is_html = isinstance(value, (list, dict))
+                    is_long_text = isinstance(value, str) and len(str(value)) > 200
+                    needs_expansion = is_html or is_long_text
+                    
+                    if needs_expansion:
+                        # Create expandable field
+                        # For collapsed view: use max-height and overflow for HTML, text-overflow for plain text
+                        if is_html:
+                            collapsed_style = "max-height: 1.5em; overflow: hidden;"
+                        else:
+                            collapsed_style = "white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%;"
+                        
+                        meta_html += f'''
+                        <tr>
+                            <td style="padding: 8px; border-bottom: 1px solid #eee; vertical-align: top;"><strong>{html_escape(str(key))}</strong></td>
+                            <td style="padding: 8px; border-bottom: 1px solid #eee; position: relative;">
+                                <div id="{field_id}-collapsed" style="display: block;">
+                                    <div style="{collapsed_style}">{full_value}</div>
+                                    <span onclick="toggleMetaField('{field_id}')" style="position: absolute; top: 8px; right: 8px; cursor: pointer; font-size: 16px; color: #666; user-select: none;">+</span>
+                                </div>
+                                <div id="{field_id}-expanded" style="display: none;">
+                                    <div>{full_value}</div>
+                                    <span onclick="toggleMetaField('{field_id}')" style="position: absolute; top: 8px; right: 8px; cursor: pointer; font-size: 16px; color: #666; user-select: none;">−</span>
+                                </div>
+                            </td>
+                        </tr>
+                        '''
+                    else:
+                        # Simple non-expandable field
+                        meta_html += f'<tr><td style="padding: 8px; border-bottom: 1px solid #eee;"><strong>{html_escape(str(key))}</strong></td><td style="padding: 8px; border-bottom: 1px solid #eee;">{full_value}</td></tr>'
+                    field_index += 1
+                meta_html += '</table></div></div>'
+                # Add JavaScript for toggle functionality
+                meta_html += '''
+                <script>
+                function toggleMetaField(fieldId) {
+                    const collapsed = document.getElementById(fieldId + '-collapsed');
+                    const expanded = document.getElementById(fieldId + '-expanded');
+                    if (collapsed.style.display === 'none') {
+                        collapsed.style.display = 'block';
+                        expanded.style.display = 'none';
+                    } else {
+                        collapsed.style.display = 'none';
+                        expanded.style.display = 'block';
+                    }
+                }
+                </script>
+                '''
 
             # Get success/error message from query params
             message_html = ""
@@ -539,9 +630,18 @@ def setup_web_routes(app, oauth_provider, session_manager: WebSessionManager):
                     <form id="delete-form" method="POST" action="/web/document/{doc.id}/delete" style="display: inline-block;" onsubmit="return confirm('Are you sure you want to delete this document? This will also delete all chunks and embeddings. This action cannot be undone.');">
                         <button type="submit" id="delete-submit-btn" style="padding: 10px 20px; background-color: #f44336; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; white-space: nowrap;">Delete Document</button>
                     </form>
+                    <div>
+                        <label for="load-similar-btn" style="display: block; margin-bottom: 5px; font-size: 14px; color: #666;">Find Similar Documents:</label>
+                        <button id="load-similar-btn" style="padding: 10px 20px; background-color: #4CAF50; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; white-space: nowrap; min-width: 180px; text-align: center;">Find Similar Documents</button>
+                    </div>
+                    <div>
+                        <label for="similar-max-results" style="display: block; margin-bottom: 5px; font-size: 12px; color: #666; font-weight: normal;">Max Results:</label>
+                        <input type="number" id="similar-max-results" value="3" min="1" max="20" style="width: 60px; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                    </div>
                 </div>
                 <div id="rechunk-status" style="margin-top: 10px;"></div>
                 <div id="delete-status" style="margin-top: 10px;"></div>
+                <div id="similar-content" style="margin-top: 15px; color: #666;"></div>
             </div>
             
             <script>
@@ -594,6 +694,89 @@ def setup_web_routes(app, oauth_provider, session_manager: WebSessionManager):
                 <h2>Operation Logs</h2>
                 <div id="logs-content" style="color: #666;">Loading logs...</div>
             </div>
+            
+            <script>
+            // Load and display similar documents
+            async function loadSimilarDocuments() {{
+                const btn = document.getElementById('load-similar-btn');
+                const content = document.getElementById('similar-content');
+                
+                // Disable button and show loading
+                btn.disabled = true;
+                btn.textContent = 'Loading...';
+                content.innerHTML = '<p style="color: #666;">Searching for similar documents...</p>';
+                
+                try {{
+                    const docId = '{html_escape(doc.id)}';
+                    const maxResults = document.getElementById('similar-max-results').value || '3';
+                    const response = await fetch('/api/similar?document_id=' + encodeURIComponent(docId) + '&max_results=' + encodeURIComponent(maxResults));
+                    if (!response.ok) {{
+                        throw new Error('Failed to load similar documents');
+                    }}
+                    const data = await response.json();
+                    
+                    // Escape HTML to prevent XSS
+                    const escapeHtml = (text) => {{
+                        const div = document.createElement('div');
+                        div.textContent = text;
+                        return div.innerHTML;
+                    }};
+                    
+                    if (data.documents && data.documents.length > 0) {{
+                        let html = `<p style="color: #666; margin-bottom: 15px;">Found ${{data.total_results}} similar document(s):</p>`;
+                        html += '<div style="display: grid; gap: 15px;">';
+                        
+                        for (const doc of data.documents) {{
+                            const docTitle = doc.meta && doc.meta.title ? doc.meta.title : (doc.doc_id || doc.id);
+                            const similarity = doc.best_similarity ? (doc.best_similarity * 100).toFixed(1) + '%' : 'N/A';
+                            const chunksCount = doc.chunks ? doc.chunks.length : 0;
+                            
+                            html += `
+                                <div style="padding: 15px; border: 1px solid #ddd; border-radius: 4px; background: #f9f9f9;">
+                                    <h3 style="margin: 0 0 8px 0;">
+                                        <a href="/web/document/${{escapeHtml(doc.id)}}" style="color: #2196F3; text-decoration: none;">${{escapeHtml(docTitle)}}</a>
+                                    </h3>
+                                    <div style="color: #666; font-size: 14px; margin-bottom: 8px;">
+                                        <span>Similarity: <strong>${{similarity}}</strong></span>
+                                        <span style="margin-left: 15px;">Matching chunks: <strong>${{chunksCount}}</strong></span>
+                                    </div>
+                                    <div style="color: #666; font-size: 12px;">
+                                        Source: ${{escapeHtml(doc.source_id || 'N/A')}} / ${{escapeHtml(doc.doc_id || 'N/A')}}
+                                        ${{doc.doc_type ? ' | Type: ' + escapeHtml(doc.doc_type) : ''}}
+                                    </div>
+                                </div>
+                            `;
+                        }}
+                        
+                        html += '</div>';
+                        content.innerHTML = html;
+                    }} else {{
+                        content.innerHTML = '<p style="color: #666;">No similar documents found.</p>';
+                    }}
+                    
+                    // Gray out button after loading (keep it visible)
+                    btn.disabled = true;
+                    btn.textContent = 'Find Similar Documents';
+                    btn.style.backgroundColor = '#cccccc';
+                    btn.style.cursor = 'not-allowed';
+                }} catch (error) {{
+                    console.error('Error loading similar documents:', error);
+                    content.innerHTML = '<p style="color: #d32f2f;">Error loading similar documents: ' + error.message + '</p>';
+                    btn.disabled = false;
+                    btn.textContent = 'Retry';
+                    btn.style.backgroundColor = '#4CAF50';
+                    btn.style.cursor = 'pointer';
+                }}
+            }}
+            
+            // Setup button click handler
+            document.addEventListener('DOMContentLoaded', function() {{
+                const btn = document.getElementById('load-similar-btn');
+                if (btn) {{
+                    btn.addEventListener('click', loadSimilarDocuments);
+                }}
+            }});
+            </script>
             
             <script>
             // Load and display document logs

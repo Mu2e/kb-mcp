@@ -246,7 +246,7 @@ def get_similar(
                 chunk_result = get_similar(
                     chunk_id=chunk.id,
                     embedding_name=embedding_name,
-                    max_results=max_results * 2,  # Get more to account for merging
+                    max_results=max_results,  # Use same number, will merge and deduplicate
                     source_id=source_id,
                     doc_type=doc_type,
                     chunking_strategy=chunking_strategy,
