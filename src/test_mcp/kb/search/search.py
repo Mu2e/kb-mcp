@@ -1,16 +1,13 @@
-"""Main search function."""
+"""Main search function - embedd query and get_closest."""
 
 import logging
 import time
 from typing import Optional, Dict, Any
 
 from ..database import get_db_session
-from ..embedding.embedding import _get_embedding_table, _convert_embedding_to_list
 from ..embedding.utils import get_embedder
-
 from .core import SearchLog
-from .search_pgvector import _search_pgvector
-from .search_fallback import _search_fallback
+from .similarity import get_closest
 
 logger = logging.getLogger(__name__)
 
@@ -148,58 +145,32 @@ def search(
         # Don't pass kwargs to embedder - metadata filters should only go to search functions
         embedder = get_embedder(embedding_name=embedding_name, session=session)
         query_embedding = embedder([query])[0]  # Get first (and only) embedding
+        from ..embedding.embedding import _convert_embedding_to_list
         query_embedding = _convert_embedding_to_list(query_embedding)
         
         embedding_time = time.time() - embedding_start
         
-        # Get embedding table
-        if embedding_name is None:
-            # Generate embedding_name from embedder
-            embedding_name = embedder._generate_short_name()
+        # Get embedding_name if not provided
+        from ..embedding.utils import get_embedding_name
+        embedding_name = get_embedding_name(embedding_name, session=session, embedder=embedder)
         
-        config, embedding_table = _get_embedding_table(session, embedding_name)
+        # Use get_closest with the embedded query
+        result = get_closest(
+            embedding=query_embedding,
+            embedding_name=embedding_name,
+            max_results=max_results,
+            source_id=source_id,
+            doc_type=doc_type,
+            chunking_strategy=chunking_strategy,
+            filter=filter,
+            session=session,
+            explain_analyse=explain_analyse,
+            **kwargs
+        )
         
-        # Start timing the search (after embedding is done)
-        search_start = time.time()
-        
-        # Check if we're using PostgreSQL with pgvector for optimized similarity search
-        dialect_name = session.bind.dialect.name if session.bind else None
-        
-        # Dispatch to appropriate search implementation
-        if dialect_name == "postgresql":
-            result = _search_pgvector(
-                session=session,
-                embedding_table=embedding_table,
-                query_embedding=query_embedding,
-                max_results=max_results,
-                source_id=source_id,
-                doc_type=doc_type,
-                chunking_strategy=chunking_strategy,
-                filter=filter,
-                explain_analyse=explain_analyse,
-                query=query,
-                embedding_time=embedding_time,
-                start_time=search_start,
-                **kwargs
-            )
-        else:
-            result = _search_fallback(
-                session=session,
-                embedding_table=embedding_table,
-                query_embedding=query_embedding,
-                max_results=max_results,
-                source_id=source_id,
-                doc_type=doc_type,
-                chunking_strategy=chunking_strategy,
-                filter=filter,
-                query=query,
-                embedding_time=embedding_time,
-                start_time=search_start,
-                **kwargs
-            )
-        session.expunge_all()
-        
-        # Update time_search_total to include the entire operation
+        # Update metadata with query and embedding time (for logging)
+        result['metadata']['query'] = query
+        result['metadata']['time_embedding'] = embedding_time
         result['metadata']['time_search_total'] = time.time() - total_start
         
         # Log search to database

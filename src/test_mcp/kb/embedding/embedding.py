@@ -8,9 +8,13 @@ from sqlalchemy import select, delete, func, inspect as sqlalchemy_inspect
 
 
 # Helper functions
-def _get_embedding_table(sess, embedding_name: str):
-    """Get EmbeddingConfig and table for an embedding_name."""
+def _get_embedding_table(sess, embedding_name: Optional[str] = None, embedder=None):
+    """Get EmbeddingConfig and table for an embedding_name, resolving default if needed."""
     from .core import create_embedding_table
+    from .utils import get_embedding_name
+    
+    # Resolve embedding_name if not provided
+    embedding_name = get_embedding_name(embedding_name, session=sess, embedder=embedder)
     
     config = sess.query(EmbeddingConfig).filter(
         EmbeddingConfig.short_name == embedding_name
@@ -23,7 +27,7 @@ def _get_embedding_table(sess, embedding_name: str):
             f"Available embeddings: {available if available else '(none)'}"
         )
     
-    return config, create_embedding_table(config.short_name, config.dimension)
+    return config, create_embedding_table(config.short_name, config.dimension), embedding_name
 
 
 def _table_exists(inspector, table_name: str) -> bool:
@@ -103,9 +107,8 @@ def embed_chunk(
     embedder = get_embedder(embedding_name=embedding_name, provider=provider, model=model, session=session, **kwargs)
     
     # Determine short_name for the embedding table
-    # If embedding_name provided, use it; otherwise get from embedder
-    if embedding_name is None:
-        embedding_name = embedder._generate_short_name()
+    from .utils import get_embedding_name
+    embedding_name = get_embedding_name(embedding_name, session=session, embedder=embedder)
     
     # Generate embeddings and store them (embed_chunks now returns the embeddings)
     embeddings = embedder.embed_chunks(
@@ -177,9 +180,8 @@ def embed_chunks(
     embedder = get_embedder(embedding_name=embedding_name, provider=provider, model=model, session=session, **kwargs)
     
     # Determine short_name for the embedding table
-    # If embedding_name provided, use it; otherwise get from embedder
-    if embedding_name is None:
-        embedding_name = embedder._generate_short_name()
+    from .utils import get_embedding_name
+    embedding_name = get_embedding_name(embedding_name, session=session, embedder=embedder)
 
     # Use embedder's embed_chunks method (it will use the session if provided)
     embedder.embed_chunks(
@@ -402,7 +404,7 @@ def drop_embedding_table(
     logger = logging.getLogger(__name__)
 
     with get_db_session() as sess:
-        config, embedding_table = _get_embedding_table(sess, embedding_name)
+        config, embedding_table, _ = _get_embedding_table(sess, embedding_name)
         table_name = get_embedding_table_name(config.short_name)
 
         # Count embeddings before dropping
@@ -467,7 +469,7 @@ def drop_embedding(
 
         if embedding_name is not None:
             # Delete from specific embedding table
-            _, embedding_table = _get_embedding_table(sess, embedding_name)
+            _, embedding_table, _ = _get_embedding_table(sess, embedding_name)
             if _table_exists(inspector, embedding_table.name):
                 stmt = delete(embedding_table).where(
                     embedding_table.c.chunk_id == chunk_id
@@ -531,7 +533,7 @@ def get_embeddings(
         if embedding_name is not None:
             # Get specific embedding
             try:
-                _, embedding_table = _get_embedding_table(sess, embedding_name)
+                _, embedding_table, _ = _get_embedding_table(sess, embedding_name)
                 if _table_exists(inspector, embedding_table.name):
                     stmt = select(embedding_table.c.id, embedding_table.c.embedding).where(
                         embedding_table.c.chunk_id == chunk_id
@@ -591,7 +593,7 @@ def get_embedding_vector(
         inspector = sqlalchemy_inspect(sess.bind)
 
         try:
-            _, embedding_table = _get_embedding_table(sess, embedding_name)
+            _, embedding_table, _ = _get_embedding_table(sess, embedding_name)
             if not _table_exists(inspector, embedding_table.name):
                 return None
 
@@ -644,7 +646,7 @@ def optimize_embedding_index(embedding_name: str, session=None) -> Dict[str, Any
         should_close = False
     
     try:
-        config, embedding_table = _get_embedding_table(session, embedding_name)
+        config, embedding_table, embedding_name = _get_embedding_table(session, embedding_name)
         dialect_name = session.bind.dialect.name
         
         if dialect_name != 'postgresql':
@@ -787,7 +789,7 @@ def vacuum_analyze_embedding_table(embedding_name: str, session=None) -> Dict[st
         should_close = False
     
     try:
-        config, embedding_table = _get_embedding_table(session, embedding_name)
+        config, embedding_table, embedding_name = _get_embedding_table(session, embedding_name)
         dialect_name = session.bind.dialect.name
         
         if dialect_name != 'postgresql':

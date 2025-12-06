@@ -37,7 +37,7 @@ class GroupedHelpFormatter(argparse.RawDescriptionHelpFormatter):
             
             # Define groups with their commands in order (only primary names, aliases shown separately)
             command_groups = [
-                ("Document Operations", ["add", "get", "embed", "drop", "search"]),
+                ("Document Operations", ["add", "get", "embed", "drop", "search", "similar"]),
                 ("Chunks, Embeddings & Sources", ["source", "chunks", "embedding"]),  # "emb" is an alias, will be shown
                 ("Tools & Statistics", ["tools", "stats", "logs"]),
             ]
@@ -92,12 +92,13 @@ except ImportError:
 
 # Import search function (may not be available if dependencies not installed)
 try:
-    from .search import search
+    from .search import search, get_similar
     from .logs import get_search_logs
     SEARCH_AVAILABLE = True
 except ImportError:
     SEARCH_AVAILABLE = False
     search = None
+    get_similar = None
     get_search_logs = None
 
 
@@ -911,6 +912,87 @@ def cmd_search(args):
         sys.exit(1)
 
 
+def cmd_similar(args):
+    """Find documents similar to a given chunk or document."""
+    if not SEARCH_AVAILABLE:
+        print("Error: Search module not available.")
+        sys.exit(1)
+
+    try:
+        # Parse filter if provided
+        filter_dict = None
+        if args.filter:
+            filter_dict = json.loads(args.filter)
+        
+        # Build kwargs for simple metadata filters
+        kwargs = {}
+        if args.metadata:
+            for meta_pair in args.metadata:
+                if "=" not in meta_pair:
+                    print(f"Error: Metadata filter must be in format 'key=value', got: {meta_pair}")
+                    sys.exit(1)
+                key, value = meta_pair.split("=", 1)
+                kwargs[key] = value
+        
+        # Perform similarity search
+        result = get_similar(
+            chunk_id=args.chunk_id,
+            document_id=args.document_id,
+            embedding_name=args.embedding_name,
+            max_results=args.max_results,
+            source_id=args.source_id,
+            doc_type=args.doc_type,
+            chunking_strategy=args.chunking_strategy,
+            filter=filter_dict,
+            **kwargs
+        )
+        
+        # Display results
+        print(f"\nSimilar Documents ({result['metadata']['total_results']} documents):")
+        if args.chunk_id:
+            print(f"Source: Chunk {args.chunk_id}")
+        elif args.document_id:
+            print(f"Source: Document {args.document_id}")
+        print(f"Embedding: {result['metadata']['embedding_name']}")
+        print(f"Total time: {result['metadata']['time_search_total']:.3f}s")
+        if 'time_embedding' in result['metadata']:
+            print(f"  - Embedding: {result['metadata']['time_embedding']:.3f}s")
+        if 'time_deduplication' in result['metadata']:
+            print(f"  - Deduplication: {result['metadata']['time_deduplication']:.3f}s")
+        print()
+        
+        for i, doc_result in enumerate(result['results'], 1):
+            doc = doc_result['document']
+            print(f"{i}. Document: {doc.id}")
+            print(f"   Source: {doc.source_id}/{doc.doc_id}")
+            if doc.doc_type:
+                print(f"   Type: {doc.doc_type}")
+            if doc_result['chunks']:
+                print(f"   Best similarity: {doc_result['chunks'][0]['similarity']:.4f}")
+            print(f"   Matching chunks: {len(doc_result['chunks'])}")
+            
+            # Show top chunks
+            if doc_result['chunks']:
+                print("   Top chunks:")
+                for chunk in doc_result['chunks'][:3]:  # Show top 3
+                    print(f"     - Chunk #{chunk.get('chunk_index', '?')}: similarity={chunk['similarity']:.4f}")
+                if len(doc_result['chunks']) > 3:
+                    print(f"     ... and {len(doc_result['chunks']) - 3} more")
+            print()
+        
+        if not result['results']:
+            print("No similar documents found.")
+        
+    except json.JSONDecodeError as e:
+        print(f"Error: Invalid JSON in filter: {e}")
+        sys.exit(1)
+    except Exception as e:
+        print(f"Error during similarity search: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+
 def cmd_search_logs(args):
     """List recent search logs."""
     if not SEARCH_AVAILABLE:
@@ -1229,6 +1311,19 @@ def main():
     search_parser.add_argument("--metadata", action="append", help="Simple metadata filter (key=value, can be used multiple times)")
     search_parser.set_defaults(func=cmd_search)
 
+    similar_parser = subparsers.add_parser("similar", help="Find documents similar to a chunk or document")
+    similar_group = similar_parser.add_mutually_exclusive_group(required=True)
+    similar_group.add_argument("--chunk-id", help="Find documents similar to this chunk")
+    similar_group.add_argument("--document-id", help="Find documents similar to this document (searches all chunks)")
+    similar_parser.add_argument("--embedding-name", help="Embedding model to use (e.g., 'openai-small')")
+    similar_parser.add_argument("--max-results", type=int, default=5, help="Maximum number of results (default: 5)")
+    similar_parser.add_argument("--source-id", help="Filter by source ID")
+    similar_parser.add_argument("--doc-type", help="Filter by document type")
+    similar_parser.add_argument("--chunking-strategy", help="Filter by chunking strategy (e.g., 'tokens', 'slide')")
+    similar_parser.add_argument("--filter", help="Elasticsearch-style filter JSON (e.g., '{\"term\": {\"author\": \"John\"}}')")
+    similar_parser.add_argument("--metadata", action="append", help="Simple metadata filter (key=value, can be used multiple times)")
+    similar_parser.set_defaults(func=cmd_similar)
+
     # Logs command with subcommands
     logs_parser = subparsers.add_parser("logs", help="View operation logs")
     logs_subparsers = logs_parser.add_subparsers(dest="logs_command", help="Log types")
@@ -1428,6 +1523,8 @@ def main():
         cmd_drop(args)
     elif args.command == "search":
         cmd_search(args)
+    elif args.command == "similar":
+        cmd_similar(args)
     elif args.command == "chunks":
         if args.chunks_command == "list":
             cmd_chunks_list(args)

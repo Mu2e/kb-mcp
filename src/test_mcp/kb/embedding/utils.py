@@ -185,6 +185,19 @@ def get_embedder(
         raise
 
 
+def get_embedding_name(
+    embedding_name: Optional[str] = None,
+    session=None,
+    embedder=None,
+) -> str:
+    """Get embedding name, using default embedder if not provided."""
+    if embedding_name is None:
+        if embedder is None:
+            embedder = get_embedder(session=session)
+        embedding_name = embedder._generate_short_name()
+    return embedding_name
+
+
 def embed(
     texts: List[str],
     provider: Optional[str] = None,
