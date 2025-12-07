@@ -252,7 +252,7 @@ class ChunkStrategy(Base):
 class ParsingLog(Base):
     """Log table for tracking document parsing/text extraction operations."""
 
-    __tablename__ = "parsing_logs"
+    __tablename__ = "logs_parsing"
 
     # Primary key - UUID stored as string
     id = Column(
@@ -300,9 +300,9 @@ class ParsingLog(Base):
 
     # Indexes
     __table_args__ = (
-        Index("idx_parsing_logs_document_id", "document_id"),
-        Index("idx_parsing_logs_insertion_time", "insertion_time"),
-        Index("idx_parsing_logs_hostname", "hostname"),
+        Index("idx_logs_parsing_document_id", "document_id"),
+        Index("idx_logs_parsing_insertion_time", "insertion_time"),
+        Index("idx_logs_parsing_hostname", "hostname"),
     )
 
     def __repr__(self) -> str:
@@ -318,7 +318,7 @@ class ParsingLog(Base):
 class ChunkEmbeddingLog(Base):
     """Log table for tracking chunking and embedding operations."""
 
-    __tablename__ = "chunk_embedding_logs"
+    __tablename__ = "logs_chunk_embedding"
 
     # Primary key - UUID stored as string
     id = Column(
@@ -369,11 +369,11 @@ class ChunkEmbeddingLog(Base):
 
     # Indexes
     __table_args__ = (
-        Index("idx_chunk_embedding_logs_document_id", "document_id"),
-        Index("idx_chunk_embedding_logs_insertion_time", "insertion_time"),
-        Index("idx_chunk_embedding_logs_strategy", "chunk_strategy"),
-        Index("idx_chunk_embedding_logs_embedding_name", "embedding_name"),
-        Index("idx_chunk_embedding_logs_hostname", "hostname"),
+        Index("idx_logs_chunk_embedding_document_id", "document_id"),
+        Index("idx_logs_chunk_embedding_insertion_time", "insertion_time"),
+        Index("idx_logs_chunk_embedding_strategy", "chunk_strategy"),
+        Index("idx_logs_chunk_embedding_embedding_name", "embedding_name"),
+        Index("idx_logs_chunk_embedding_hostname", "hostname"),
     )
 
     def __repr__(self) -> str:
@@ -381,6 +381,67 @@ class ChunkEmbeddingLog(Base):
             f"<ChunkEmbeddingLog(id={self.id}, document_id={self.document_id}, "
             f"total_time={self.total_time_seconds}s, chunks={self.num_chunks}, "
             f"embeddings={self.num_embeddings}, hostname={self.hostname})>"
+        )
+
+
+class SummaryLog(Base):
+    """Log table for tracking summary and gist generation operations."""
+
+    __tablename__ = "logs_summary"
+
+    # Primary key - UUID stored as string
+    id = Column(
+        String(36),
+        primary_key=True,
+        default=lambda: str(uuid.uuid4()),
+        index=True,
+    )
+
+    # Foreign key to document table (nullable - logs persist if document deleted)
+    document_id = Column(
+        String(36),
+        ForeignKey("documents.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
+    # Model used for generation
+    model = Column(String(128), nullable=False, index=True)
+
+    # Timing information
+    time_summary = Column(Float, nullable=False)  # Time in seconds
+
+    # Hostname of the machine where operation was performed
+    hostname = Column(String(256), nullable=True, index=True)
+
+    # Timestamp when operation completed
+    insertion_time = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=func.now(),
+        server_default=func.now(),
+        index=True,
+    )
+
+    # Additional metadata (JSON) - can store token counts, prompt info, etc.
+    meta = Column(JSON, nullable=True, default=dict)
+
+    # Relationships
+    document = relationship("Document", backref="summary_logs")
+
+    # Indexes
+    __table_args__ = (
+        Index("idx_logs_summary_document_id", "document_id"),
+        Index("idx_logs_summary_insertion_time", "insertion_time"),
+        Index("idx_logs_summary_model", "model"),
+        Index("idx_logs_summary_hostname", "hostname"),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<SummaryLog(id={self.id}, document_id={self.document_id}, "
+            f"model={self.model}, time={self.time_summary}s, "
+            f"hostname={self.hostname})>"
         )
 
 
@@ -416,6 +477,9 @@ class Chunk(Base):
     # Token information
     token_length = Column(Integer, nullable=True)  # Number of tokens in chunk
 
+    # Section path for hierarchical context (e.g., "Chapter 1 > Section 1.2")
+    section_path = Column(Text, nullable=True)
+
     # Chunk strategy - foreign key to chunk_strategies table
     chunk_strategy = Column(
         String(128),
@@ -423,6 +487,9 @@ class Chunk(Base):
         nullable=True,
         index=True,
     )
+
+    # Additional metadata (JSON)
+    meta = Column(JSON, nullable=True, default=dict)
 
     # Timestamp
     created_time = Column(
@@ -475,7 +542,9 @@ class Chunk(Base):
             char_start_index=data.get("char_start_index"),
             char_end_index=data.get("char_end_index"),
             token_length=data.get("token_length"),
+            section_path=data.get("section_path"),
             chunk_strategy=data.get("chunk_strategy"),
+            meta=data.get("meta", {}),
         )
 
     def to_dict(self) -> dict:
@@ -497,6 +566,7 @@ class Chunk(Base):
             "char_start_index": self.char_start_index,
             "char_end_index": self.char_end_index,
             "token_length": self.token_length,
+            "section_path": self.section_path,
             "chunk_strategy": self.chunk_strategy,
             "meta": meta,
             "created_time": self.created_time.isoformat() if self.created_time else None,

@@ -128,6 +128,17 @@ class Document(Base):
         index=True,
     )
 
+    # title: Extracted from document metadata if present
+    title = Column(Text, nullable=True)
+
+    # LLM-generated fields
+    # title_gen: LLM-generated title, optional
+    title_gen = Column(Text, nullable=True)
+    # summary: LLM-generated detailed summary for search/retrieval and display
+    summary = Column(Text, nullable=True)
+    # gist: LLM-generated high-level concepts/themes for embedding context
+    gist = Column(Text, nullable=True)
+
     # Content hash for deduplication
     # Stored here for convenience - can check duplicates quickly
     # Alternative would be separate deduplication table, but this is simpler for now
@@ -153,15 +164,16 @@ class Document(Base):
             f"doc_id={self.doc_id}, uri={self.uri})>"
         )
 
-    def chunk(self, strategy: Optional[str] = None, config: Optional[dict] = None):
+    def chunk(self, chunk_strategy: Optional[str] = None, config: Optional[dict] = None):
         """Chunk this document and save chunks to the database.
 
         This is a convenience method that calls chunk_document() from the embedding module.
         Uses the object's session if attached, otherwise creates a new session.
 
         Args:
-            strategy: Optional chunking strategy ("tokens" or "slide").
-                     If None, reads from CHUNK_STRATEGY env var, defaults to "tokens".
+            chunk_strategy: Optional chunking strategy ("tokens", "slide", or "summary").
+                           If None, reads from CHUNK_STRATEGY env var, defaults to "tokens".
+                           "summary" creates a single chunk from document.summary field.
             config: Optional chunking configuration
 
         Returns:
@@ -169,7 +181,7 @@ class Document(Base):
 
         Example:
             >>> doc = get(uuid="abc-123")
-            >>> chunks = doc.chunk(strategy="tokens", config={"chunk_size": 500})
+            >>> chunks = doc.chunk(chunk_strategy="tokens", config={"chunk_size": 500})
         """
         try:
             from .embedding import chunk_document
@@ -182,7 +194,7 @@ class Document(Base):
         obj_state = sqlalchemy_inspect(self)
         session = obj_state.session if obj_state.session is not None else None
 
-        return chunk_document(self, strategy=strategy, config=config, session=session)
+        return chunk_document(self, chunk_strategy=chunk_strategy, config=config, session=session)
 
     def get_chunks(self, chunk_strategy: Optional[str] = None):
         """Get all chunks for this document.
@@ -248,7 +260,7 @@ class Document(Base):
 
     def chunk_and_embed(
         self,
-        strategy: Optional[str] = None,
+        chunk_strategy: Optional[str] = None,
         chunk_config: Optional[dict] = None,
         embedding_name: Optional[str] = None,
         provider: Optional[str] = None,
@@ -263,8 +275,9 @@ class Document(Base):
         Uses the object's session if attached, otherwise creates a new session.
 
         Args:
-            strategy: Optional chunking strategy ("tokens" or "slide").
-                     If None, reads from CHUNK_STRATEGY env var, defaults to "tokens".
+            chunk_strategy: Optional chunking strategy ("tokens", "slide", or "summary").
+                           If None, reads from CHUNK_STRATEGY env var, defaults to "tokens".
+                           "summary" creates a single chunk from document.summary field.
             chunk_config: Optional chunking configuration
             embedding_name: Optional short name for the embedding config (e.g., "openai-small")
                            If None, uses provider/model or env vars.
@@ -293,7 +306,7 @@ class Document(Base):
 
         return chunk_and_embed(
             self,
-            strategy=strategy,
+            chunk_strategy=chunk_strategy,
             chunk_config=chunk_config,
             embedding_name=embedding_name,
             provider=provider,
@@ -302,6 +315,104 @@ class Document(Base):
             session=session,
             **kwargs
         )
+
+    def generate_summary(
+        self,
+        include_title: bool = True,
+        include_gist: bool = True,
+        include_summary: bool = True,
+        model: Optional[str] = None,
+    ) -> "Document":
+        """Generate and save AI summary, gist, and/or title for this document.
+
+        Calls the summary generation function and updates the document fields
+        (title_gen, gist, summary) in the database. Also creates a SummaryLog entry.
+        Uses the object's session if attached, otherwise creates a new session.
+
+        Args:
+            include_title: Whether to generate AI title (default: False)
+            include_gist: Whether to generate gist (default: True)
+            include_summary: Whether to generate summary (default: True)
+            model: Optional model name to use (overrides SUMMARY_MODEL env var)
+
+        Returns:
+            Self (Document) for method chaining
+
+        Example:
+            >>> doc = get(uuid="abc-123")
+            >>> doc.generate_summary(include_title=True)
+            >>> print(f"Title: {doc.title_gen}")
+        """
+        import os
+        import socket
+
+        try:
+            from ..summary import summarize
+            from .embedding.core import SummaryLog
+        except ImportError:
+            raise ImportError(
+                "Summary module not available. Install required dependencies."
+            )
+
+        # Get text to summarize
+        if not self.text or not self.text.strip():
+            raise ValueError(f"Document {self.id} has no text content to summarize")
+
+        # Use object's session if attached, otherwise create new session
+        obj_state = sqlalchemy_inspect(self)
+        session = obj_state.session
+        own_session = session is None
+
+        if own_session:
+            from .database import get_db_session
+            session = get_db_session().__enter__()
+
+        try:
+            # Determine the actual model that will be used (same logic as summarize function)
+            # This ensures the log entry uses the same model name that's actually used
+            actual_model = model if model else os.getenv('SUMMARY_MODEL', 'gemini-2.5-flash-lite')
+            
+            # Generate summary/gist/title
+            result = summarize(
+                text=self.text,
+                include_title=include_title,
+                include_gist=include_gist,
+                include_summary=include_summary,
+                model=model,
+            )
+
+            # If not attached to session, merge this document
+            doc = session.merge(self) if own_session else self
+
+            # Update document fields
+            if include_title and "title" in result:
+                doc.title_gen = result["title"]
+            if include_gist and "gist" in result:
+                doc.gist = result["gist"]
+            if include_summary and "summary" in result:
+                doc.summary = result["summary"]
+
+            # Create log entry using the actual model that was used
+            log_entry = SummaryLog(
+                document_id=doc.id,
+                model=actual_model,
+                time_summary=result.get("time_summary", 0.0),
+                hostname=socket.gethostname(),
+                meta={"query": result.get("query", "")},
+            )
+            session.add(log_entry)
+            session.commit()
+
+            # If we created our own session, refresh and expunge to keep object accessible after session closes
+            if own_session:
+                session.refresh(doc)
+                session.expunge(doc)
+
+            return doc
+
+        finally:
+            if own_session:
+                session.__exit__(None, None, None)
 
     @classmethod
     def from_dict(cls, data: dict) -> "Document":
@@ -316,14 +427,16 @@ class Document(Base):
             Document instance (not yet saved to database)
 
         Example:
+            # Title can be provided directly or in meta
             doc = Document.from_dict({
                 "source_id": "mu2e-docdb",
                 "doc_id": "1234-doc1",
                 "uri": "https://example.com/doc",
                 "source_type": "application/pdf",
                 "text": "Document content...",
-                "meta": {"author": "John Doe"},
+                "meta": {"title": "Document Title", "author": "John Doe"},
             })
+            # Title field will be populated from meta["title"]
         """
         if "source_id" not in data:
             raise ValueError("source_id is required")
@@ -338,6 +451,18 @@ class Document(Base):
         if "text" in data and "source_type" not in data:
             data["source_type"] = "text/plain"
 
+        # Extract meta dict (default to empty dict) - make a copy to avoid mutating input
+        meta_raw = data.get("meta", {})
+        if isinstance(meta_raw, dict):
+            meta = dict(meta_raw)  # Make a shallow copy
+        else:
+            meta = {}
+        
+        # Extract title: check data["title"] first, then meta["title"]
+        title = data.get("title")
+        if not title and meta:
+            title = meta.pop("title", None)  # Remove from meta to avoid duplication
+
         # Extract fields, using defaults where appropriate
         return cls(
             id=data.get("id"),  # Allow explicit ID, otherwise will be generated
@@ -348,7 +473,8 @@ class Document(Base):
             doc_type=data.get("doc_type", "text"),
             text=data.get("text"),
             binary=data.get("binary"),
-            meta=data.get("meta", {}),
+            title=title,  # Populate from data["title"] or meta["title"] (removed from meta)
+            meta=meta,
             creating_time=data.get("creating_time"),
             update_time=data.get("update_time"),
             parent_id=data.get("parent_id")

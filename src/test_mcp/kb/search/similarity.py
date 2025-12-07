@@ -176,7 +176,8 @@ def get_similar(
         max_results: Maximum number of unique documents to return
         source_id: Optional filter by source ID
         doc_type: Optional filter by document type
-        chunking_strategy: Optional filter by chunking strategy
+        chunking_strategy: Optional filter by chunking strategy. If document_id is provided
+                          and chunking_strategy is None, defaults to "summary".
         filter: Optional Elasticsearch-style filter query. See :func:`search` for detailed
                 filter documentation and examples.
         session: Optional database session
@@ -233,8 +234,15 @@ def get_similar(
             embedding = _convert_embedding_to_list(result.embedding)
             
         else:  # document_id
-            # Get all chunks for this document
-            chunks = session.query(Chunk).filter(Chunk.document_id == document_id).all()
+            # Default to "summary" chunking strategy when document_id is used and no strategy specified
+            if chunking_strategy is None:
+                chunking_strategy = "summary"
+            
+            # Get chunks for this document, optionally filtered by chunking_strategy
+            chunk_query = session.query(Chunk).filter(Chunk.document_id == document_id)
+            if chunking_strategy:
+                chunk_query = chunk_query.filter(Chunk.chunk_strategy == chunking_strategy)
+            chunks = chunk_query.all()
             
             if not chunks:
                 return _empty_search_result(embedding_name, max_results, search_start)

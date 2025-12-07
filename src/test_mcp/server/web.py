@@ -3,7 +3,7 @@
 import json
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from html import escape as html_escape
 from pathlib import Path
 from starlette.responses import HTMLResponse, RedirectResponse, JSONResponse, Response
@@ -13,6 +13,28 @@ from .web_auth import WebSessionManager
 from . import html_templates
 
 logger = logging.getLogger(__name__)
+
+
+def _to_utc_iso(dt: datetime | None) -> str | None:
+    """Convert datetime to UTC and return ISO format string with 'Z' suffix.
+    
+    Simple approach: ensure datetime is UTC, then return ISO format with 'Z' suffix.
+    JavaScript will parse 'Z' as UTC and convert to local time.
+    """
+    if dt is None:
+        return None
+    
+    # Convert to UTC if needed
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    else:
+        dt = dt.astimezone(timezone.utc)
+    
+    # Get ISO format string - remove microseconds for cleaner format
+    iso_str = dt.strftime('%Y-%m-%dT%H:%M:%S')
+    
+    # Always append 'Z' to indicate UTC
+    return iso_str + 'Z'
 
 
 async def require_auth_html(
@@ -94,13 +116,25 @@ def document_to_dict(doc, include_text: bool = True, include_binary: bool = Fals
         "meta": doc.meta if doc.meta else {},
     }
     
+    # Add title fields
+    if doc.title:
+        result["title"] = doc.title
+    if doc.title_gen:
+        result["title_gen"] = doc.title_gen
+    
+    # Add LLM-generated fields
+    if doc.summary:
+        result["summary"] = doc.summary
+    if doc.gist:
+        result["gist"] = doc.gist
+    
     # Add timestamps
     if doc.insert_time:
-        result["insert_time"] = doc.insert_time.isoformat()
+        result["insert_time"] = _to_utc_iso(doc.insert_time)
     if doc.creating_time:
-        result["creating_time"] = doc.creating_time.isoformat()
+        result["creating_time"] = _to_utc_iso(doc.creating_time)
     if doc.update_time:
-        result["update_time"] = doc.update_time.isoformat()
+        result["update_time"] = _to_utc_iso(doc.update_time)
     
     # Add text content if requested
     if include_text and doc.text:
@@ -120,6 +154,61 @@ def document_to_dict(doc, include_text: bool = True, include_binary: bool = Fals
         result["binary_size"] = len(doc.binary)
     
     return result
+
+
+def _create_expandable_summary(field_id: str, content: str, max_length: int = 200) -> str:
+    """Create an expandable summary field with + / - toggle (metadata-style).
+    
+    Args:
+        field_id: Unique identifier for the field
+        content: Content to display
+        max_length: Maximum length before showing expand/collapse (default: 200)
+    
+    Returns:
+        HTML string with expandable field
+    """
+    if not content:
+        return "N/A"
+    
+    content_escaped = html_escape(content)
+    needs_expansion = len(content) > max_length
+    
+    if not needs_expansion:
+        return content_escaped
+    
+    # Create expandable field (metadata-style)
+    collapsed_style = "white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%;"
+    
+    return f'''
+    <div style="position: relative;">
+        <div id="{field_id}-collapsed" style="display: block;">
+            <div style="{collapsed_style}">{content_escaped}</div>
+            <span onclick="toggleMetaField('{field_id}')" style="position: absolute; top: 8px; right: 8px; cursor: pointer; font-size: 16px; color: #666; user-select: none;">+</span>
+        </div>
+        <div id="{field_id}-expanded" style="display: none;">
+            <div style="white-space: pre-wrap; word-wrap: break-word;">{content_escaped}</div>
+            <span onclick="toggleMetaField('{field_id}')" style="position: absolute; top: 8px; right: 8px; cursor: pointer; font-size: 16px; color: #666; user-select: none;">−</span>
+        </div>
+    </div>
+    '''
+
+
+def _create_gist_field(content: str) -> str:
+    """Create a gist field with enforced line breaks.
+    
+    Args:
+        content: Content to display
+    
+    Returns:
+        HTML string with gist field
+    """
+    if not content:
+        return "N/A"
+    
+    content_escaped = html_escape(content)
+    
+    # Enforce line breaks using pre-wrap
+    return f'<div style="white-space: pre-wrap; word-wrap: break-word;">{content_escaped}</div>'
 
 
 def setup_web_routes(app, oauth_provider, session_manager: WebSessionManager):
@@ -305,10 +394,12 @@ def setup_web_routes(app, oauth_provider, session_manager: WebSessionManager):
                     status_code=404
                 )
 
-            # Build display title: include metadata title if available
+            # Build display title: use title, title_gen, or doc_id
             doc_title_display = doc.doc_id or "N/A"
-            if doc.meta and doc.meta.get("title"):
-                doc_title_display = f"{doc.meta.get('title')} ({doc.doc_id or doc.id})"
+            if doc.title:
+                doc_title_display = f"{doc.title} ({doc.doc_id or doc.id})"
+            elif doc.title_gen:
+                doc_title_display = f"{doc.title_gen} ({doc.doc_id or doc.id})"
             
             # Format URI as link if it exists
             uri_display = "N/A"
@@ -375,33 +466,43 @@ def setup_web_routes(app, oauth_provider, session_manager: WebSessionManager):
                 # Chunking module may not be available, that's okay
 
             # Get available chunking strategies for the re-chunk form
-            rechunk_strategy_options = '<option value="">Default (tokens)</option>'
+            # Build shared chunking strategy options
+            chunk_strategy_options_html = '<option value="">Default (tokens)</option>'
+            chunk_strategy_options_html_for_similar = '<option value="summary" selected>summary</option>'
             try:
                 from ..kb.embedding import get_chunk_strategies
                 all_strategies = get_chunk_strategies()  # Get all strategies, not just for this document
                 for strategy_info in all_strategies:
                     strategy_name = strategy_info.get("strategy", "")
                     if strategy_name:
-                        rechunk_strategy_options += f'<option value="{html_escape(strategy_name)}">{html_escape(strategy_name)}</option>'
+                        chunk_strategy_options_html += f'<option value="{html_escape(strategy_name)}">{html_escape(strategy_name)}</option>'
+                        # For similar documents, include all strategies but default to summary
+                        if strategy_name != "summary":
+                            chunk_strategy_options_html_for_similar += f'<option value="{html_escape(strategy_name)}">{html_escape(strategy_name)}</option>'
             except (ImportError, Exception) as e:
-                logger.debug(f"Could not load chunk strategies for re-chunk form: {e}")
+                logger.debug(f"Could not load chunk strategies: {e}")
                 # Fallback to default options
-                rechunk_strategy_options = '<option value="">Default (tokens)</option>'
-                rechunk_strategy_options += '<option value="tokens">tokens</option>'
-                rechunk_strategy_options += '<option value="slide">slide</option>'
+                chunk_strategy_options_html = '<option value="">Default (tokens)</option><option value="tokens">tokens</option><option value="slide">slide</option>'
+                chunk_strategy_options_html_for_similar = '<option value="summary" selected>summary</option><option value="tokens">tokens</option><option value="slide">slide</option>'
+            
+            # For backward compatibility
+            rechunk_strategy_options = chunk_strategy_options_html
 
             # Format document data with chunk highlighting support
+            # Show summary if available, otherwise show text
             text_content = ""
-            if doc.text:
-                # Wrap text in a div with id for JavaScript to access, with expand/collapse
+            content_to_show = doc.text
+            if content_to_show:
+                # Wrap content in a div with id for JavaScript to access, with expand/collapse
+                content_label = "Text"
                 text_content = f'''
             <div id="document-text-container" style="position: relative;">
-                <div id="text-expanded" style="display: block;">
-                    <pre id="document-text" style="white-space: pre-wrap; max-height: 600px; overflow-y: auto; position: relative; padding: 10px; background: #f9f9f9; border: 1px solid #ddd; border-radius: 4px; font-family: inherit; line-height: 1.6;">{html_escape(doc.text)}</pre>
-                    <span onclick="toggleTextContent()" style="position: absolute; top: 10px; right: 10px; cursor: pointer; font-size: 16px; color: #666; user-select: none; background: white; padding: 2px 6px; border-radius: 3px;">−</span>
+                <div id="text-expanded" style="display: block; position: relative;">
+                    <pre id="document-text" style="white-space: pre-wrap; height: 600px; overflow-y: auto; padding: 10px; background: #f9f9f9; border: 1px solid #ddd; border-radius: 4px; font-family: inherit; line-height: 1.6; margin: 0;">{html_escape(content_to_show)}</pre>
+                    <span onclick="toggleTextContent()" style="position: absolute; top: 15px; right: 15px; cursor: pointer; font-size: 16px; color: #666; user-select: none; background: white; padding: 2px 6px; border-radius: 3px;">−</span>
                 </div>
-                <div id="text-collapsed" style="display: none;">
-                    <div style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding: 10px; background: #f9f9f9; border: 1px solid #ddd; border-radius: 4px; position: relative;">{html_escape(doc.text[:200])}...</div>
+                <div id="text-collapsed" style="display: none; position: relative;">
+                    <div style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding: 10px; background: #f9f9f9; border: 1px solid #ddd; border-radius: 4px;">{html_escape(content_to_show[:200])}...</div>
                     <span onclick="toggleTextContent()" style="position: absolute; top: 10px; right: 10px; cursor: pointer; font-size: 16px; color: #666; user-select: none; background: white; padding: 2px 6px; border-radius: 3px;">+</span>
                 </div>
             </div>
@@ -569,6 +670,63 @@ def setup_web_routes(app, oauth_provider, session_manager: WebSessionManager):
             <button onclick="document.getElementById('user-message').style.display='none'" style="float: right; background: none; border: none; color: #155724; font-size: 20px; cursor: pointer; padding: 0 10px; line-height: 1;">×</button>
         </div>
                 """
+            
+            # Ensure toggle function is available (add if not already in meta_html)
+            toggle_script = '''
+            <script>
+            function toggleMetaField(fieldId) {
+                const collapsed = document.getElementById(fieldId + '-collapsed');
+                const expanded = document.getElementById(fieldId + '-expanded');
+                if (collapsed.style.display === 'none') {
+                    collapsed.style.display = 'block';
+                    expanded.style.display = 'none';
+                } else {
+                    collapsed.style.display = 'none';
+                    expanded.style.display = 'block';
+                }
+            }
+            </script>
+            ''' if 'toggleMetaField' not in meta_html else ''
+            
+            # Build AI-generated content HTML
+            ai_content_html = ""
+            if doc.title_gen or doc.summary or doc.gist:
+                ai_parts = []
+                if doc.title_gen:
+                    ai_parts.append(f'''
+                <div style="margin-bottom: 20px;">
+                    <h3 style="margin: 0 0 8px 0; font-size: 16px; color: #333;">Generated Title</h3>
+                    <div style="white-space: pre-wrap; padding: 15px; background: #f9f9f9; border: 1px solid #ddd; border-radius: 4px; line-height: 1.6;">{html_escape(doc.title_gen)}</div>
+                </div>
+                ''')
+                if doc.gist:
+                    ai_parts.append(f'''
+                <div style="margin-bottom: 20px;">
+                    <h3 style="margin: 0 0 8px 0; font-size: 16px; color: #333;">Gist (Key Concepts)</h3>
+                    <div style="white-space: pre-line; padding: 15px; background: #f9f9f9; border: 1px solid #ddd; border-radius: 4px; line-height: 1.6;">{html_escape(doc.gist)}</div>
+                </div>
+                ''')
+                if doc.summary:
+                    summary_field_id = f"summary-{doc.id}"
+                    ai_parts.append(f'''
+                <div style="margin-bottom: 20px;">
+                    <h3 style="margin: 0 0 8px 0; font-size: 16px; color: #333;">Summary</h3>
+                    <div id="{summary_field_id}-expanded" style="display: block; position: relative;">
+                        <div style="white-space: pre-wrap; padding: 15px; background: #f9f9f9; border: 1px solid #ddd; border-radius: 4px; line-height: 1.6;">{html_escape(doc.summary)}</div>
+                        <span onclick="toggleMetaField('{summary_field_id}')" style="position: absolute; top: 15px; right: 15px; cursor: pointer; font-size: 16px; color: #666; user-select: none; background: white; padding: 2px 6px; border-radius: 3px;">−</span>
+                    </div>
+                    <div id="{summary_field_id}-collapsed" style="display: none; position: relative;">
+                        <div style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; padding: 15px; background: #f9f9f9; border: 1px solid #ddd; border-radius: 4px; line-height: 1.6;">{html_escape(doc.summary)}</div>
+                        <span onclick="toggleMetaField('{summary_field_id}')" style="position: absolute; top: 15px; right: 15px; cursor: pointer; font-size: 16px; color: #666; user-select: none; background: white; padding: 2px 6px; border-radius: 3px;">+</span>
+                    </div>
+                </div>
+                ''')
+                ai_content_html = f'''
+            <div class="card">
+                <h2>Generated Content</h2>
+                {''.join(ai_parts)}
+            </div>
+            '''
 
             content = f"""
             <h1>Document Details</h1>
@@ -581,14 +739,15 @@ def setup_web_routes(app, oauth_provider, session_manager: WebSessionManager):
                 <table>
                     <tr><th>ID</th><td><code>{doc.id}</code></td></tr>
                     <tr><th>Source ID</th><td>{doc.source_id}</td></tr>
-                    <tr><th>Document ID</th><td>{doc_title_display}</td></tr>
+                    <tr><th>Document ID</th><td>{doc.doc_id or "N/A"}</td></tr>
+                    <tr><th>Title</th><td>{doc.title or "N/A"}</td></tr>
                     <tr><th>URI</th><td>{uri_display}</td></tr>
                     <tr><th>Source Type</th><td>{doc.source_type}</td></tr>
                     <tr><th>Document Type</th><td>{doc.doc_type}</td></tr>
                     <tr><th>Parent Document</th><td>{parent_display}</td></tr>
-                    <tr><th>Insert Time</th><td>{doc.insert_time.strftime("%Y-%m-%d %H:%M:%S") if doc.insert_time else "N/A"}</td></tr>
-                    <tr><th>Creating Time</th><td>{doc.creating_time.strftime("%Y-%m-%d %H:%M:%S") if doc.creating_time else "N/A"}</td></tr>
-                    <tr><th>Update Time</th><td>{doc.update_time.strftime("%Y-%m-%d %H:%M:%S") if doc.update_time else "N/A"}</td></tr>
+                    <tr><th>Insert Time</th><td class="utc-timestamp" data-iso="{_to_utc_iso(doc.insert_time) or ''}">{_to_utc_iso(doc.insert_time) or "N/A"}</td></tr>
+                    <tr><th>Creating Time</th><td class="utc-timestamp" data-iso="{_to_utc_iso(doc.creating_time) or ''}">{_to_utc_iso(doc.creating_time) or "N/A"}</td></tr>
+                    <tr><th>Update Time</th><td class="utc-timestamp" data-iso="{_to_utc_iso(doc.update_time) or ''}">{_to_utc_iso(doc.update_time) or "N/A"}</td></tr>
                 </table>
             </div>
 
@@ -600,8 +759,10 @@ def setup_web_routes(app, oauth_provider, session_manager: WebSessionManager):
 
             {meta_html if meta_html else ''}
 
+            {ai_content_html}
+
             <div class="card">
-                <h2>Text Content</h2>
+                <h2>{'Full Text Content' if doc.text and not doc.summary else 'Text Content' if doc.text else 'Content'}</h2>
                 <div style="display: flex; gap: 20px; margin-bottom: 15px;">
                     <div style="flex: 1;">
                         {chunk_strategies_html if chunk_strategies_html else ''}
@@ -612,36 +773,59 @@ def setup_web_routes(app, oauth_provider, session_manager: WebSessionManager):
                         </div>
                     </div>
                 </div>
-                {text_content if text_content else '<div class="info-box">No text content available.</div>'}
+                {text_content if text_content else (f'<div class="info-box">No text content available.{" Summary is shown above." if doc.summary else ""}</div>')}
             </div>
-            
             <div class="card">
-                <h2>Document Actions</h2>
-                <div style="display: flex; gap: 15px; align-items: flex-end; flex-wrap: wrap;">
-                    <form id="rechunk-form" method="POST" action="/web/document/{doc.id}/rechunk-embed" style="display: flex; gap: 10px; align-items: flex-end; flex: 1; min-width: 300px;">
-                        <div style="flex: 1; min-width: 200px;">
-                            <label for="rechunk-strategy" style="display: block; margin-bottom: 5px; font-size: 14px; color: #666;">Chunking Strategy:</label>
-                            <select id="rechunk-strategy" name="strategy" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
-                                {rechunk_strategy_options}
-                            </select>
-                        </div>
-                        <button type="submit" id="rechunk-submit-btn" style="padding: 10px 20px; background-color: #2196F3; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; white-space: nowrap;">Re-chunk and Embed</button>
-                    </form>
-                    <form id="delete-form" method="POST" action="/web/document/{doc.id}/delete" style="display: inline-block;" onsubmit="return confirm('Are you sure you want to delete this document? This will also delete all chunks and embeddings. This action cannot be undone.');">
-                        <button type="submit" id="delete-submit-btn" style="padding: 10px 20px; background-color: #f44336; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; white-space: nowrap;">Delete Document</button>
-                    </form>
-                    <div>
-                        <label for="load-similar-btn" style="display: block; margin-bottom: 5px; font-size: 14px; color: #666;">Find Similar Documents:</label>
-                        <button id="load-similar-btn" style="padding: 10px 20px; background-color: #4CAF50; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; white-space: nowrap; min-width: 180px; text-align: center;">Find Similar Documents</button>
+                <h2>Document Functions</h2>
+                <div style="display: flex; gap: 15px; margin-top: 20px; align-items: flex-start;">
+                    <div class="card" style="flex: 1; min-width: 200px; margin-top: 0;">
+                        <!-- <h2>Generate Summary</h2> -->
+                        <form id="generate-summary-form" method="POST" action="/web/document/{doc.id}/generate-summary">
+                            <button type="submit" id="generate-summary-submit-btn" style="width: 100%; padding: 10px 20px; background-color: #FF9800; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 14px;">Generate Summary</button>
+                        </form>
+                        <div id="generate-summary-status" style="margin-top: 10px;"></div>
                     </div>
-                    <div>
-                        <label for="similar-max-results" style="display: block; margin-bottom: 5px; font-size: 12px; color: #666; font-weight: normal;">Max Results:</label>
-                        <input type="number" id="similar-max-results" value="3" min="1" max="20" style="width: 60px; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                    
+                    <div class="card" style="flex: 1; min-width: 250px; margin-top: 0;">
+                        <!--<h2>Re-chunk and Embed</h2>-->
+                        <form id="rechunk-form" method="POST" action="/web/document/{doc.id}/rechunk-embed">
+                            <button type="submit" id="rechunk-submit-btn" style="width: 100%; padding: 10px 20px; background-color: #2196F3; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; margin-bottom: 15px;">Re-chunk and Embed</button>
+                            <div>
+                                <label for="rechunk-strategy" style="display: block; margin-bottom: 5px; font-size: 14px; color: #666;">Re-chunk Strategy:</label>
+                                <select id="rechunk-strategy" name="strategy" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                                    {rechunk_strategy_options}
+                                </select>
+                            </div>
+                        </form>
+                        <div id="rechunk-status" style="margin-top: 10px;"></div>
+                    </div>
+                    
+                    <div class="card" style="flex: 1; min-width: 300px; margin-top: 0;">
+                        <!--<h2>Find Similar Documents</h2>-->
+                        <button id="load-similar-btn" style="width: 100%; padding: 10px 20px; background-color: #4CAF50; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; margin-bottom: 15px;">Find Similar Documents</button>
+                        <div style="display: flex; gap: 10px; align-items: flex-end;">
+                            <div style="flex: 1;">
+                                <label for="similar-strategy" style="display: block; margin-bottom: 5px; font-size: 14px; color: #666;">Chunk Strategy:</label>
+                                <select id="similar-strategy" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                                    {chunk_strategy_options_html_for_similar}
+                                </select>
+                            </div>
+                            <div style="min-width: 100px;">
+                                <label for="similar-max-results" style="display: block; margin-bottom: 5px; font-size: 14px; color: #666;">Max Results:</label>
+                                <input type="number" id="similar-max-results" value="3" min="1" max="20" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                            </div>
+                        </div>
+                        <div id="similar-content" style="margin-top: 15px; color: #666;"></div>
+                    </div>
+                    
+                    <div class="card" style="flex: 1; min-width: 200px; margin-top: 0;">
+                        <!--<h2>Delete Document</h2>-->
+                        <form id="delete-form" method="POST" action="/web/document/{doc.id}/delete" onsubmit="return confirm('Are you sure you want to delete this document? This will also delete all chunks and embeddings. This action cannot be undone.');">
+                            <button type="submit" id="delete-submit-btn" style="width: 100%; padding: 10px 20px; background-color: #f44336; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 14px;">Delete Document</button>
+                        </form>
+                        <div id="delete-status" style="margin-top: 10px;"></div>
                     </div>
                 </div>
-                <div id="rechunk-status" style="margin-top: 10px;"></div>
-                <div id="delete-status" style="margin-top: 10px;"></div>
-                <div id="similar-content" style="margin-top: 15px; color: #666;"></div>
             </div>
             
             <script>
@@ -686,6 +870,14 @@ def setup_web_routes(app, oauth_provider, session_manager: WebSessionManager):
                         'delete-status',
                         'Deleting document...'
                     );
+                    
+                    // Setup loading indicator for generate summary form
+                    setupFormLoadingIndicator(
+                        'generate-summary-form',
+                        'generate-summary-submit-btn',
+                        'generate-summary-status',
+                        'Generating summary...'
+                    );
                 }}
             }});
             </script>
@@ -700,8 +892,10 @@ def setup_web_routes(app, oauth_provider, session_manager: WebSessionManager):
             async function loadSimilarDocuments() {{
                 const btn = document.getElementById('load-similar-btn');
                 const content = document.getElementById('similar-content');
+                const strategySelect = document.getElementById('similar-strategy');
                 
-                // Disable button and show loading
+                // Show loading state (but don't disable button permanently)
+                const originalText = btn.textContent;
                 btn.disabled = true;
                 btn.textContent = 'Loading...';
                 content.innerHTML = '<p style="color: #666;">Searching for similar documents...</p>';
@@ -709,7 +903,18 @@ def setup_web_routes(app, oauth_provider, session_manager: WebSessionManager):
                 try {{
                     const docId = '{html_escape(doc.id)}';
                     const maxResults = document.getElementById('similar-max-results').value || '3';
-                    const response = await fetch('/api/similar?document_id=' + encodeURIComponent(docId) + '&max_results=' + encodeURIComponent(maxResults));
+                    const chunkingStrategy = strategySelect ? strategySelect.value || 'summary' : 'summary';
+                    
+                    // Build query parameters
+                    const params = new URLSearchParams({{
+                        'document_id': docId,
+                        'max_results': maxResults
+                    }});
+                    if (chunkingStrategy) {{
+                        params.append('chunking_strategy', chunkingStrategy);
+                    }}
+                    
+                    const response = await fetch('/api/similar?' + params.toString());
                     if (!response.ok) {{
                         throw new Error('Failed to load similar documents');
                     }}
@@ -754,18 +959,18 @@ def setup_web_routes(app, oauth_provider, session_manager: WebSessionManager):
                         content.innerHTML = '<p style="color: #666;">No similar documents found.</p>';
                     }}
                     
-                    // Gray out button after loading (keep it visible)
-                    btn.disabled = true;
-                    btn.textContent = 'Find Similar Documents';
-                    btn.style.backgroundColor = '#cccccc';
-                    btn.style.cursor = 'not-allowed';
+                    // Re-enable button (don't grey out - user can change strategy and search again)
+                    btn.disabled = false;
+                    btn.textContent = originalText;
+                    btn.style.backgroundColor = '';
+                    btn.style.cursor = '';
                 }} catch (error) {{
                     console.error('Error loading similar documents:', error);
                     content.innerHTML = '<p style="color: #d32f2f;">Error loading similar documents: ' + error.message + '</p>';
                     btn.disabled = false;
-                    btn.textContent = 'Retry';
-                    btn.style.backgroundColor = '#4CAF50';
-                    btn.style.cursor = 'pointer';
+                    btn.textContent = originalText;
+                    btn.style.backgroundColor = '';
+                    btn.style.cursor = '';
                 }}
             }}
             
@@ -779,6 +984,26 @@ def setup_web_routes(app, oauth_provider, session_manager: WebSessionManager):
             </script>
             
             <script>
+            // Helper function to format UTC timestamp to local time with timezone info
+            function formatLocalTime(utcIsoString) {{
+                if (!utcIsoString) return 'N/A';
+                try {{
+                    const date = new Date(utcIsoString);
+                    // Format: "12/31/2024, 3:45:30 PM PST" (includes timezone)
+                    return date.toLocaleString(undefined, {{
+                        year: 'numeric',
+                        month: '2-digit',
+                        day: '2-digit',
+                        hour: '2-digit',
+                        minute: '2-digit',
+                        second: '2-digit',
+                        timeZoneName: 'short'
+                    }});
+                }} catch (e) {{
+                    return 'N/A';
+                }}
+            }}
+            
             // Load and display document logs
             async function loadDocumentLogs() {{
                 try {{
@@ -795,7 +1020,7 @@ def setup_web_routes(app, oauth_provider, session_manager: WebSessionManager):
                     if (logs.parsing && logs.parsing.length > 0) {{
                         logsHtml += '<h3>Parsing/Extraction Logs</h3><table style="width: 100%; border-collapse: collapse;"><thead><tr><th style="text-align: left; padding: 8px; border-bottom: 2px solid #ddd;">Time</th><th style="text-align: left; padding: 8px; border-bottom: 2px solid #ddd;">Text Extraction</th><th style="text-align: left; padding: 8px; border-bottom: 2px solid #ddd;">Image Description</th><th style="text-align: left; padding: 8px; border-bottom: 2px solid #ddd;">Total</th><th style="text-align: left; padding: 8px; border-bottom: 2px solid #ddd;">Documents</th><th style="text-align: left; padding: 8px; border-bottom: 2px solid #ddd;">Hostname</th></tr></thead><tbody>';
                         for (const log of logs.parsing) {{
-                            const time = log.insertion_time ? new Date(log.insertion_time).toLocaleString() : 'N/A';
+                            const time = formatLocalTime(log.insertion_time);
                             const textTime = log.text_extraction_time_seconds ? log.text_extraction_time_seconds.toFixed(3) + 's' : 'N/A';
                             const imgTime = log.image_description_time_seconds ? log.image_description_time_seconds.toFixed(3) + 's' : 'N/A';
                             const totalTime = log.total_time_seconds ? log.total_time_seconds.toFixed(3) + 's' : 'N/A';
@@ -810,7 +1035,7 @@ def setup_web_routes(app, oauth_provider, session_manager: WebSessionManager):
                     if (logs.chunking && logs.chunking.length > 0) {{
                         logsHtml += '<h3 style="margin-top: 20px;">Chunking/Embedding Logs</h3><table style="width: 100%; border-collapse: collapse;"><thead><tr><th style="text-align: left; padding: 8px; border-bottom: 2px solid #ddd;">Time</th><th style="text-align: left; padding: 8px; border-bottom: 2px solid #ddd;">Chunking</th><th style="text-align: left; padding: 8px; border-bottom: 2px solid #ddd;">Embedding</th><th style="text-align: left; padding: 8px; border-bottom: 2px solid #ddd;">Total</th><th style="text-align: left; padding: 8px; border-bottom: 2px solid #ddd;">Chunks</th><th style="text-align: left; padding: 8px; border-bottom: 2px solid #ddd;">Strategy</th><th style="text-align: left; padding: 8px; border-bottom: 2px solid #ddd;">Hostname</th></tr></thead><tbody>';
                         for (const log of logs.chunking) {{
-                            const time = log.insertion_time ? new Date(log.insertion_time).toLocaleString() : 'N/A';
+                            const time = formatLocalTime(log.insertion_time);
                             const chunkTime = log.chunking_time_seconds ? log.chunking_time_seconds.toFixed(3) + 's' : 'N/A';
                             const embedTime = log.embedding_time_seconds ? log.embedding_time_seconds.toFixed(3) + 's' : 'N/A';
                             const totalTime = log.total_time_seconds ? log.total_time_seconds.toFixed(3) + 's' : 'N/A';
@@ -821,9 +1046,24 @@ def setup_web_routes(app, oauth_provider, session_manager: WebSessionManager):
                         logsHtml += '<p style="color: #666; margin-top: 20px;">No chunking logs found.</p>';
                     }}
                     
+                    // Summary logs
+                    if (logs.summary && logs.summary.length > 0) {{
+                        logsHtml += '<h3 style="margin-top: 20px;">Summary Generation Logs</h3><table style="width: 100%; border-collapse: collapse;"><thead><tr><th style="text-align: left; padding: 8px; border-bottom: 2px solid #ddd;">Time</th><th style="text-align: left; padding: 8px; border-bottom: 2px solid #ddd;">Model</th><th style="text-align: left; padding: 8px; border-bottom: 2px solid #ddd;">Summary Time</th><th style="text-align: left; padding: 8px; border-bottom: 2px solid #ddd;">Hostname</th></tr></thead><tbody>';
+                        for (const log of logs.summary) {{
+                            const time = formatLocalTime(log.insertion_time);
+                            const summaryTime = log.time_summary ? log.time_summary.toFixed(3) + 's' : 'N/A';
+                            logsHtml += `<tr><td style="padding: 8px; border-bottom: 1px solid #eee;">${{time}}</td><td style="padding: 8px; border-bottom: 1px solid #eee;">${{log.model || 'N/A'}}</td><td style="padding: 8px; border-bottom: 1px solid #eee;">${{summaryTime}}</td><td style="padding: 8px; border-bottom: 1px solid #eee;">${{log.hostname || 'N/A'}}</td></tr>`;
+                        }}
+                        logsHtml += '</tbody></table>';
+                    }} else {{
+                        logsHtml += '<p style="color: #666; margin-top: 20px;">No summary generation logs found.</p>';
+                    }}
+                    
                     if (!logs.parsing || logs.parsing.length === 0) {{
                         if (!logs.chunking || logs.chunking.length === 0) {{
-                            logsHtml = '<p style="color: #666;">No logs found for this document.</p>';
+                            if (!logs.summary || logs.summary.length === 0) {{
+                                logsHtml = '<p style="color: #666;">No logs found for this document.</p>';
+                            }}
                         }}
                     }}
                     
@@ -836,17 +1076,35 @@ def setup_web_routes(app, oauth_provider, session_manager: WebSessionManager):
             
             // Load logs when page is ready
             if (document.readyState === 'loading') {{
-                document.addEventListener('DOMContentLoaded', loadDocumentLogs);
+                document.addEventListener('DOMContentLoaded', function() {{
+                    loadDocumentLogs();
+                    // Convert server-rendered UTC timestamps to local time
+                    document.querySelectorAll('.utc-timestamp').forEach(function(element) {{
+                        const isoString = element.getAttribute('data-iso');
+                        if (isoString) {{
+                            element.textContent = formatLocalTime(isoString);
+                        }}
+                    }});
+                }});
             }} else {{
                 loadDocumentLogs();
+                // Convert server-rendered UTC timestamps to local time
+                document.querySelectorAll('.utc-timestamp').forEach(function(element) {{
+                    const isoString = element.getAttribute('data-iso');
+                    if (isoString) {{
+                        element.textContent = formatLocalTime(isoString);
+                    }}
+                }});
             }}
             </script>
             """
 
-            # Build page title with metadata title if available
+            # Build page title: use title, title_gen, or doc_id
             page_title = doc.doc_id or doc.id
-            if doc.meta and doc.meta.get("title"):
-                page_title = f"{doc.meta.get('title')} ({doc.doc_id or doc.id})"
+            if doc.title:
+                page_title = f"{doc.title} ({doc.doc_id or doc.id})"
+            elif doc.title_gen:
+                page_title = f"{doc.title_gen} ({doc.doc_id or doc.id})"
             
             return HTMLResponse(html_templates.base_template(
                 f"Document: {page_title}",
@@ -886,7 +1144,6 @@ def setup_web_routes(app, oauth_provider, session_manager: WebSessionManager):
         
         # Get document from knowledge base
         from ..kb import get
-        from ..kb.embedding import chunk_and_embed
         
         try:
             doc = get(uuid=doc_id)
@@ -915,7 +1172,7 @@ def setup_web_routes(app, oauth_provider, session_manager: WebSessionManager):
             
             # Re-chunk and embed
             try:
-                chunks = chunk_and_embed(doc, strategy=strategy)
+                chunks = doc.chunk_and_embed(chunk_strategy=strategy)
                 chunk_count = len(chunks) if chunks else 0
                 
                 # Redirect back to document page with success message
@@ -1028,6 +1285,101 @@ def setup_web_routes(app, oauth_provider, session_manager: WebSessionManager):
                 
         except Exception as e:
             logger.error(f"Error processing delete request for {doc_id}: {e}", exc_info=True)
+            error_msg = html_escape(str(e))
+            return HTMLResponse(
+                html_templates.base_template(
+                    "Error",
+                    f'<div class="error-box"><h2>Error</h2><p>{error_msg}</p><p><a href="/web">← Back to Document List</a></p></div>',
+                    None,
+                    username
+                ),
+                status_code=500
+            )
+
+    @app.route("/web/document/{doc_id}/generate-summary", methods=["POST"])
+    async def generate_summary_document(request: Request):
+        """Generate summary for a document (POST)."""
+        # Check authentication first
+        session_data, redirect = await require_auth_html(request, session_manager)
+        if redirect:
+            return redirect
+        
+        username = session_data.get("username")
+        doc_id = request.path_params["doc_id"]
+        
+        # Get form data
+        form_data = await request.form()
+        model = form_data.get("model", "").strip() or None
+        
+        # Get document from knowledge base
+        from ..kb import get
+        
+        try:
+            doc = get(uuid=doc_id)
+            if not doc:
+                return HTMLResponse(
+                    html_templates.base_template(
+                        "Document Not Found",
+                        '<div class="error-box"><h2>Document Not Found</h2><p>The requested document could not be found.</p><p><a href="/web">← Back to Document List</a></p></div>',
+                        None,
+                        username
+                    ),
+                    status_code=404
+                )
+            
+            # Check if document has text
+            if not doc.text:
+                return HTMLResponse(
+                    html_templates.base_template(
+                        "Error",
+                        f'<div class="error-box"><h2>Error</h2><p>Document has no text content to summarize.</p><p><a href="/web/document/{doc_id}">← Back to Document</a></p></div>',
+                        None,
+                        username
+                    ),
+                    status_code=400
+                )
+            
+            # Generate summary
+            try:
+                doc.generate_summary(
+                    include_title=True,
+                    include_gist=True,
+                    include_summary=True,
+                    model=model,
+                )
+                
+                # Redirect back to document page with success message
+                from urllib.parse import urlencode
+                success_message = 'Summary generated successfully!'
+                redirect_url = f"/web/document/{doc_id}?{urlencode({'message': success_message})}"
+                return RedirectResponse(url=redirect_url, status_code=303)
+                
+            except ValueError as e:
+                error_msg = html_escape(str(e))
+                return HTMLResponse(
+                    html_templates.base_template(
+                        "Error",
+                        f'<div class="error-box"><h2>Error</h2><p>{error_msg}</p><p><a href="/web/document/{doc_id}">← Back to Document</a></p></div>',
+                        None,
+                        username
+                    ),
+                    status_code=400
+                )
+            except Exception as e:
+                logger.error(f"Error generating summary for document {doc_id}: {e}", exc_info=True)
+                error_msg = html_escape(str(e))
+                return HTMLResponse(
+                    html_templates.base_template(
+                        "Error",
+                        f'<div class="error-box"><h2>Error</h2><p>Failed to generate summary: {error_msg}</p><p><a href="/web/document/{doc_id}">← Back to Document</a></p></div>',
+                        None,
+                        username
+                    ),
+                    status_code=500
+                )
+                
+        except Exception as e:
+            logger.error(f"Error processing summary generation request for {doc_id}: {e}", exc_info=True)
             error_msg = html_escape(str(e))
             return HTMLResponse(
                 html_templates.base_template(

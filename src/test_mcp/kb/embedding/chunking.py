@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 
 def chunk_document(
     document: Document,
-    strategy: Optional[str] = None,
+    chunk_strategy: Optional[str] = None,
     config: Optional[dict] = None,
     session=None,
 ) -> List[Chunk]:
@@ -18,16 +18,20 @@ def chunk_document(
 
     Args:
         document: Document object to chunk (must have text field)
-        strategy: Optional chunking strategy ("tokens" or "slide").
-                 If None, reads from CHUNK_STRATEGY env var, defaults to "tokens".
-        config: Optional chunking configuration (see chunking.chunk() for details)
+        chunk_strategy: Optional chunking strategy ("tokens", "slide", or "summary").
+                       If None, reads from CHUNK_STRATEGY env var, defaults to "tokens".
+                       "summary" creates a single chunk from document.summary field.
+        config: Optional chunking configuration. Supports embedding context flags:
+                - prepend_section_path: If True, prepend section_path before embedding (default: True)
+                - prepend_gist: If True, prepend document gist before embedding (default: True)
+                - Other strategy-specific parameters (see chunking.chunk() for details)
         session: Optional database session. If None, creates a new session.
 
     Returns:
         List of Chunk objects (saved to database)
 
     Raises:
-        ValueError: If document has no text content
+        ValueError: If document has no text content or if strategy="summary" and document has no summary
 
     Example:
         >>> from test_mcp.kb import Document
@@ -56,11 +60,52 @@ def chunk_document(
         raise ValueError("Document must be saved to database first (must have id)")
 
     # Get strategy from env var if not provided
-    if strategy is None:
-        strategy = os.getenv("CHUNK_STRATEGY", "tokens")
+    if chunk_strategy is None:
+        chunk_strategy = os.getenv("CHUNK_STRATEGY", "tokens")
 
-    # Chunk the text
-    chunk_dicts = chunk(document.text, strategy=strategy, config=config)
+    # Extract embedding context flags from config (default to True)
+    if config is None:
+        config = {}
+    prepend_section_path = config.get("prepend_section_path", True)
+    prepend_gist = config.get("prepend_gist", True)
+
+    # Handle "summary" strategy specially - create single chunk from document summary
+    if chunk_strategy == "summary":
+        if not document.summary:
+            raise ValueError("Document must have summary to use 'summary' chunking strategy. Call generate_summary() first.")
+
+        # Calculate token length for the summary
+        from ...chunking import count_tokens
+        summary_tokens = count_tokens(document.summary)
+
+        # Create a single chunk dict with the summary
+        chunk_dicts = [{
+            "text": document.summary,
+            "chunk_index": 0,
+            "char_start_index": None,
+            "char_end_index": None,
+            "token_length": summary_tokens,
+            "chunk_strategy": "summary",
+            "meta": {"source": "document.summary"},
+        }]
+    else:
+        # Regular chunking
+        chunk_dicts = chunk(document.text, strategy=chunk_strategy, config=config)
+
+        # Update chunk_strategy names to include prepending configuration
+        # This ensures different prepending settings create separate strategy records
+        if (not prepend_section_path) or (not prepend_gist):
+            if (not prepend_section_path) and (not prepend_gist):
+                suffix = "_no_context"
+            elif not prepend_section_path:
+                suffix = "_no_section"
+            else:  # not prepend_gist
+                suffix = "_no_gist"
+            print(suffix)
+
+            for chunk_dict in chunk_dicts:
+                chunk_dict["chunk_strategy"] = chunk_dict["chunk_strategy"] + suffix
+
 
     # Determine if we need to create a session
     own_session = session is None
@@ -99,6 +144,10 @@ def chunk_document(
                     (cd["meta"] for cd in chunk_dicts if cd["chunk_strategy"] == strategy_name),
                     {}
                 )
+                # Add embedding context flags to meta
+                chunk_meta["prepend_section_path"] = prepend_section_path
+                chunk_meta["prepend_gist"] = prepend_gist
+
                 new_strategy = ChunkStrategy(
                     strategy=strategy_name,
                     meta=chunk_meta,
@@ -111,36 +160,69 @@ def chunk_document(
         # Create Chunk objects from dictionaries
         chunks = []
         for chunk_dict in chunk_dicts:
+            # Build chunk text with optional context prepending
+            # Skip prepending for summary strategy (it's already a complete summary)
+            text_parts = []
+            context_added = False
+            is_summary = chunk_dict.get("chunk_strategy") == "summary"
+
+            # Prepend section_path if enabled and available (not for summary chunks)
+            if not is_summary and prepend_section_path and chunk_dict.get("section_path"):
+                text_parts.append(f"Section: {chunk_dict['section_path']}")
+                context_added = True
+
+            # Prepend gist if enabled and available (not for summary chunks)
+            if not is_summary and prepend_gist and document.gist:
+                text_parts.append(f"Context: {document.gist}")
+                context_added = True
+
+            # Add the chunk text itself
+            text_parts.append(chunk_dict["text"])
+
+            # Join with double newlines for clear separation
+            final_text = "\n\n".join(text_parts)
+
+            # Only recalculate token length if we added context
+            if context_added:
+                from ...chunking import count_tokens
+                final_token_length = count_tokens(final_text)
+            else:
+                final_token_length = chunk_dict.get("token_length")
+
             # Merge chunk_dict with document_id (exclude meta since it's in ChunkStrategy now)
             chunk_data = {
                 "document_id": document.id,
-                "text": chunk_dict["text"],
+                "text": final_text,
                 "chunk_index": chunk_dict["chunk_index"],
                 "char_start_index": chunk_dict.get("char_start_index"),
                 "char_end_index": chunk_dict.get("char_end_index"),
-                "token_length": chunk_dict.get("token_length"),
+                "token_length": final_token_length,
+                "section_path": chunk_dict.get("section_path"),  # Store original section_path
                 "chunk_strategy": chunk_dict.get("chunk_strategy"),
             }
             chunk_obj = Chunk.from_dict(chunk_data)
             chunks.append(chunk_obj)
 
         # Save chunks to database
-        _save_chunks_to_session(chunks, session, commit=own_session)
+        _save_chunks_to_session(chunks, session, commit=False)
 
-        # If we own the session, convert to dicts and close
+        # Commit if we own the session
         if own_session:
-            result = [chunk.to_dict() for chunk in chunks]
             session.commit()
-            session.close()
-            return [Chunk.from_dict(cd) for cd in result]
-        else:
-            return chunks
+            # Refresh and expunge chunks so they can be used after session closes
+            for chunk in chunks:
+                session.refresh(chunk)
+                session.expunge(chunk)
 
+        return chunks
     except Exception:
         if own_session:
             session.rollback()
-            session.close()
         raise
+    finally:
+        # Close session if we created it
+        if own_session and session:
+            session.close()
 
 
 def _save_chunks_to_session(chunks: List[Chunk], session, commit: bool = False) -> None:

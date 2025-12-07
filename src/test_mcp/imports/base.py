@@ -92,6 +92,7 @@ class Source(ABC):
         max_results: Optional[int] = None,
         output_dir: Optional[Path] = None,
         auto_embed: bool = True,
+        auto_summarize: bool = True,
     ) -> List[Any]:
         """Fetch and process all items from the source.
         
@@ -101,6 +102,8 @@ class Source(ABC):
             output_dir: Directory to save downloaded files (default: data/local/{source_id})
             auto_embed: If True, automatically chunk and embed all documents for this source
                        that don't have chunks yet (default: True)
+            auto_summarize: If True, automatically generate summaries for all documents for this source
+                           that don't have summaries yet (default: True)
             
         Returns:
             List of Document objects added to knowledge base
@@ -164,6 +167,22 @@ class Source(ABC):
                 logger.warning(f"Embedding module not available, skipping auto-embed: {e}")
             except Exception as e:
                 logger.error(f"Error during auto-embed: {e}", exc_info=True)
+        
+        # Optionally generate summaries for all documents for this source
+        if auto_summarize:
+            try:
+                logger.info(f"Starting automatic summarization for source_id: {self.source_id}")
+                from ..kb.tools import summarize_all
+                summarize_result = summarize_all(source_id=self.source_id)
+                logger.info(
+                    f"Summarization complete: {summarize_result['summarized']} summarized, "
+                    f"{summarize_result['chunked']} chunks created, "
+                    f"{summarize_result['errors']} errors"
+                )
+            except ImportError as e:
+                logger.warning(f"Summary module not available, skipping auto-summarize: {e}")
+            except Exception as e:
+                logger.error(f"Error during auto-summarize: {e}", exc_info=True)
         
         return documents
     

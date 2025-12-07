@@ -14,6 +14,26 @@ let currentFilters = {
     date_to: ''
 };
 
+// Helper function to format UTC timestamp (ISO string) to local time with timezone info
+function formatLocalTime(utcIsoString) {
+    if (!utcIsoString) return 'N/A';
+    try {
+        const date = new Date(utcIsoString);
+        // Format: "12/31/2024, 3:45:30 PM PST" (includes timezone)
+        return date.toLocaleString(undefined, {
+            year: 'numeric',
+            month: '2-digit',
+            day: '2-digit',
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit',
+            timeZoneName: 'short'
+        });
+    } catch (e) {
+        return 'N/A';
+    }
+}
+
 // Cache for metadata keys
 let metadataKeysCache = null;
 
@@ -638,8 +658,15 @@ function createDocumentElement(doc, isSearchResult = false, showSimilarity = tru
         }
     });
     
-    const insertTime = doc.insert_time ? new Date(doc.insert_time).toLocaleString() : 'N/A';
-    const textPreview = doc.text_preview ? `<div class="document-preview">${escapeHtml(doc.text_preview)}...</div>` : '';
+    const insertTime = formatLocalTime(doc.insert_time);
+    // Show summary if available, otherwise show text preview
+    let contentPreview = '';
+    if (doc.summary) {
+        const summaryPreview = doc.summary.length > 300 ? doc.summary.substring(0, 300) + '...' : doc.summary;
+        contentPreview = `<div class="document-preview"><strong>Summary:</strong> ${escapeHtml(summaryPreview)}</div>`;
+    } else if (doc.text_preview) {
+        contentPreview = `<div class="document-preview">${escapeHtml(doc.text_preview)}...</div>`;
+    }
     
     // Add search result info if this is from a search AND we should show similarity
     // Only show similarity scores when there's an actual search query, not just metadata filters
@@ -684,10 +711,12 @@ function createDocumentElement(doc, isSearchResult = false, showSimilarity = tru
             return `<a href="${escapeHtml(uriHref)}" target="_blank" rel="noopener noreferrer" class="btn">Open URI</a>`;
         })() : '';
     
-    // Build display title: include metadata title if available
+    // Build display title: use title, title_gen, or doc_id
     let displayTitle = doc.doc_id || doc.id;
-    if (doc.meta && doc.meta.title && doc.meta.title.trim()) {
-        displayTitle = `${doc.meta.title} (${doc.doc_id || doc.id})`;
+    if (doc.title && doc.title.trim()) {
+        displayTitle = `${doc.title} (${doc.doc_id || doc.id})`;
+    } else if (doc.title_gen && doc.title_gen.trim()) {
+        displayTitle = `${doc.title_gen} (${doc.doc_id || doc.id})`;
     }
     
     div.innerHTML = `
@@ -704,10 +733,13 @@ function createDocumentElement(doc, isSearchResult = false, showSimilarity = tru
             </div>
         </div>
         ${searchInfo}
-        ${textPreview}
+        ${contentPreview}
         ${metaInfo}
         <div class="document-actions">
             <a href="/web/document/${doc.id}" class="btn">View Full Document</a>
+            ${!doc.summary ? `<form method="POST" action="/web/document/${doc.id}/generate-summary" style="display: inline-block; margin-left: 10px;">
+                <button type="submit" class="btn" style="background-color: #FF9800; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; font-size: 14px;">Generate Summary</button>
+            </form>` : ''}
             ${uriButton}
         </div>
     `;
@@ -1239,7 +1271,7 @@ async function loadLogs(reset = false) {
 function createLogRow(log) {
     const tr = document.createElement('tr');
     
-    const time = log.created_time ? new Date(log.created_time).toLocaleString() : 'N/A';
+    const time = formatLocalTime(log.created_time);
     const searchTime = log.time_search_total ? `${log.time_search_total.toFixed(3)}s` : 'N/A';
     const embedTime = log.time_embedding ? `${log.time_embedding.toFixed(3)}s` : 'N/A';
     const similarity = log.best_similarity ? `${(log.best_similarity * 100).toFixed(2)}%` : 'N/A';

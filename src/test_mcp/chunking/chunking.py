@@ -48,6 +48,23 @@ def _get_encoding(model: Optional[str] = None):
         return tiktoken.get_encoding("cl100k_base")
 
 
+def count_tokens(text: str, model: Optional[str] = None) -> int:
+    """Count the number of tokens in a text string.
+
+    Args:
+        text: Text to count tokens for
+        model: Optional model name for token counting. If None, uses default encoding.
+
+    Returns:
+        Number of tokens in the text
+
+    Raises:
+        ImportError: If tiktoken is not installed
+    """
+    encoding = _get_encoding(model)
+    return len(encoding.encode(text))
+
+
 def _chunk_by_tokens(
     text: str,
     encoding: Optional[Any] = None,

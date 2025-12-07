@@ -9,18 +9,17 @@ from .embedding.core import Chunk
 
 logger = logging.getLogger(__name__)
 
-# Import embedding functions (may not be available)
+# Check if embedding module is available
 try:
-    from .embedding import chunk_and_embed
+    from .embedding import chunk_and_embed  # noqa: F401
     EMBEDDING_AVAILABLE = True
 except ImportError:
     EMBEDDING_AVAILABLE = False
-    chunk_and_embed = None
 
 
 def chunk_and_embed_all(
     source_id: str,
-    strategy: Optional[str] = None,
+    chunk_strategy: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Chunk and embed all documents for a source_id that don't have chunks yet.
     
@@ -29,7 +28,7 @@ def chunk_and_embed_all(
     
     Args:
         source_id: Source identifier to process documents for
-        strategy: Optional chunking strategy ("tokens" or "slide"). If None, uses default.
+        chunk_strategy: Optional chunking strategy ("tokens" or "slide"). If None, uses default.
     
     Returns:
         Dictionary with:
@@ -80,13 +79,9 @@ def chunk_and_embed_all(
             try:
                 processed += 1
                 
-                # Chunk and embed the document
+                # Chunk and embed the document using the document method
                 logger.info(f"Chunking and embedding document {doc.id} ({doc.doc_id or doc.id})")
-                chunks = chunk_and_embed(
-                    doc,
-                    strategy=strategy,
-                    session=session,
-                )
+                chunks = doc.chunk_and_embed(chunk_strategy=chunk_strategy)
                 
                 if chunks:
                     chunked += 1
@@ -112,5 +107,148 @@ def chunk_and_embed_all(
         f"Processed: {processed}, Chunked: {chunked}, Skipped: {skipped}, Errors: {errors}"
     )
     
+    return result
+
+def summarize_all(
+    source_id: str,
+    model: Optional[str] = None,
+    create_summary_chunk: bool = True,
+    embed_summary_chunk: bool = False,
+    embedding_name: Optional[str] = None,
+    embedding_provider: Optional[str] = None,
+    embedding_model: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Generate summaries for all documents from a source that don't have them yet.
+
+    Finds documents without summaries and generates title, gist, and summary.
+    Optionally creates a summary chunk and embeds it.
+
+    Args:
+        source_id: Source identifier to process documents for
+        model: Optional model name for summary generation (overrides SUMMARY_MODEL env var)
+        create_summary_chunk: Whether to create a chunk with strategy="summary" (default: True)
+        embed_summary_chunk: Whether to embed the summary chunk (requires create_summary_chunk=True, default: False)
+        embedding_name: Optional embedding name for summary chunk (used if embed_summary_chunk=True)
+        embedding_provider: Optional embedding provider (used if embed_summary_chunk=True and embedding_name not provided)
+        embedding_model: Optional embedding model (used if embed_summary_chunk=True and embedding_name not provided)
+
+    Returns:
+        Dictionary with:
+        - processed: Number of documents processed
+        - summarized: Number of documents that got summaries
+        - chunked: Number of summary chunks created (if create_summary_chunk=True)
+        - embedded: Number of summary chunks embedded (if embed_summary_chunk=True)
+        - skipped: Number of documents skipped (no text)
+        - errors: Number of documents that failed
+
+    Example:
+        >>> from test_mcp.kb.tools import summarize_all
+        >>> # Generate summaries and create chunks (but don't embed yet)
+        >>> result = summarize_all("inspire-hep", create_summary_chunk=True)
+        >>> print(f"Summarized {result['summarized']} documents, created {result['chunked']} chunks")
+
+        >>> # Generate summaries and create+embed chunks
+        >>> result = summarize_all("inspire-hep", create_summary_chunk=True, embed_summary_chunk=True)
+    """
+    # Summary module availability is checked by doc.generate_summary()
+
+    if embed_summary_chunk and not EMBEDDING_AVAILABLE:
+        raise ImportError(
+            "Embedding module not available. Install with: pip install -e '.[embedding]'"
+        )
+
+    logger.info(f"Starting summarize_all for source_id: {source_id}")
+
+    with get_db_session() as session:
+        # Find documents without summaries
+        query = session.query(Document).filter(
+            Document.source_id == source_id,
+            Document.text.isnot(None),
+            Document.text != "",
+            Document.summary.is_(None)  # No summary yet
+        )
+
+        documents = query.all()
+
+        if not documents:
+            logger.info(f"No documents found for source_id: {source_id} that need summarization")
+            return {
+                "processed": 0,
+                "summarized": 0,
+                "chunked": 0,
+                "embedded": 0,
+                "skipped": 0,
+                "errors": 0,
+            }
+
+        logger.info(f"Found {len(documents)} document(s) for source_id: {source_id} that need summarization")
+
+        processed = 0
+        summarized = 0
+        chunked = 0
+        embedded = 0
+        skipped = 0
+        errors = 0
+
+        for doc in documents:
+            try:
+                processed += 1
+
+                # Generate summary using the document method
+                logger.info(f"Generating summary for document {doc.id} ({doc.doc_id or doc.id})")
+                doc.generate_summary(
+                    include_title=True,
+                    include_gist=True,
+                    include_summary=True,
+                    model=model,
+                )
+
+                summarized += 1
+                logger.info(f"Successfully generated summary for document {doc.id}")
+
+                # Optionally create summary chunk
+                if create_summary_chunk and doc.summary:
+                    logger.info(f"Creating summary chunk for document {doc.id}")
+
+                    if embed_summary_chunk:
+                        # Create and embed the summary chunk using the document method
+                        chunks = doc.chunk_and_embed(
+                            chunk_strategy="summary",
+                            embedding_name=embedding_name,
+                            provider=embedding_provider,
+                            model=embedding_model,
+                        )
+                        if chunks:
+                            chunked += 1
+                            embedded += 1
+                            logger.info(f"Created and embedded summary chunk for document {doc.id}")
+                    else:
+                        # Just create the chunk without embedding
+                        chunks = doc.chunk(chunk_strategy="summary")
+                        if chunks:
+                            chunked += 1
+                            logger.info(f"Created summary chunk for document {doc.id}")
+
+            except Exception as e:
+                errors += 1
+                logger.error(f"Error processing document {doc.id}: {e}", exc_info=True)
+                session.rollback()
+                continue
+
+    result = {
+        "processed": processed,
+        "summarized": summarized,
+        "chunked": chunked,
+        "embedded": embedded,
+        "skipped": skipped,
+        "errors": errors,
+    }
+
+    logger.info(
+        f"Completed summarize_all for source_id: {source_id}. "
+        f"Processed: {processed}, Summarized: {summarized}, "
+        f"Chunked: {chunked}, Embedded: {embedded}, Errors: {errors}"
+    )
+
     return result
 

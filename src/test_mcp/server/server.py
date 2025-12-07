@@ -136,9 +136,11 @@ def kb_get_document(
                     "doc_type": doc.doc_type,
                     "text": doc.text,
                     "meta": doc.meta,
-                    "insert_time": doc.insert_time.isoformat()
-                    if doc.insert_time
-                    else None,
+                    "insert_time": (
+                        (doc.insert_time.replace(tzinfo=timezone.utc) if doc.insert_time.tzinfo is None else doc.insert_time.astimezone(timezone.utc)).strftime('%Y-%m-%dT%H:%M:%SZ')
+                        if doc.insert_time
+                        else None
+                    ),
                 },
                 indent=2,
             )
@@ -150,7 +152,7 @@ def kb_get_document(
 @mcp.resource("status://live")
 async def server_status() -> str:
     """Get live server status with current timestamp."""
-    from datetime import datetime
+    from datetime import datetime, timezone
     import json
 
     now = datetime.now()

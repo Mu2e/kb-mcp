@@ -195,7 +195,7 @@ def embed_chunks(
 
 def chunk_and_embed(
     document,
-    strategy: Optional[str] = None,
+    chunk_strategy: Optional[str] = None,
     chunk_config: Optional[dict] = None,
     embedding_name: Optional[str] = None,
     provider: Optional[str] = None,
@@ -212,9 +212,13 @@ def chunk_and_embed(
 
     Args:
         document: Document object to chunk and embed (must have text field and be saved to database)
-        strategy: Optional chunking strategy ("tokens" or "slide").
-                 If None, reads from CHUNK_STRATEGY env var, defaults to "tokens".
-        chunk_config: Optional chunking configuration (see chunking.chunk() for details)
+        chunk_strategy: Optional chunking strategy ("tokens", "slide", or "summary").
+                       If None, reads from CHUNK_STRATEGY env var, defaults to "tokens".
+                       "summary" creates a single chunk from document.summary field.
+        chunk_config: Optional chunking configuration. Supports embedding context flags:
+                     - prepend_section_path: Prepend section_path before embedding (default: True)
+                     - prepend_gist: Prepend document gist before embedding (default: True)
+                     - Other strategy-specific parameters (see chunking.chunk() for details)
         embedding_name: Optional short name for the embedding config (e.g., "openai-small")
                        If None, uses provider/model or env vars.
         provider: Optional provider name (used if embedding_name is not provided)
@@ -254,7 +258,7 @@ def chunk_and_embed(
         chunk_start = time.time()
         chunks = chunk_document(
             document,
-            strategy=strategy,
+            chunk_strategy=chunk_strategy,
             config=chunk_config,
             session=session
         )
@@ -275,7 +279,7 @@ def chunk_and_embed(
                 **kwargs
             )
             embed_time = time.time() - embed_start
-            
+
             # Count embeddings created (one per chunk if embedding succeeded)
             # Since embed_chunks succeeded, we assume one embedding per chunk
             # For accuracy, we could query the embedding table, but this is simpler and sufficient
@@ -284,10 +288,13 @@ def chunk_and_embed(
         # Create log entry for this operation
         from .core import ChunkEmbeddingLog
         import socket
-        
+
         total_time = chunk_time + embed_time
         hostname = socket.gethostname()
-        
+
+        # Get actual chunk strategy from first chunk (includes any suffix like _no_context)
+        actual_chunk_strategy = chunks[0].chunk_strategy if chunks else chunk_strategy
+
         log_entry = ChunkEmbeddingLog(
             document_id=document.id,
             chunking_time_seconds=round(chunk_time, 3),
@@ -295,7 +302,7 @@ def chunk_and_embed(
             total_time_seconds=round(total_time, 3),
             num_chunks=len(chunks) if chunks else 0,
             num_embeddings=num_embeddings,
-            chunk_strategy=strategy,
+            chunk_strategy=actual_chunk_strategy,
             embedding_name=embedding_name or (provider and model and f"{provider}/{model}") or None,
             hostname=hostname,
         )
@@ -304,6 +311,10 @@ def chunk_and_embed(
         # Commit if we created the session
         if own_session:
             session.commit()
+            # Refresh and expunge chunks so they can be used after session closes
+            for chunk in chunks:
+                session.refresh(chunk)
+                session.expunge(chunk)
 
         return chunks
     except Exception as e:

@@ -1,7 +1,7 @@
 """Unified logging functions for all operation logs (search, parsing, chunking)."""
 
 from typing import List, Optional, Dict, Any
-from datetime import datetime
+from datetime import datetime, timezone
 from sqlalchemy import desc
 from sqlalchemy.orm import Session
 
@@ -9,13 +9,36 @@ from .database import get_db_session
 from .search.core import SearchLog
 
 
+def _to_utc_iso(dt: Optional[datetime]) -> Optional[str]:
+    """Convert datetime to UTC and return ISO format string with 'Z' suffix.
+    
+    Simple approach: ensure datetime is UTC, then return ISO format with 'Z' suffix.
+    JavaScript will parse 'Z' as UTC and convert to local time.
+    """
+    if dt is None:
+        return None
+    
+    # Convert to UTC if needed
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    else:
+        dt = dt.astimezone(timezone.utc)
+    
+    # Get ISO format string - remove microseconds for cleaner format
+    iso_str = dt.strftime('%Y-%m-%dT%H:%M:%S')
+    
+    # Always append 'Z' to indicate UTC
+    return iso_str + 'Z'
+
+
 try:
-    from .embedding.core import ParsingLog, ChunkEmbeddingLog
+    from .embedding.core import ParsingLog, ChunkEmbeddingLog, SummaryLog
     EMBEDDING_LOGS_AVAILABLE = True
 except ImportError:
     EMBEDDING_LOGS_AVAILABLE = False
     ParsingLog = None
     ChunkEmbeddingLog = None
+    SummaryLog = None
 
 
 def get_search_logs(
@@ -172,7 +195,7 @@ def _get_parsing_logs_impl(
         result.append({
             "id": log.id,
             "document_id": log.document_id,
-            "insertion_time": log.insertion_time.isoformat() if log.insertion_time else None,
+            "insertion_time": _to_utc_iso(log.insertion_time),
             "text_extraction_time_seconds": log.text_extraction_time_seconds,
             "image_description_time_seconds": log.image_description_time_seconds,
             "total_time_seconds": log.total_time_seconds,
@@ -232,7 +255,7 @@ def _get_chunking_logs_impl(
     return [{
         "id": log.id,
         "document_id": log.document_id,
-        "insertion_time": log.insertion_time.isoformat() if log.insertion_time else None,
+        "insertion_time": _to_utc_iso(log.insertion_time),
         "chunking_time_seconds": log.chunking_time_seconds,
         "embedding_time_seconds": log.embedding_time_seconds,
         "total_time_seconds": log.total_time_seconds,
@@ -245,20 +268,73 @@ def _get_chunking_logs_impl(
     } for log in logs]
 
 
+def get_summary_logs(
+    document_id: str,
+    limit: Optional[int] = None,
+    session: Optional[Session] = None,
+) -> List[Dict[str, Any]]:
+    """Get summary generation logs for a document.
+
+    Args:
+        document_id: Document ID to get logs for
+        limit: Optional maximum number of logs to return
+        session: Optional database session. If None, creates a new session.
+
+    Returns:
+        List of summary log dictionaries
+    """
+    if not EMBEDDING_LOGS_AVAILABLE or SummaryLog is None:
+        return []
+
+    own_session = session is None
+    if own_session:
+        with get_db_session() as session:
+            return _get_summary_logs_impl(session, document_id, limit)
+    else:
+        return _get_summary_logs_impl(session, document_id, limit)
+
+
+def _get_summary_logs_impl(
+    session: Session,
+    document_id: str,
+    limit: Optional[int],
+) -> List[Dict[str, Any]]:
+    """Internal implementation of get_summary_logs."""
+    query = session.query(SummaryLog).filter(
+        SummaryLog.document_id == document_id
+    ).order_by(desc(SummaryLog.insertion_time))
+
+    if limit:
+        query = query.limit(limit)
+
+    logs = query.all()
+
+    # Convert to dictionaries
+    return [{
+        "id": log.id,
+        "document_id": log.document_id,
+        "insertion_time": _to_utc_iso(log.insertion_time),
+        "model": log.model,
+        "time_summary": log.time_summary,
+        "hostname": log.hostname,
+        "meta": log.meta if log.meta else {},
+    } for log in logs]
+
+
 def get_all_logs_for_document(
     document_id: str,
     limit: Optional[int] = None,
     session: Optional[Session] = None,
 ) -> Dict[str, List[Dict[str, Any]]]:
-    """Get all logs (parsing, chunking) for a document.
-    
+    """Get all logs (parsing, chunking, summary) for a document.
+
     Args:
         document_id: Document ID to get logs for
         limit: Optional maximum number of logs per type to return
         session: Optional database session. If None, creates a new session.
-    
+
     Returns:
-        Dictionary with keys: "parsing", "chunking", "search"
+        Dictionary with keys: "parsing", "chunking", "summary", "search"
         Each contains a list of log dictionaries
     """
     own_session = session is None
@@ -267,12 +343,14 @@ def get_all_logs_for_document(
             return {
                 "parsing": get_parsing_logs(document_id, limit=limit, session=session),
                 "chunking": get_chunking_logs(document_id, limit=limit, session=session),
+                "summary": get_summary_logs(document_id, limit=limit, session=session),
                 "search": [],  # Search logs are not per-document
             }
     else:
         return {
             "parsing": get_parsing_logs(document_id, limit=limit, session=session),
             "chunking": get_chunking_logs(document_id, limit=limit, session=session),
+            "summary": get_summary_logs(document_id, limit=limit, session=session),
             "search": [],  # Search logs are not per-document
         }
 

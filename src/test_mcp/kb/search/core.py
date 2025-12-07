@@ -17,8 +17,8 @@ from ..core import Base
 
 class SearchLog(Base):
     """Search log for tracking search queries and results."""
-    
-    __tablename__ = "search_logs"
+
+    __tablename__ = "logs_search"
     
     # Primary key - UUID stored as string
     id = Column(

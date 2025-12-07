@@ -48,6 +48,7 @@ def cmd_inspire(args):
             max_results=args.max_results,
             output_dir=args.output_dir,
             auto_embed=not args.no_auto_embed,
+            auto_summarize=args.auto_summarize,
         )
         
         print(f"\n  Successfully processed {len(documents)} document(s)")
@@ -109,6 +110,11 @@ def main():
         "--no-auto-embed",
         action="store_true",
         help="Disable automatic chunking and embedding after processing",
+    )
+    inspire_parser.add_argument(
+        "--auto-summarize",
+        action="store_true",
+        help="Enable automatic summarization after processing",
     )
     inspire_parser.set_defaults(func=cmd_inspire)
     
