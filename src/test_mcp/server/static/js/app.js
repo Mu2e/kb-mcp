@@ -737,8 +737,8 @@ function createDocumentElement(doc, isSearchResult = false, showSimilarity = tru
         ${metaInfo}
         <div class="document-actions">
             <a href="/web/document/${doc.id}" class="btn">View Full Document</a>
-            ${!doc.summary ? `<form method="POST" action="/web/document/${doc.id}/generate-summary" style="display: inline-block; margin-left: 10px;">
-                <button type="submit" class="btn" style="background-color: #FF9800; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; font-size: 14px;">Generate Summary</button>
+            <!--${!doc.summary ? `<form method="POST" action="/web/document/${doc.id}/generate-summary" style="display: inline-block; margin-left: 10px;">
+                <button type="submit" class="btn" style="background-color: #FF9800; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; font-size: 14px;">Generate Summary</button>-->
             </form>` : ''}
             ${uriButton}
         </div>

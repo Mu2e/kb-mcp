@@ -88,6 +88,50 @@ def chunk_document(
             "chunk_strategy": "summary",
             "meta": {"source": "document.summary"},
         }]
+    elif chunk_strategy == "image":
+        # Handle "image" strategy - create single chunk from image description
+        # Optionally prepend parent document's gist for context
+        if document.doc_type != "image":
+            raise ValueError("'image' chunking strategy can only be used with image documents (doc_type='image').")
+
+        if not document.text:
+            raise ValueError("Image document must have text (description) to use 'image' chunking strategy.")
+
+        from ...chunking import count_tokens
+
+        # Build chunk text with optional parent gist prepending
+        text_parts = []
+
+        # Prepend parent's gist if enabled and available
+        if prepend_gist and document.parent_id:
+            from ..database import get_db_session
+            # Use existing session if available, otherwise create temporary one
+            temp_session = session if session else get_db_session().__enter__()
+            try:
+                parent = temp_session.query(Document).filter(Document.id == document.parent_id).first()
+                if parent and parent.gist:
+                    text_parts.append(f"Document context: {parent.gist}")
+            finally:
+                # Only close if we created a temporary session
+                if session is None:
+                    temp_session.close()
+
+        # Add image description
+        text_parts.append(document.text)
+
+        chunk_text = "\n\n".join(text_parts)
+        image_tokens = count_tokens(chunk_text)
+
+        # Create a single chunk dict with the image description
+        chunk_dicts = [{
+            "text": chunk_text,
+            "chunk_index": 0,
+            "char_start_index": None,
+            "char_end_index": None,
+            "token_length": image_tokens,
+            "chunk_strategy": "image",
+            "meta": {"source": "image_description"},
+        }]
     else:
         # Regular chunking
         chunk_dicts = chunk(document.text, strategy=chunk_strategy, config=config)
@@ -161,18 +205,18 @@ def chunk_document(
         chunks = []
         for chunk_dict in chunk_dicts:
             # Build chunk text with optional context prepending
-            # Skip prepending for summary strategy (it's already a complete summary)
+            # Skip prepending for summary and image strategies (they handle their own context)
             text_parts = []
             context_added = False
-            is_summary = chunk_dict.get("chunk_strategy") == "summary"
+            is_special_strategy = chunk_dict.get("chunk_strategy") in ["summary", "image"]
 
-            # Prepend section_path if enabled and available (not for summary chunks)
-            if not is_summary and prepend_section_path and chunk_dict.get("section_path"):
+            # Prepend section_path if enabled and available (not for special strategies)
+            if not is_special_strategy and prepend_section_path and chunk_dict.get("section_path"):
                 text_parts.append(f"Section: {chunk_dict['section_path']}")
                 context_added = True
 
-            # Prepend gist if enabled and available (not for summary chunks)
-            if not is_summary and prepend_gist and document.gist:
+            # Prepend gist if enabled and available (not for special strategies)
+            if not is_special_strategy and prepend_gist and document.gist:
                 text_parts.append(f"Context: {document.gist}")
                 context_added = True
 

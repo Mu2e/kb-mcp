@@ -1031,6 +1031,19 @@ def setup_web_routes(app, oauth_provider, session_manager: WebSessionManager):
                         logsHtml += '<p style="color: #666;">No parsing logs found.</p>';
                     }}
                     
+                    // Summary logs
+                    if (logs.summary && logs.summary.length > 0) {{
+                        logsHtml += '<h3 style="margin-top: 20px;">Summary Generation Logs</h3><table style="width: 100%; border-collapse: collapse;"><thead><tr><th style="text-align: left; padding: 8px; border-bottom: 2px solid #ddd;">Time</th><th style="text-align: left; padding: 8px; border-bottom: 2px solid #ddd;">Model</th><th style="text-align: left; padding: 8px; border-bottom: 2px solid #ddd;">Summary Time</th><th style="text-align: left; padding: 8px; border-bottom: 2px solid #ddd;">Hostname</th></tr></thead><tbody>';
+                        for (const log of logs.summary) {{
+                            const time = formatLocalTime(log.insertion_time);
+                            const summaryTime = log.time_summary ? log.time_summary.toFixed(3) + 's' : 'N/A';
+                            logsHtml += `<tr><td style="padding: 8px; border-bottom: 1px solid #eee;">${{time}}</td><td style="padding: 8px; border-bottom: 1px solid #eee;">${{log.model || 'N/A'}}</td><td style="padding: 8px; border-bottom: 1px solid #eee;">${{summaryTime}}</td><td style="padding: 8px; border-bottom: 1px solid #eee;">${{log.hostname || 'N/A'}}</td></tr>`;
+                        }}
+                        logsHtml += '</tbody></table>';
+                    }} else {{
+                        logsHtml += '<p style="color: #666; margin-top: 20px;">No summary generation logs found.</p>';
+                    }}
+
                     // Chunking logs
                     if (logs.chunking && logs.chunking.length > 0) {{
                         logsHtml += '<h3 style="margin-top: 20px;">Chunking/Embedding Logs</h3><table style="width: 100%; border-collapse: collapse;"><thead><tr><th style="text-align: left; padding: 8px; border-bottom: 2px solid #ddd;">Time</th><th style="text-align: left; padding: 8px; border-bottom: 2px solid #ddd;">Chunking</th><th style="text-align: left; padding: 8px; border-bottom: 2px solid #ddd;">Embedding</th><th style="text-align: left; padding: 8px; border-bottom: 2px solid #ddd;">Total</th><th style="text-align: left; padding: 8px; border-bottom: 2px solid #ddd;">Chunks</th><th style="text-align: left; padding: 8px; border-bottom: 2px solid #ddd;">Strategy</th><th style="text-align: left; padding: 8px; border-bottom: 2px solid #ddd;">Hostname</th></tr></thead><tbody>';
@@ -1044,19 +1057,6 @@ def setup_web_routes(app, oauth_provider, session_manager: WebSessionManager):
                         logsHtml += '</tbody></table>';
                     }} else {{
                         logsHtml += '<p style="color: #666; margin-top: 20px;">No chunking logs found.</p>';
-                    }}
-                    
-                    // Summary logs
-                    if (logs.summary && logs.summary.length > 0) {{
-                        logsHtml += '<h3 style="margin-top: 20px;">Summary Generation Logs</h3><table style="width: 100%; border-collapse: collapse;"><thead><tr><th style="text-align: left; padding: 8px; border-bottom: 2px solid #ddd;">Time</th><th style="text-align: left; padding: 8px; border-bottom: 2px solid #ddd;">Model</th><th style="text-align: left; padding: 8px; border-bottom: 2px solid #ddd;">Summary Time</th><th style="text-align: left; padding: 8px; border-bottom: 2px solid #ddd;">Hostname</th></tr></thead><tbody>';
-                        for (const log of logs.summary) {{
-                            const time = formatLocalTime(log.insertion_time);
-                            const summaryTime = log.time_summary ? log.time_summary.toFixed(3) + 's' : 'N/A';
-                            logsHtml += `<tr><td style="padding: 8px; border-bottom: 1px solid #eee;">${{time}}</td><td style="padding: 8px; border-bottom: 1px solid #eee;">${{log.model || 'N/A'}}</td><td style="padding: 8px; border-bottom: 1px solid #eee;">${{summaryTime}}</td><td style="padding: 8px; border-bottom: 1px solid #eee;">${{log.hostname || 'N/A'}}</td></tr>`;
-                        }}
-                        logsHtml += '</tbody></table>';
-                    }} else {{
-                        logsHtml += '<p style="color: #666; margin-top: 20px;">No summary generation logs found.</p>';
                     }}
                     
                     if (!logs.parsing || logs.parsing.length === 0) {{
@@ -1419,7 +1419,7 @@ def setup_web_routes(app, oauth_provider, session_manager: WebSessionManager):
 
         content = f"""
             <h1>Upload Document</h1>
-            <p>Upload a file to add it to the knowledge base. Images will be extracted and described using AI.</p>
+            <p>Upload a file to add it to the knowledge base with optional image extraction, summary generation, and embedding.</p>
             
             <div class="card">
                 <form id="upload-form" enctype="multipart/form-data" method="POST" action="/web/upload">
@@ -1434,10 +1434,16 @@ def setup_web_routes(app, oauth_provider, session_manager: WebSessionManager):
                         <input type="text" id="doc_id" name="doc_id" placeholder="e.g., doc-123" style="margin-top: 5px; display: block; width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
                         <small style="color: #666;">Optional unique identifier for this document</small>
                     </div>
-                    
+
                     <div style="margin-bottom: 15px;">
-                        <label for="meta"><strong>Metadata (optional):</strong></label>
-                        <textarea id="meta" name="meta" rows="6" placeholder='{{"author": "John Doe", "tags": ["important", "draft"]}}' style="margin-top: 5px; display: block; width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px; font-family: monospace; font-size: 14px;"></textarea>
+                        <label for="title"><strong>Title (optional):</strong></label>
+                        <input type="text" id="title" name="title" placeholder="e.g., Project Proposal 2024" style="margin-top: 5px; display: block; width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                        <small style="color: #666;">Document title (will be stored in metadata)</small>
+                    </div>
+
+                    <div style="margin-bottom: 15px;">
+                        <label for="meta"><strong>Additional Metadata (optional):</strong></label>
+                        <textarea id="meta" name="meta" rows="6" placeholder='{{"author": "John Doe", "tags": ["important", "draft"], "category": "research"}}' style="margin-top: 5px; display: block; width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px; font-family: monospace; font-size: 14px;"></textarea>
                         <small style="color: #666;">JSON object with additional metadata (e.g., author, tags, category)</small>
                     </div>
                     
@@ -1455,14 +1461,28 @@ def setup_web_routes(app, oauth_provider, session_manager: WebSessionManager):
                     
                     <div style="margin-bottom: 15px; padding: 15px; background: #f9f9f9; border: 1px solid #ddd; border-radius: 4px;">
                         <label style="display: flex; align-items: center; cursor: pointer;">
+                            <input type="checkbox" id="parse_images" name="parse_images" checked style="margin-right: 8px; width: auto;">
+                            <strong>Extract images from document</strong>
+                        </label>
+                        <small style="color: #666; display: block; margin-left: 24px; margin-top: 5px;">Extract images as separate documents with LLM-generated descriptions</small>
+                    </div>
+
+                    <div style="margin-bottom: 15px; padding: 15px; background: #f9f9f9; border: 1px solid #ddd; border-radius: 4px;">
+                        <label style="display: flex; align-items: center; cursor: pointer;">
+                            <input type="checkbox" id="generate_summary" name="generate_summary" checked style="margin-right: 8px; width: auto;">
+                            <strong>Generate summary (title, gist, summary)</strong>
+                        </label>
+                        <small style="color: #666; display: block; margin-left: 24px; margin-top: 5px;">Automatically generate title, gist, and summary for text documents</small>
+                    </div>
+
+                    <div style="margin-bottom: 15px; padding: 15px; background: #f9f9f9; border: 1px solid #ddd; border-radius: 4px;">
+                        <label style="display: flex; align-items: center; cursor: pointer;">
                             <input type="checkbox" id="chunk_and_embed" name="chunk_and_embed" checked style="margin-right: 8px; width: auto;">
                             <strong>Chunk and embed document after upload</strong>
                         </label>
-                        <small style="color: #666; display: block; margin-left: 24px; margin-top: 5px;">Automatically chunk the document and generate embeddings</small>
-                    </div>
-                    
-                    <div style="margin-bottom: 15px; margin-left: 24px; padding: 15px; background: #f0f0f0; border: 1px solid #ddd; border-radius: 4px;">
-                        <div style="margin-bottom: 10px;">
+                        <small style="color: #666; display: block; margin-left: 24px; margin-top: 5px;">Automatically chunk the document and generate embeddings. If "Generate summary" is also enabled, summary chunks will be created. If "Extract images" is also enabled, image chunks will be created.</small>
+
+                        <div style="margin-top: 15px; margin-left: 24px; padding: 15px; background: #f0f0f0; border: 1px solid #ddd; border-radius: 4px;">
                             <label for="chunk_strategy"><strong>Chunking Strategy:</strong></label>
                             <select id="chunk_strategy" name="chunk_strategy" style="margin-top: 5px; display: block; width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
                                 {chunk_strategy_options}
@@ -1517,12 +1537,23 @@ def setup_web_routes(app, oauth_provider, session_manager: WebSessionManager):
             file = form.get("file")
             source_id = "upload"
             doc_id = form.get("doc_id")
+            title = form.get("title")
             meta_text = form.get("meta")
             creating_time_str = form.get("creating_time")
             update_time_str = form.get("update_time")
-            chunk_and_embed = form.get("chunk_and_embed") == "on"  # Checkbox returns "on" when checked
+
+            # Parse processing options
+            parse_images = form.get("parse_images") == "on"
+            generate_summary = form.get("generate_summary") == "on"
+            chunk_and_embed = form.get("chunk_and_embed") == "on"
             chunk_strategy = form.get("chunk_strategy")  # Can be None if checkbox unchecked
-            
+
+            # Automatically determine when to create summary and image chunks
+            # Summary chunks: created if both generate_summary AND chunk_and_embed are enabled
+            create_summary_chunks = generate_summary and chunk_and_embed
+            # Image chunks: created if both parse_images AND chunk_and_embed are enabled
+            create_image_chunks = parse_images and chunk_and_embed
+
             # Parse metadata JSON if provided
             meta = None
             if meta_text:
@@ -1681,77 +1712,152 @@ def setup_web_routes(app, oauth_provider, session_manager: WebSessionManager):
                 }
                 if doc_id:
                     data_dict["doc_id"] = doc_id
-                if meta:
+
+                # Add title to metadata if provided
+                if title or meta:
+                    if meta is None:
+                        meta = {}
+                    if title:
+                        meta["title"] = title
                     data_dict["meta"] = meta
+
                 if creating_time:
                     data_dict["creating_time"] = creating_time
                 if update_time:
                     data_dict["update_time"] = update_time
                 
-                docs = add_from_path(
-                    str(file_path),
-                    data=data_dict,
-                    parse_image_additional_doc=True,
-                    parse_image_llm_description=True,
-                )
-                
-                doc_count = len(docs)
-                
-                # Chunk and embed if requested, track chunk counts
-                chunk_counts = {}
-                if chunk_and_embed:
-                    try:
-                        from ..kb.embedding import chunk_and_embed
-                        for doc in docs:
-                            # Chunk and embed all documents (chunk_and_embed will handle documents without text gracefully)
-                            try:
-                                chunks = chunk_and_embed(
-                                    doc,
-                                    strategy=chunk_strategy if chunk_strategy else None
-                                )
-                                chunk_counts[doc.id] = len(chunks) if chunks else 0
-                            except ValueError as e:
-                                # Document might not have text, skip it
-                                logger.debug(f"Skipping chunk_and_embed for document {doc.id}: {e}")
-                                chunk_counts[doc.id] = 0
-                                continue
-                    except Exception as e:
-                        logger.warning(f"Error chunking and embedding documents: {e}", exc_info=True)
-                        # Don't fail the upload if chunking/embedding fails
-                
-                # Build success message with links to documents
-                doc_ids = [doc.id for doc in docs]
-                doc_links = []
-                for doc in docs:
-                    chunk_info = ""
-                    if chunk_and_embed and doc.id in chunk_counts:
-                        chunk_count = chunk_counts[doc.id]
-                        if chunk_count > 0:
-                            chunk_info = f" ({chunk_count} chunk{'s' if chunk_count != 1 else ''})"
-                    doc_links.append(f'<a href="/web/document/{doc.id}">Document {doc.id}</a> ({doc.doc_type}){chunk_info}')
-                
-                # Security: Escape filename in success message to prevent XSS
-                safe_filename = html_escape(filename)
-                chunk_status = " and chunked/embedded" if chunk_and_embed else ""
-                if doc_count == 1:
-                    doc = docs[0]
-                    chunk_info = ""
-                    if chunk_and_embed and doc.id in chunk_counts:
-                        chunk_count = chunk_counts[doc.id]
-                        if chunk_count > 0:
-                            chunk_info = f" ({chunk_count} chunk{'s' if chunk_count != 1 else ''})"
-                    success_message = f'Upload successful! File "{safe_filename}" added as <a href="/web/document/{doc.id}">Document {doc.id}</a> ({doc.doc_type}){chunk_info}{chunk_status}.'
-                else:
-                    doc_list = ", ".join(doc_links)
-                    success_message = f'Upload successful! File "{safe_filename}" created {doc_count} documents: {doc_list}{chunk_status}.'
-                
-                # Redirect to knowledge base explorer with success message and filter to upload source
-                from urllib.parse import urlencode
-                redirect_params = {
-                    "source_id": source_id,
-                    "message": success_message,
-                    "uploaded_docs": ",".join(doc_ids)
-                }
+                # Determine if we should parse images with LLM descriptions
+                # If parse_images is enabled, also enable LLM descriptions by default
+                parse_image_llm_description = parse_images
+
+                # Use a session to ensure parsing log is created and all operations happen in same transaction
+                from ..kb import get_db_session
+                with get_db_session() as session:
+                    docs = add_from_path(
+                        str(file_path),
+                        data=data_dict,
+                        parse_image_additional_doc=parse_images,
+                        parse_image_llm_description=parse_image_llm_description,
+                        session=session,
+                    )
+                    # Don't commit yet - we have more operations to do in this session
+
+                    doc_count = len(docs)
+
+                    # Separate text and image documents
+                    text_documents = [doc for doc in docs if doc.doc_type != "image"]
+                    image_documents = [doc for doc in docs if doc.doc_type == "image"]
+
+                    # Step 1: Generate summaries for text documents (if requested)
+                    if generate_summary and text_documents:
+                        try:
+                            for doc in text_documents:
+                                try:
+                                    doc.generate_summary(
+                                        include_title=True,
+                                        include_gist=True,
+                                        include_summary=True,
+                                    )
+                                    logger.info(f"Generated summary for document {doc.id}")
+                                except Exception as e:
+                                    logger.warning(f"Could not generate summary for document {doc.id}: {e}")
+                        except Exception as e:
+                            logger.warning(f"Error generating summaries: {e}", exc_info=True)
+
+                    # Step 2: Chunk and embed if requested, track chunk counts
+                    chunk_counts = {}
+                    if chunk_and_embed:
+                        try:
+                            from ..kb.embedding import chunk_and_embed as chunk_and_embed_func
+
+                            # Process text documents with regular strategy
+                            if text_documents:
+                                for doc in text_documents:
+                                    try:
+                                        # Chunk with default strategy
+                                        chunks = chunk_and_embed_func(
+                                            doc,
+                                            chunk_strategy=chunk_strategy if chunk_strategy else None,
+                                            session=session,
+                                        )
+                                        chunk_counts[doc.id] = len(chunks) if chunks else 0
+
+                                        # Also create summary chunks if requested and summary exists
+                                        if create_summary_chunks and doc.summary:
+                                            try:
+                                                summary_chunks = chunk_and_embed_func(
+                                                    doc,
+                                                    chunk_strategy="summary",
+                                                    session=session,
+                                                )
+                                                # Add summary chunk count to total
+                                                if summary_chunks:
+                                                    chunk_counts[doc.id] = chunk_counts.get(doc.id, 0) + len(summary_chunks)
+                                            except Exception as e:
+                                                logger.warning(f"Could not create summary chunks for document {doc.id}: {e}")
+
+                                    except ValueError as e:
+                                        # Document might not have text, skip it
+                                        logger.debug(f"Skipping chunk_and_embed for document {doc.id}: {e}")
+                                        chunk_counts[doc.id] = 0
+                                    except Exception as e:
+                                        logger.warning(f"Error chunking document {doc.id}: {e}")
+                                        chunk_counts[doc.id] = 0
+
+                            # Process image documents with image strategy
+                            if image_documents and create_image_chunks:
+                                for doc in image_documents:
+                                    try:
+                                        chunks = chunk_and_embed_func(
+                                            doc,
+                                            chunk_strategy="image",
+                                            session=session,
+                                        )
+                                        chunk_counts[doc.id] = len(chunks) if chunks else 0
+                                    except Exception as e:
+                                        logger.warning(f"Could not create image chunks for document {doc.id}: {e}")
+                                        chunk_counts[doc.id] = 0
+
+                        except Exception as e:
+                            logger.warning(f"Error chunking and embedding documents: {e}", exc_info=True)
+                            # Don't fail the upload if chunking/embedding fails
+
+                    # Build success message with links to documents (while still in session)
+                    doc_ids = [doc.id for doc in docs]
+                    doc_links = []
+                    for doc in docs:
+                        chunk_info = ""
+                        if chunk_and_embed and doc.id in chunk_counts:
+                            chunk_count = chunk_counts[doc.id]
+                            if chunk_count > 0:
+                                chunk_info = f" ({chunk_count} chunk{'s' if chunk_count != 1 else ''})"
+                        doc_links.append(f'<a href="/web/document/{doc.id}">Document {doc.id}</a> ({doc.doc_type}){chunk_info}')
+
+                    # Security: Escape filename in success message to prevent XSS
+                    safe_filename = html_escape(filename)
+                    chunk_status = " and chunked/embedded" if chunk_and_embed else ""
+                    if doc_count == 1:
+                        doc = docs[0]
+                        chunk_info = ""
+                        if chunk_and_embed and doc.id in chunk_counts:
+                            chunk_count = chunk_counts[doc.id]
+                            if chunk_count > 0:
+                                chunk_info = f" ({chunk_count} chunk{'s' if chunk_count != 1 else ''})"
+                        success_message = f'Upload successful! File "{safe_filename}" added as <a href="/web/document/{doc.id}">Document {doc.id}</a> ({doc.doc_type}){chunk_info}{chunk_status}.'
+                    else:
+                        doc_list = ", ".join(doc_links)
+                        success_message = f'Upload successful! File "{safe_filename}" created {doc_count} documents: {doc_list}{chunk_status}.'
+
+                    # Redirect to knowledge base explorer with success message and filter to upload source
+                    from urllib.parse import urlencode
+                    redirect_params = {
+                        "source_id": source_id,
+                        "message": success_message,
+                        "uploaded_docs": ",".join(doc_ids)
+                    }
+
+                    # Commit all changes to database
+                    session.commit()
                 redirect_url = f"/web?{urlencode(redirect_params)}"
                 
                 return RedirectResponse(url=redirect_url, status_code=303)

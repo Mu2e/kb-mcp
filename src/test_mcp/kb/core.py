@@ -354,6 +354,12 @@ class Document(Base):
                 "Summary module not available. Install required dependencies."
             )
 
+        # Skip summary generation for image documents
+        # Image documents already have descriptions in their text field
+        if self.doc_type == "image":
+            logger.info(f"Skipping summary generation for image document {self.id}")
+            return self
+
         # Get text to summarize
         if not self.text or not self.text.strip():
             raise ValueError(f"Document {self.id} has no text content to summarize")

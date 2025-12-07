@@ -246,18 +246,34 @@ def cmd_add(args):
             print("  Proceeding with default deduplication level")
 
     print(f"Processing file: {file_path}")
-    
+
+    # Determine image LLM description setting
+    # If --parse-images is set, enable LLM descriptions by default unless --no-parse-images-llm is set
+    parse_image_llm_description = args.parse_images and not args.no_parse_images_llm
+
     # Add document using add_from_path
+    # Use a session to ensure parsing log is created in the same transaction
     try:
-        documents = add_from_path(
-            file_path,
-            data=data,
-            parse_image_additional_doc=args.parse_images,
-            parse_image_llm_description=args.parse_images_llm,
-            dedup_level=dedup_level,
-        )
-        
-        print(f"✓ Added {len(documents)} document(s):")
+        with get_db_session() as session:
+            documents = add_from_path(
+                file_path,
+                data=data,
+                parse_image_additional_doc=args.parse_images,
+                parse_image_llm_description=parse_image_llm_description,
+                dedup_level=dedup_level,
+                session=session,
+            )
+            session.commit()
+
+            # Refresh all documents to ensure attributes are loaded before session closes
+            for doc in documents:
+                session.refresh(doc)
+
+            # Expunge documents so they can be used after session closes
+            for doc in documents:
+                session.expunge(doc)
+
+        print(f"  Added {len(documents)} document(s):")
         for doc in documents:
             print(f"  • {doc.id}")
             print(f"    Source: {doc.source_id}")
@@ -268,32 +284,96 @@ def cmd_add(args):
             if doc.text:
                 print(f"    Text length: {len(doc.text)} characters")
         
-        # Automatically chunk and embed if not suppressed
-        if args.no_embed:
-            print("\n(Skipping chunking and embedding)")
-        elif not EMBEDDING_AVAILABLE:
-            print("\n(Skipping chunking and embedding - embedding module not available)")
+        # Full processing workflow (generate summary → chunk and embed)
+        if args.no_embed and args.no_summary:
+            print("\n(Skipping summary generation and chunking/embedding)")
         else:
             try:
-                from .embedding import chunk_and_embed
-                
-                for doc in documents:
-                    print(f"\nChunking and embedding document {doc.id}...")
-                    chunks = chunk_and_embed(
-                        doc,
-                        strategy=args.strategy,
-                        chunk_config={
-                            "chunk_size": args.chunk_size,
-                            "chunk_overlap": args.chunk_overlap,
-                        } if args.chunk_size or args.chunk_overlap else None,
-                        embedding_name=args.embedding_name,
-                        provider=args.provider,
-                        model=args.model,
-                        batch_size=args.batch_size,
-                    )
-                    print(f"  ✓ Chunked and embedded {len(chunks)} chunk(s)")
+                # Step 1: Generate summaries for text documents (not images)
+                text_documents = [doc for doc in documents if doc.doc_type != "image"]
+                image_documents = [doc for doc in documents if doc.doc_type == "image"]
+
+                if not args.no_summary and text_documents:
+                    print("\n=== Generating Summaries ===")
+                    for doc in text_documents:
+                        try:
+                            print(f"Generating summary for document {doc.id}...")
+                            doc.generate_summary(
+                                include_title=True,
+                                include_gist=True,
+                                include_summary=True,
+                            )
+                            print(f"    Generated summary")
+                            if doc.title_gen:
+                                print(f"    Title: {doc.title_gen[:80]}...")
+                            if doc.gist:
+                                print(f"    Gist: {doc.gist[:100]}...")
+                        except Exception as e:
+                            print(f"  Warning: Could not generate summary: {e}")
+
+                # Step 2: Chunk and embed documents
+                if args.no_embed:
+                    print("\n(Skipping chunking and embedding)")
+                elif not EMBEDDING_AVAILABLE:
+                    print("\n(Skipping chunking and embedding - embedding module not available)")
+                else:
+                    from .embedding import chunk_and_embed
+
+                    # Process text documents with regular strategy
+                    if text_documents:
+                        print("\n=== Chunking and Embedding Text Documents ===")
+                        for doc in text_documents:
+                            try:
+                                print(f"Chunking and embedding document {doc.id} (default strategy)...")
+                                chunks = chunk_and_embed(
+                                    doc,
+                                    chunk_strategy=args.strategy,
+                                    chunk_config={
+                                        "chunk_size": args.chunk_size,
+                                        "chunk_overlap": args.chunk_overlap,
+                                    } if args.chunk_size or args.chunk_overlap else None,
+                                    embedding_name=args.embedding_name,
+                                    provider=args.provider,
+                                    model=args.model,
+                                    batch_size=args.batch_size,
+                                )
+                                print(f"    Chunked and embedded {len(chunks)} chunk(s)")
+
+                                # Also create summary chunks if summary was generated
+                                if not args.no_summary and doc.summary and not args.no_summary_chunks:
+                                    print(f"Creating summary chunk for document {doc.id}...")
+                                    summary_chunks = chunk_and_embed(
+                                        doc,
+                                        chunk_strategy="summary",
+                                        embedding_name=args.embedding_name,
+                                        provider=args.provider,
+                                        model=args.model,
+                                        batch_size=args.batch_size,
+                                    )
+                                    print(f"    Created and embedded summary chunk")
+                            except Exception as e:
+                                print(f"  Warning: Could not chunk and embed document: {e}")
+
+                    # Process image documents with image strategy
+                    if image_documents and not args.no_image_chunks:
+                        print("\n=== Chunking and Embedding Image Documents ===")
+                        for doc in image_documents:
+                            try:
+                                print(f"Chunking and embedding image document {doc.id}...")
+                                chunks = chunk_and_embed(
+                                    doc,
+                                    chunk_strategy="image",
+                                    embedding_name=args.embedding_name,
+                                    provider=args.provider,
+                                    model=args.model,
+                                    batch_size=args.batch_size,
+                                )
+                                print(f"    Chunked and embedded image (1 chunk)")
+                            except Exception as e:
+                                print(f"  Warning: Could not chunk and embed image: {e}")
+
             except Exception as e:
-                print(f"Warning: Could not chunk and embed documents: {e}")
+                print(f"Warning: Error during processing: {e}")
                 import traceback
                 traceback.print_exc()
     except Exception as e:
@@ -393,7 +473,7 @@ def cmd_deduplicate(args):
     duplicates = find_all_duplicates()
     
     if not duplicates:
-        print("✓ No duplicates found.")
+        print(" No duplicates found.")
         return
     
     print(f"\nFound {len(duplicates)} duplicate group(s):")
@@ -457,7 +537,7 @@ def cmd_deduplicate(args):
     
     result = deduplicate()
 
-    print(f"✓ Deduplication complete:")
+    print(f" Deduplication complete:")
     print(f"  Deleted: {result['deleted']} duplicate document(s)")
 
 
@@ -664,7 +744,7 @@ def cmd_drop_table(args):
             session.execute(text(drop_sql))
             session.commit()
             
-            print(f"✓ Dropped table '{table_name}'")
+            print(f" Dropped table '{table_name}'")
     except Exception as e:
         print(f"Error dropping table: {e}")
         sys.exit(1)
@@ -690,7 +770,7 @@ def cmd_chunks_drop(args):
     )
 
     strategy_msg = f" with strategy '{args.strategy}'" if args.strategy else ""
-    print(f"✓ Deleted {count} chunk(s){strategy_msg}")
+    print(f" Deleted {count} chunk(s){strategy_msg}")
 
 
 def cmd_chunks_chunk(args):
@@ -721,7 +801,7 @@ def cmd_chunks_chunk(args):
 
     try:
         chunks = chunk_document(doc, strategy=args.strategy, config=config if config else None)
-        print(f"✓ Created {len(chunks)} chunk(s)")
+        print(f" Created {len(chunks)} chunk(s)")
 
         if not args.quiet:
             for i, chunk in enumerate(chunks[:5]):  # Show first 5 chunks
@@ -822,7 +902,7 @@ def cmd_drop(args):
 
         result = delete_document(args.document_id)
         
-        print(f"✓ Deleted document {args.document_id}")
+        print(f" Deleted document {args.document_id}")
         if result.get("chunk_count", 0) > 0:
             print(f"  (Also deleted {result['chunk_count']} chunk(s) and their embeddings)")
     except ValueError as e:
@@ -1223,12 +1303,12 @@ def main():
     add_parser.add_argument(
         "--parse-images",
         action="store_true",
-        help="Extract images as separate documents"
+        help="Extract images as separate documents (implies --parse-images-llm unless --no-parse-images-llm is set)"
     )
     add_parser.add_argument(
-        "--parse-images-llm",
+        "--no-parse-images-llm",
         action="store_true",
-        help="Generate LLM descriptions for images (requires OPENAI_API_KEY)"
+        help="Don't generate LLM descriptions for images (only applies if --parse-images is set)"
     )
     add_parser.add_argument(
         "--copy",
@@ -1236,13 +1316,28 @@ def main():
         help="Copy file to DATA_DIR/local and set URI to local://local/FILENAME"
     )
     add_parser.add_argument(
+        "--no-summary",
+        action="store_true",
+        help="Skip automatic summary generation (title, gist, summary)"
+    )
+    add_parser.add_argument(
         "--no-embed",
         action="store_true",
         help="Skip automatic chunking and embedding after adding document"
     )
     add_parser.add_argument(
+        "--no-summary-chunks",
+        action="store_true",
+        help="Skip creating summary chunks (only applies if summary is generated)"
+    )
+    add_parser.add_argument(
+        "--no-image-chunks",
+        action="store_true",
+        help="Skip creating image chunks for image documents"
+    )
+    add_parser.add_argument(
         "--strategy",
-        help="Chunking strategy (default: from CHUNK_STRATEGY env var or 'tokens')"
+        help="Chunking strategy for text documents (default: from CHUNK_STRATEGY env var or 'tokens')"
     )
     add_parser.add_argument(
         "--chunk-size",
@@ -1560,7 +1655,7 @@ def main():
                     description=args.description,
                     base_uri=args.base_uri,
                 )
-                print(f"✓ Added/updated source: {source.id}")
+                print(f" Added/updated source: {source.id}")
                 if source.name:
                     print(f"  Name: {source.name}")
             except Exception as e:

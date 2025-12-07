@@ -173,10 +173,15 @@ class Source(ABC):
             try:
                 logger.info(f"Starting automatic summarization for source_id: {self.source_id}")
                 from ..kb.tools import summarize_all
-                summarize_result = summarize_all(source_id=self.source_id)
+                summarize_result = summarize_all(
+                    source_id=self.source_id,
+                    create_summary_chunk=True,
+                    embed_summary_chunk=True,  # Also embed summary chunks
+                )
                 logger.info(
                     f"Summarization complete: {summarize_result['summarized']} summarized, "
                     f"{summarize_result['chunked']} chunks created, "
+                    f"{summarize_result['embedded']} chunks embedded, "
                     f"{summarize_result['errors']} errors"
                 )
             except ImportError as e:
