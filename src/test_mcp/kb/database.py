@@ -26,6 +26,20 @@ except ImportError:
     # Search module may not be available if dependencies aren't installed
     pass
 
+# Import eval models to ensure they're registered with Base.metadata
+try:
+    from .eval.core import (  # noqa: F401
+        EvalGeneration,
+        EvalDataset,
+        EvalAudit,
+        EvalRun,
+        EvalResult,
+        EvalRetrievedDocument,
+    )
+except ImportError:
+    # Eval module may not be available
+    pass
+
 logger = logging.getLogger(__name__)
 
 
@@ -142,13 +156,28 @@ def init_db(create_tables: bool = True) -> None:
     Args:
         create_tables: If True, create all tables. If False, only verify connection.
     """
+    # Ensure eval models are imported before creating tables
+    # This ensures they're registered with Base.metadata
+    try:
+        from .eval.core import (  # noqa: F401
+            EvalGeneration,
+            EvalDataset,
+            EvalAudit,
+            EvalRun,
+            EvalResult,
+            EvalRetrievedDocument,
+        )
+    except ImportError:
+        # Eval module may not be available
+        pass
+    
     engine = get_engine()
     database_url = get_database_url()
 
     logger.info(f"Initializing database: {database_url.split('@')[-1] if '@' in database_url else database_url}")
 
     if create_tables:
-        # Create all tables (including SearchLog from search module)
+        # Create all tables (including SearchLog from search module and eval models)
         Base.metadata.create_all(bind=engine)
         logger.info("Database tables created/verified")
 

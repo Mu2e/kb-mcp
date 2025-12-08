@@ -221,6 +221,10 @@ def setup_web_routes(app, oauth_provider, session_manager: WebSessionManager):
     
     # Import statistics route
     from . import web_statistics
+    
+    # Import and setup eval routes
+    from . import web_eval
+    web_eval.setup_eval_routes(app, session_manager)
 
     @app.route("/web")
     async def web_page(request: Request):
@@ -728,6 +732,128 @@ def setup_web_routes(app, oauth_provider, session_manager: WebSessionManager):
             </div>
             '''
 
+            # Get eval-related information (before building content string)
+            eval_results_html = ""
+            eval_questions_html = ""
+            try:
+                from ..kb.eval.core import EvalRetrievedDocument, EvalDataset, EvalResult
+                from ..kb.database import get_db_session
+                from sqlalchemy.orm import joinedload
+                
+                with get_db_session() as session:
+                    # Get EvalRetrievedDocument records where this document was retrieved
+                    retrieved_docs = session.query(EvalRetrievedDocument).options(
+                        joinedload(EvalRetrievedDocument.result).joinedload(EvalResult.run),
+                        joinedload(EvalRetrievedDocument.result).joinedload(EvalResult.question)
+                    ).filter(EvalRetrievedDocument.document_id == doc.id).order_by(EvalRetrievedDocument.created_time.desc()).all()
+                    
+                    if retrieved_docs:
+                        retrieved_docs_list = ""
+                        for retrieved_doc in retrieved_docs:
+                            result = retrieved_doc.result
+                            if result:
+                                # Get run name
+                                run_name = ""
+                                if result.run:
+                                    run_name = result.run.name or f"Run {result.run.id[:8]}"
+                                else:
+                                    run_name = f"Run {result.run_id[:8]}"
+                                
+                                # Get question preview
+                                question_preview = ""
+                                if result.question:
+                                    question_preview = result.question.question[:80] + "..." if len(result.question.question) > 80 else result.question.question
+                                else:
+                                    question_preview = f"Question {result.question_id[:8]}"
+                                
+                                similarity_display = f"{retrieved_doc.similarity:.3f}" if retrieved_doc.similarity is not None else "—"
+                                
+                                retrieved_docs_list += f"""
+                        <tr style="border-bottom: 1px solid #eee;" onmouseover="this.style.backgroundColor='#f8f9fa'" onmouseout="this.style.backgroundColor='transparent'">
+                            <td style="padding: 12px 10px;">{retrieved_doc.rank}</td>
+                            <td style="padding: 12px 10px;">
+                                <a href="/web/eval/result/{result.id}" style="text-decoration: none; color: #2196F3;">{html_escape(run_name)}</a>
+                            </td>
+                            <td style="padding: 12px 10px;">
+                                <a href="/web/eval/question/{result.question_id}" style="text-decoration: none; color: #2196F3;">{html_escape(question_preview)}</a>
+                            </td>
+                            <td style="padding: 12px 10px; color: #666;">{similarity_display}</td>
+                            <td style="padding: 12px 10px;">
+                                <a href="/web/eval/result/{result.id}" style="text-decoration: none; color: #2196F3; font-weight: 500;">View</a>
+                            </td>
+                        </tr>
+                        """
+                        
+                        eval_results_html = f"""
+            <div class="card" style="margin-top: 20px;">
+                <h2>Evaluation Results ({len(retrieved_docs)})</h2>
+                <p style="color: #666; font-size: 14px; margin-bottom: 10px;">This document was retrieved in the following evaluation results:</p>
+                <table style="width: 100%; border-collapse: collapse; margin-top: 10px;">
+                    <thead>
+                        <tr style="background-color: #f5f5f5; border-bottom: 2px solid #ddd;">
+                            <th style="text-align: left; padding: 10px; font-weight: 600;">Rank</th>
+                            <th style="text-align: left; padding: 10px; font-weight: 600;">Run</th>
+                            <th style="text-align: left; padding: 10px; font-weight: 600;">Question</th>
+                            <th style="text-align: left; padding: 10px; font-weight: 600;">Similarity</th>
+                            <th style="text-align: left; padding: 10px; font-weight: 600;">View</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {retrieved_docs_list}
+                    </tbody>
+                </table>
+            </div>
+            """
+                    
+                    # Get EvalDataset questions where this document is the source
+                    questions = session.query(EvalDataset).options(
+                        joinedload(EvalDataset.generation)
+                    ).filter(EvalDataset.source_document_id == doc.id).order_by(EvalDataset.created_time.desc()).all()
+                    
+                    if questions:
+                        questions_list = ""
+                        for question in questions:
+                            question_preview = question.question[:100] + "..." if len(question.question) > 100 else question.question
+                            generation_link = ""
+                            if question.generation_id:
+                                if question.generation:
+                                    gen_name = question.generation.name or f"{question.generation.generation_type} Generation"
+                                    generation_link = f'<a href="/web/eval/generation/{question.generation_id}" style="text-decoration: none; color: #2196F3;">{html_escape(gen_name)}</a>'
+                                else:
+                                    generation_link = f'<a href="/web/eval/generation/{question.generation_id}" style="text-decoration: none; color: #2196F3;">View</a>'
+                            else:
+                                generation_link = "—"
+                            
+                            questions_list += f"""
+                        <tr style="border-bottom: 1px solid #eee; cursor: pointer;" onclick="window.location.href='/web/eval/question/{question.id}'" onmouseover="this.style.backgroundColor='#f8f9fa'" onmouseout="this.style.backgroundColor='transparent'">
+                            <td style="padding: 12px 10px;">
+                                <a href="/web/eval/question/{question.id}" style="text-decoration: none; color: #2196F3;">{html_escape(question_preview)}</a>
+                            </td>
+                            <td style="padding: 12px 10px; color: #666;">{generation_link}</td>
+                        </tr>
+                        """
+                        
+                        eval_questions_html = f"""
+            <div class="card" style="margin-top: 20px;">
+                <h2>Evaluation Questions ({len(questions)})</h2>
+                <p style="color: #666; font-size: 14px; margin-bottom: 10px;">Questions generated from this document:</p>
+                <table style="width: 100%; border-collapse: collapse; margin-top: 10px;">
+                    <thead>
+                        <tr style="background-color: #f5f5f5; border-bottom: 2px solid #ddd;">
+                            <th style="text-align: left; padding: 10px; font-weight: 600;">Question</th>
+                            <th style="text-align: left; padding: 10px; font-weight: 600;">Generation</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {questions_list}
+                    </tbody>
+                </table>
+            </div>
+            """
+            except (ImportError, Exception) as e:
+                logger.debug(f"Could not load eval information: {e}")
+                # Eval module may not be available, that's okay
+
             content = f"""
             <h1>Document Details</h1>
             <p><a href="/web">← Back to Document List</a></p>
@@ -886,6 +1012,9 @@ def setup_web_routes(app, oauth_provider, session_manager: WebSessionManager):
                 <h2>Operation Logs</h2>
                 <div id="logs-content" style="color: #666;">Loading logs...</div>
             </div>
+            
+            {eval_results_html}
+            {eval_questions_html}
             
             <script>
             // Load and display similar documents
@@ -1928,3 +2057,5 @@ def setup_web_routes(app, oauth_provider, session_manager: WebSessionManager):
     async def web_statistics_route(request: Request):
         """Statistics page route."""
         return await web_statistics.web_statistics(request, session_manager)
+
+    # Eval routes moved to web_eval.py
