@@ -49,7 +49,7 @@ from .runner import (
     eval,
     get_run_results,
 )
-from .core import get_eval_run
+from .core import get_eval_run, get_or_create_eval_generation
 
 # Metrics
 from .metrics import (
@@ -73,6 +73,7 @@ __all__ = [
     "eval",
     "get_run_results",
     "get_eval_run",
+    "get_or_create_eval_generation",
     # Metrics
     "compute_hit_rate",
     "get_rank_distribution",

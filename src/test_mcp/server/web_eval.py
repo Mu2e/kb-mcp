@@ -70,9 +70,10 @@ def setup_eval_routes(app, session_manager: WebSessionManager):
             <table style="width: 100%; border-collapse: collapse; margin-top: 10px;">
                 <thead>
                     <tr style="background-color: #f5f5f5; border-bottom: 2px solid #ddd;">
-                        <th style="text-align: left; padding: 10px; font-weight: 600;">Name</th>
+                        <th style="text-align: left; padding: 10px; font-weight: 600;">ID</th>
                         <th style="text-align: left; padding: 10px; font-weight: 600;">Type</th>
                         <th style="text-align: left; padding: 10px; font-weight: 600;">Method</th>
+                        <th style="text-align: left; padding: 10px; font-weight: 600;">Model</th>
                         <th style="text-align: left; padding: 10px; font-weight: 600;">Questions</th>
                         <th style="text-align: left; padding: 10px; font-weight: 600;">Source</th>
                         <th style="text-align: left; padding: 10px; font-weight: 600;">Created</th>
@@ -83,9 +84,10 @@ def setup_eval_routes(app, session_manager: WebSessionManager):
                 for gen in generations:
                     num_questions = len(gen.questions) if gen.questions else 0
                     created_time_iso = _to_utc_iso(gen.created_time) if gen.created_time else None
-                    name_display = gen.name or f"{gen.generation_type} Generation"
                     method_display = gen.generation_method or "—"
                     source_display = gen.source_id or "—"
+                    # Get model from meta
+                    model_display = (gen.meta.get("model") if gen.meta else None) or "—"
                     
                     generations_html += f"""
                     <tr style="border-bottom: 1px solid #eee; cursor: pointer; transition: background-color 0.15s;" 
@@ -94,11 +96,12 @@ def setup_eval_routes(app, session_manager: WebSessionManager):
                         onmouseout="this.style.backgroundColor='transparent'">
                         <td style="padding: 12px 10px;">
                             <a href="/web/eval/generation/{gen.id}" style="text-decoration: none; color: #2196F3; font-weight: 500;">
-                                {html_escape(name_display)}
+                                <code style="font-size: 11px;">{gen.id[:8]}...</code>
                             </a>
                         </td>
                         <td style="padding: 12px 10px; color: #666;">{html_escape(gen.generation_type)}</td>
                         <td style="padding: 12px 10px; color: #666;">{html_escape(method_display)}</td>
+                        <td style="padding: 12px 10px; color: #666;">{html_escape(model_display)}</td>
                         <td style="padding: 12px 10px; color: #666;">{num_questions}</td>
                         <td style="padding: 12px 10px; color: #666;">{html_escape(source_display)}</td>
                         <td style="padding: 12px 10px; color: #666;">
@@ -111,7 +114,7 @@ def setup_eval_routes(app, session_manager: WebSessionManager):
             </table>
                 """
             else:
-                generations_html = '<div class="info-box">No evaluation generations found.</div>'
+                generations_html = '<div class="info-box">No eval datasets found.</div>'
 
             # Build runs list (while still in session)
             if runs:
@@ -121,7 +124,7 @@ def setup_eval_routes(app, session_manager: WebSessionManager):
                     <tr style="background-color: #f5f5f5; border-bottom: 2px solid #ddd;">
                         <th style="text-align: left; padding: 10px; font-weight: 600;">Name</th>
                         <th style="text-align: left; padding: 10px; font-weight: 600;">Embedding</th>
-                        <th style="text-align: left; padding: 10px; font-weight: 600;">Generation</th>
+                        <th style="text-align: left; padding: 10px; font-weight: 600;">Dataset</th>
                         <th style="text-align: left; padding: 10px; font-weight: 600;">Max Results</th>
                         <th style="text-align: left; padding: 10px; font-weight: 600;">Created</th>
                     </tr>
@@ -134,12 +137,8 @@ def setup_eval_routes(app, session_manager: WebSessionManager):
                     embedding_display = run.embedding_name or "—"
                     generation_link = ""
                     if run.generation_id:
-                        # Get generation name if available
-                        if run.generation:
-                            gen_name = run.generation.name or f"{run.generation.generation_type} Generation"
-                            generation_link = f'<a href="/web/eval/generation/{run.generation_id}" style="text-decoration: none; color: #2196F3;">{html_escape(gen_name)}</a>'
-                        else:
-                            generation_link = f'<a href="/web/eval/generation/{run.generation_id}" style="text-decoration: none; color: #2196F3;">View</a>'
+                        # Show generation ID in same format as Eval Datasets table
+                        generation_link = f'<a href="/web/eval/generation/{run.generation_id}" style="text-decoration: none; color: #2196F3; font-weight: 500;"><code style="font-size: 11px;">{run.generation_id[:8]}...</code></a>'
                     else:
                         generation_link = "—"
                     max_results_display = run.max_results or "—"
@@ -173,7 +172,7 @@ def setup_eval_routes(app, session_manager: WebSessionManager):
         <h1>Evaluation Overview</h1>
         
         <div class="card">
-            <h2>Evaluation Generations ({len(generations) if generations else 0})</h2>
+            <h2>Eval Datasets ({len(generations) if generations else 0})</h2>
             {generations_html}
         </div>
         
@@ -225,7 +224,7 @@ def setup_eval_routes(app, session_manager: WebSessionManager):
                 return HTMLResponse(
                     html_templates.base_template(
                         "Generation Not Found",
-                        '<div class="error-box"><h2>Generation Not Found</h2><p>The requested evaluation generation could not be found.</p><p><a href="/web/eval">← Back to Evaluation Overview</a></p></div>',
+                        '<div class="error-box"><h2>Dataset Not Found</h2><p>The requested eval dataset could not be found.</p><p><a href="/web/eval">← Back to Evaluation Overview</a></p></div>',
                         None,
                         username
                     ),
@@ -243,8 +242,16 @@ def setup_eval_routes(app, session_manager: WebSessionManager):
             name_display = generation.name or f"{generation.generation_type} Generation"
             method_display = generation.generation_method or "N/A"
             source_display = generation.source_id or "N/A"
-            # Get model from meta if available
-            model_display = (generation.meta.get("model") if generation.meta else None) or "N/A"
+            source_type_display = generation.source_type or "N/A"
+            prompt_display = generation.prompt or "N/A"
+            
+            # Format meta as JSON (includes prompt if it's stored there)
+            meta_json = json.dumps(generation.meta, indent=2) if generation.meta else "{}"
+            meta_html = f'<pre style="margin: 0; white-space: pre-wrap; font-size: 12px; background: #f9f9f9; padding: 10px; border: 1px solid #ddd; border-radius: 4px; max-height: 300px; overflow-y: auto;">{html_escape(meta_json)}</pre>'
+            
+            # Format source_filters as JSON if available
+            source_filters_json = json.dumps(generation.source_filters, indent=2) if generation.source_filters else None
+            source_filters_html = f'<pre style="margin: 0; white-space: pre-wrap; font-size: 12px; background: #f9f9f9; padding: 10px; border: 1px solid #ddd; border-radius: 4px; max-height: 200px; overflow-y: auto;">{html_escape(source_filters_json)}</pre>' if source_filters_json else "N/A"
             
             generation_info = f"""
         <div class="card">
@@ -265,12 +272,17 @@ def setup_eval_routes(app, session_manager: WebSessionManager):
                         <td style="padding: 8px;">{html_escape(method_display)}</td>
                     </tr>
                     <tr style="border-bottom: 1px solid #eee;">
-                        <td style="padding: 8px; font-weight: 600;">Model</td>
-                        <td style="padding: 8px;">{html_escape(model_display)}</td>
+                        <td style="padding: 8px; font-weight: 600;">Source ID</td>
+                        <td style="padding: 8px;">{html_escape(source_display)}</td>
                     </tr>
                     <tr style="border-bottom: 1px solid #eee;">
-                        <td style="padding: 8px; font-weight: 600;">Source</td>
-                        <td style="padding: 8px;">{html_escape(source_display)}</td>
+                        <td style="padding: 8px; font-weight: 600;">Source Type</td>
+                        <td style="padding: 8px;">{html_escape(source_type_display)}</td>
+                    </tr>
+                    {f'<tr style="border-bottom: 1px solid #eee;"><td style="padding: 8px; font-weight: 600;">Source Filters</td><td style="padding: 8px;">{source_filters_html}</td></tr>' if generation.source_filters else ''}
+                    <tr style="border-bottom: 1px solid #eee;">
+                        <td style="padding: 8px; font-weight: 600; vertical-align: top;">Meta</td>
+                        <td style="padding: 8px;">{meta_html}</td>
                     </tr>
                     <tr>
                         <td style="padding: 8px; font-weight: 600;">Created</td>
@@ -364,13 +376,13 @@ def setup_eval_routes(app, session_manager: WebSessionManager):
                 runs_html = '<div class="info-box">No evaluation runs found for this generation.</div>'
 
         content = f"""
-        <h1>Evaluation Generation</h1>
+        <h1>Eval Dataset</h1>
         <p><a href="/web/eval">← Back to Evaluation Overview</a></p>
         
         {generation_info}
         
         <div class="card" style="margin-top: 20px;">
-            <h2>Evaluation Runs ({len(runs)})</h2>
+            <h2>Eval Runs ({len(runs)})</h2>
             {runs_html}
         </div>
         
@@ -388,11 +400,24 @@ def setup_eval_routes(app, session_manager: WebSessionManager):
                 }}
             }});
         }});
+        
+        // Toggle function for collapsible fields
+        function toggleMetaField(fieldId) {{
+            const collapsed = document.getElementById(fieldId + '-collapsed');
+            const expanded = document.getElementById(fieldId + '-expanded');
+            if (collapsed.style.display === 'none') {{
+                collapsed.style.display = 'block';
+                expanded.style.display = 'none';
+            }} else {{
+                collapsed.style.display = 'none';
+                expanded.style.display = 'block';
+            }}
+        }}
         </script>
         """
 
         return HTMLResponse(html_templates.base_template(
-            "Evaluation Generation - MCP Server",
+            "Eval Dataset - MCP Server",
             content,
             None,
             username
@@ -728,9 +753,12 @@ def setup_eval_routes(app, session_manager: WebSessionManager):
             # Get results for this run
             results = get_run_results(run_id=run_id, session=session) or []
             
-            # Get summary stats for both hit types
-            summary_stats = get_summary_stats(run_id=run_id, use_judge=False, session=session)
-            summary_stats_judge = get_summary_stats(run_id=run_id, use_judge=True, session=session)
+            # Get summary stats for all questions (includes both doc match and judge stats)
+            summary_stats_all = get_summary_stats(run_id=run_id, use_judge=False, session=session)
+            
+            # Get summary stats filtered by audit type (includes both doc match and judge stats)
+            summary_stats_human = get_summary_stats(run_id=run_id, use_judge=False, audit_type="human_review", session=session)
+            summary_stats_llm = get_summary_stats(run_id=run_id, use_judge=False, audit_type="llm_judge", session=session)
             
             # Build run info (while still in session)
             created_time_iso = _to_utc_iso(run.created_time) if run.created_time else None
@@ -784,59 +812,97 @@ def setup_eval_routes(app, session_manager: WebSessionManager):
         </div>
         """
             
-            # Build summary stats
-            hit_rate_pct = summary_stats.get("hit_rate", 0.0) * 100
-            total_questions = summary_stats.get("total_questions", 0)
-            hits = summary_stats.get("hits", 0)
-            misses = summary_stats.get("misses", 0)
-            rank_dist = summary_stats.get("rank_distribution", {})
+            # Extract stats for all questions
+            all_doc_total = summary_stats_all.get("total_questions", 0)
+            all_doc_hits = summary_stats_all.get("hits", 0)
+            all_doc_misses = summary_stats_all.get("misses", 0)
+            all_doc_hit_rate = summary_stats_all.get("hit_rate", 0.0) * 100
+            all_judge_total = summary_stats_all.get("judge_total_questions", 0)
+            all_judge_hits = summary_stats_all.get("judge_hits", 0)
+            all_judge_misses = summary_stats_all.get("judge_misses", 0)
+            all_judge_hit_rate = summary_stats_all.get("judge_hit_rate", 0.0) * 100 if "judge_hit_rate" in summary_stats_all else 0.0
             
-            # Judge stats (may have fewer total if some results don't have judge evaluation)
-            judge_hit_rate_pct = summary_stats_judge.get("hit_rate", 0.0) * 100
-            judge_total_questions = summary_stats_judge.get("total_questions", 0)
-            judge_hits = summary_stats_judge.get("hits", 0)
-            judge_misses = summary_stats_judge.get("misses", 0)
-            judge_rank_dist = summary_stats_judge.get("rank_distribution", {})
+            # Extract stats for human review filtered
+            human_doc_total = summary_stats_human.get("total_questions", 0)
+            human_doc_hits = summary_stats_human.get("hits", 0)
+            human_doc_misses = summary_stats_human.get("misses", 0)
+            human_doc_hit_rate = summary_stats_human.get("hit_rate", 0.0) * 100
+            human_judge_total = summary_stats_human.get("judge_total_questions", 0)
+            human_judge_hits = summary_stats_human.get("judge_hits", 0)
+            human_judge_misses = summary_stats_human.get("judge_misses", 0)
+            human_judge_hit_rate = summary_stats_human.get("judge_hit_rate", 0.0) * 100 if "judge_hit_rate" in summary_stats_human else 0.0
+            
+            # Extract stats for LLM judge audit filtered
+            llm_doc_total = summary_stats_llm.get("total_questions", 0)
+            llm_doc_hits = summary_stats_llm.get("hits", 0)
+            llm_doc_misses = summary_stats_llm.get("misses", 0)
+            llm_doc_hit_rate = summary_stats_llm.get("hit_rate", 0.0) * 100
+            llm_judge_total = summary_stats_llm.get("judge_total_questions", 0)
+            llm_judge_hits = summary_stats_llm.get("judge_hits", 0)
+            llm_judge_misses = summary_stats_llm.get("judge_misses", 0)
+            llm_judge_hit_rate = summary_stats_llm.get("judge_hit_rate", 0.0) * 100 if "judge_hit_rate" in summary_stats_llm else 0.0
             
             summary_html = f"""
         <div class="card" style="margin-top: 20px;">
             <h2>Summary Statistics</h2>
             <table style="width: 100%; border-collapse: collapse; margin-top: 10px;">
+                <thead>
+                    <tr style="background-color: #f5f5f5; border-bottom: 2px solid #ddd;">
+                        <th style="text-align: left; padding: 10px; font-weight: 600; width: 200px;">Metric</th>
+                        <th style="text-align: center; padding: 10px; font-weight: 600; background-color: #e8f4f8;">All Questions</th>
+                        <th style="text-align: center; padding: 10px; font-weight: 600; background-color: #fff3cd;">Human Review<br/>(Valid Only)</th>
+                        <th style="text-align: center; padding: 10px; font-weight: 600; background-color: #d1ecf1;">LLM Review<br/>(Valid Only)</th>
+                    </tr>
+                </thead>
                 <tbody>
-                    <tr style="border-bottom: 1px solid #eee;">
-                        <td style="padding: 8px; font-weight: 600; width: 200px;">Total Questions</td>
-                        <td style="padding: 8px;">{total_questions}</td>
+                    <tr style="border-bottom: 2px solid #ddd; background-color: #f9f9f9;">
+                        <td style="padding: 8px; font-weight: 700;">Total Questions</td>
+                        <td style="padding: 8px; text-align: center; font-weight: 600;">{all_doc_total}</td>
+                        <td style="padding: 8px; text-align: center; font-weight: 600;">{human_doc_total}</td>
+                        <td style="padding: 8px; text-align: center; font-weight: 600;">{llm_doc_total}</td>
                     </tr>
-                    <tr style="border-bottom: 1px solid #eee; background-color: #f9f9f9;">
+                    <tr style="border-bottom: 1px solid #eee;">
                         <td style="padding: 8px; font-weight: 600; padding-left: 20px;">Document Match Hits</td>
-                        <td style="padding: 8px;">{hits}</td>
+                        <td style="padding: 8px; text-align: center;">{all_doc_hits}</td>
+                        <td style="padding: 8px; text-align: center;">{human_doc_hits}</td>
+                        <td style="padding: 8px; text-align: center;">{llm_doc_hits}</td>
                     </tr>
-                    <tr style="border-bottom: 1px solid #eee; background-color: #f9f9f9;">
-                        <td style="padding: 8px; font-weight: 600; padding-left: 20px;">Document Match Misses</td>
-                        <td style="padding: 8px;">{misses}</td>
-                    </tr>
-                    <tr style="border-bottom: 1px solid #eee; background-color: #f9f9f9;">
-                        <td style="padding: 8px; font-weight: 600; padding-left: 20px;">Document Match Hit Rate</td>
-                        <td style="padding: 8px;"><strong>{hit_rate_pct:.1f}%</strong></td>
-                    </tr>
-                    {f'<tr style="border-bottom: 1px solid #eee; background-color: #f9f9f9;"><td style="padding: 8px; font-weight: 600; padding-left: 20px;">Document Match Rank Distribution</td><td style="padding: 8px;">{", ".join([f"Rank {rank}: {count}" for rank, count in sorted(rank_dist.items())])}</td></tr>' if rank_dist else ''}
                     <tr style="border-bottom: 1px solid #eee;">
-                        <td style="padding: 8px; font-weight: 600; padding-top: 15px;">LLM Judge Evaluated</td>
-                        <td style="padding: 8px; padding-top: 15px;">{judge_total_questions}</td>
+                        <td style="padding: 8px; font-weight: 600; padding-left: 20px;">Document Match Misses</td>
+                        <td style="padding: 8px; text-align: center;">{all_doc_misses}</td>
+                        <td style="padding: 8px; text-align: center;">{human_doc_misses}</td>
+                        <td style="padding: 8px; text-align: center;">{llm_doc_misses}</td>
                     </tr>
-                    <tr style="border-bottom: 1px solid #eee; background-color: #f0f7ff;">
+                    <tr style="border-bottom: 2px solid #ddd; background-color: #f9f9f9;">
+                        <td style="padding: 8px; font-weight: 700;">Document Match Hit Rate</td>
+                        <td style="padding: 8px; text-align: center; font-weight: 600;"><strong>{all_doc_hit_rate:.1f}%</strong></td>
+                        <td style="padding: 8px; text-align: center; font-weight: 600;"><strong>{human_doc_hit_rate:.1f}%</strong></td>
+                        <td style="padding: 8px; text-align: center; font-weight: 600;"><strong>{llm_doc_hit_rate:.1f}%</strong></td>
+                    </tr>
+                    <tr style="border-bottom: 2px solid #ddd; background-color: #f0f7ff;">
+                        <td style="padding: 8px; font-weight: 700; padding-top: 15px;">LLM Judge Evaluated</td>
+                        <td style="padding: 8px; text-align: center; font-weight: 600; padding-top: 15px;">{all_judge_total if all_judge_total > 0 else "—"}</td>
+                        <td style="padding: 8px; text-align: center; font-weight: 600; padding-top: 15px;">{human_judge_total if human_judge_total > 0 else "—"}</td>
+                        <td style="padding: 8px; text-align: center; font-weight: 600; padding-top: 15px;">{llm_judge_total if llm_judge_total > 0 else "—"}</td>
+                    </tr>
+                    {f'''<tr style="border-bottom: 1px solid #eee;">
                         <td style="padding: 8px; font-weight: 600; padding-left: 20px;">LLM Judge Hits</td>
-                        <td style="padding: 8px;">{judge_hits}</td>
+                        <td style="padding: 8px; text-align: center;">{all_judge_hits}</td>
+                        <td style="padding: 8px; text-align: center;">{human_judge_hits}</td>
+                        <td style="padding: 8px; text-align: center;">{llm_judge_hits}</td>
                     </tr>
-                    <tr style="border-bottom: 1px solid #eee; background-color: #f0f7ff;">
+                    <tr style="border-bottom: 1px solid #eee;">
                         <td style="padding: 8px; font-weight: 600; padding-left: 20px;">LLM Judge Misses</td>
-                        <td style="padding: 8px;">{judge_misses}</td>
+                        <td style="padding: 8px; text-align: center;">{all_judge_misses}</td>
+                        <td style="padding: 8px; text-align: center;">{human_judge_misses}</td>
+                        <td style="padding: 8px; text-align: center;">{llm_judge_misses}</td>
                     </tr>
                     <tr style="border-bottom: 1px solid #eee; background-color: #f0f7ff;">
-                        <td style="padding: 8px; font-weight: 600; padding-left: 20px;">LLM Judge Hit Rate</td>
-                        <td style="padding: 8px;"><strong>{judge_hit_rate_pct:.1f}%</strong></td>
-                    </tr>
-                    {f'<tr style="border-bottom: 1px solid #eee; background-color: #f0f7ff;"><td style="padding: 8px; font-weight: 600; padding-left: 20px;">LLM Judge Rank Distribution</td><td style="padding: 8px;">{", ".join([f"Rank {rank}: {count}" for rank, count in sorted(judge_rank_dist.items())])}</td></tr>' if judge_rank_dist else ''}
+                        <td style="padding: 8px; font-weight: 700;">LLM Judge Hit Rate</td>
+                        <td style="padding: 8px; text-align: center; font-weight: 600;"><strong>{all_judge_hit_rate:.1f}%</strong></td>
+                        <td style="padding: 8px; text-align: center; font-weight: 600;"><strong>{human_judge_hit_rate:.1f}%</strong></td>
+                        <td style="padding: 8px; text-align: center; font-weight: 600;"><strong>{llm_judge_hit_rate:.1f}%</strong></td>
+                    </tr>''' if all_judge_total > 0 or human_judge_total > 0 or llm_judge_total > 0 else ''}
                 </tbody>
             </table>
         </div>

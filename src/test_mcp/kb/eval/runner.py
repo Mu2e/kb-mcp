@@ -5,6 +5,8 @@ import socket
 import time
 from typing import Dict, List, Optional
 
+from tqdm import tqdm
+
 from .core import EvalRun, EvalResult, EvalRetrievedDocument, get_eval_questions
 from ..database import get_db_session
 from ..search.search import search
@@ -330,10 +332,20 @@ def execute_eval_run(
         # Evaluate each question
         start_time = time.time()
         num_hits = 0
+        num_processed = 0
         total_retrieval_time = 0.0
 
-        for i, question in enumerate(questions, start=1):
+        # Use tqdm for progress indication
+        question_iterator = tqdm(
+            questions,
+            desc="Evaluating questions",
+            unit="question",
+            total=len(questions)
+        )
+
+        for question in question_iterator:
             if not question.source_document_id:
+                question_iterator.set_postfix_str("Skipping (no source doc)", refresh=False)
                 logger.warning(
                     f"Skipping question {question.id} (no source_document_id)"
                 )
@@ -347,39 +359,43 @@ def execute_eval_run(
                     session=session,
                 )
 
+                num_processed += 1
                 if result.is_hit:
                     num_hits += 1
 
                 if result.retrieval_time_seconds:
                     total_retrieval_time += result.retrieval_time_seconds
 
-                if i % 10 == 0:
-                    logger.info(
-                        f"Progress: {i}/{len(questions)} questions evaluated "
-                        f"(hit rate: {num_hits/i:.2%})"
-                    )
+                # Update progress bar with current hit rate
+                hit_rate = num_hits / num_processed if num_processed > 0 else 0.0
+                question_iterator.set_postfix_str(
+                    f"Hit rate: {hit_rate:.1%} ({num_hits}/{num_processed})",
+                    refresh=False
+                )
 
             except Exception as e:
+                question_iterator.set_postfix_str(f"Error: {str(e)[:30]}...", refresh=False)
                 logger.error(f"Failed to evaluate question {question.id}: {e}")
                 # Continue with other questions
                 continue
 
         total_time = time.time() - start_time
         avg_retrieval_time = (
-            total_retrieval_time / len(questions) if questions else 0.0
+            total_retrieval_time / num_processed if num_processed > 0 else 0.0
         )
 
         stats = {
             "run_id": run_id,
-            "num_questions": len(questions),
+            "num_questions": num_processed,
             "num_hits": num_hits,
             "total_time_seconds": total_time,
             "avg_retrieval_time_seconds": avg_retrieval_time,
         }
 
+        hit_rate = num_hits / num_processed if num_processed > 0 else 0.0
         logger.info(
-            f"Completed eval run {run_id}: {num_hits}/{len(questions)} hits "
-            f"({num_hits/len(questions):.2%}) in {total_time:.1f}s"
+            f"Completed eval run {run_id}: {num_hits}/{num_processed} hits "
+            f"({hit_rate:.2%}) in {total_time:.1f}s"
         )
 
         return stats

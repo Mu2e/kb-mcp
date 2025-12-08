@@ -289,6 +289,7 @@ def get_unaudited_questions(
     generation_id: Optional[str] = None,
     auditor_name: Optional[str] = None,
     audit_type: Optional[str] = None,
+    limit: Optional[int] = None,
     session=None,
 ) -> List[EvalDataset]:
     """Get questions that have not been audited yet.
@@ -297,6 +298,7 @@ def get_unaudited_questions(
         generation_id: Optional filter by generation ID
         auditor_name: Optional filter to questions not audited by this specific auditor
         audit_type: Optional filter to questions without this audit type
+        limit: Optional limit on number of questions to return (None for all)
         session: Database session
 
     Returns:
@@ -321,18 +323,22 @@ def get_unaudited_questions(
             query = query.filter_by(generation_id=generation_id)
 
         # Build subquery for filtering
+        from sqlalchemy import select
         if auditor_name or audit_type:
-            subquery = session.query(EvalAudit.question_id)
+            subquery = select(EvalAudit.question_id)
             if auditor_name:
-                subquery = subquery.filter(EvalAudit.auditor_name == auditor_name)
+                subquery = subquery.where(EvalAudit.auditor_name == auditor_name)
             if audit_type:
-                subquery = subquery.filter(EvalAudit.audit_type == audit_type)
-            subquery = subquery.subquery()
+                subquery = subquery.where(EvalAudit.audit_type == audit_type)
             query = query.filter(~EvalDataset.id.in_(subquery))
         else:
             # Questions with no audits at all
-            subquery = session.query(EvalAudit.question_id).subquery()
+            subquery = select(EvalAudit.question_id)
             query = query.filter(~EvalDataset.id.in_(subquery))
+
+        # Apply limit if specified
+        if limit is not None:
+            query = query.limit(limit)
 
         questions = query.all()
         logger.info(f"Found {len(questions)} unaudited questions")

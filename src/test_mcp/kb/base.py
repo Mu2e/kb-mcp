@@ -605,6 +605,7 @@ def _get(
     uuid: str | None = None,
     source_id: str | None = None,
     doc_id: str | None = None,
+    doc_type: str | None = None,
     filter_dict: Dict[str, Any] | None = None,
     limit: int | None = None,
     offset: int | None = None,
@@ -719,6 +720,8 @@ def _get(
             query = query.filter(Document.source_id == source_id)
         if doc_id:
             query = query.filter(Document.doc_id == doc_id)
+        if doc_type:
+            query = query.filter(Document.doc_type == doc_type)
 
         # Apply filter_dict filters (takes precedence if both provided)
         # Also support Elasticsearch-style filter parameter
@@ -846,6 +849,7 @@ def get(
     uuid: str | None = None,
     source_id: str | None = None,
     doc_id: str | None = None,
+    doc_type: str | None = None,
     filter_dict: Dict[str, Any] | None = None,
     limit: int | None = None,
     offset: int | None = None,
@@ -915,6 +919,7 @@ def get(
         uuid=uuid,
         source_id=source_id,
         doc_id=doc_id,
+        doc_type=doc_type,
         filter_dict=filter_dict,
         limit=limit,
         offset=offset,
@@ -933,6 +938,7 @@ def get_count(
     uuid: str | None = None,
     source_id: str | None = None,
     doc_id: str | None = None,
+    doc_type: str | None = None,
     filter_dict: Dict[str, Any] | None = None,
 ) -> int:
     """Get count of documents matching criteria.
@@ -962,6 +968,7 @@ def get_count(
         uuid=uuid,
         source_id=source_id,
         doc_id=doc_id,
+        doc_type=doc_type,
         filter_dict=filter_dict,
         count_only=True,
     )

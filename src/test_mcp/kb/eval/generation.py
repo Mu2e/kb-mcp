@@ -7,7 +7,9 @@ import time
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from .core import EvalGeneration, EvalDataset
+from tqdm import tqdm
+
+from .core import EvalDataset, get_or_create_eval_generation
 from ..base import get
 from ..database import get_db_session
 from ...eval.generation import generate_qa_pairs_keypoint, generate_qa_pairs_persona
@@ -56,32 +58,47 @@ def generate_questions_from_documents(
         total_time = 0.0
         generation_metadata = None
 
-        for doc_id in document_ids:
+        # Use tqdm for progress indication
+        doc_iterator = tqdm(
+            document_ids,
+            desc=f"Generating questions ({generation_method})",
+            unit="doc",
+            total=len(document_ids)
+        )
+
+        for doc_id in doc_iterator:
             # Get document
             doc = get(uuid=doc_id, session=session)
             if not doc:
+                doc_iterator.set_postfix_str("Document not found", refresh=False)
                 logger.warning(f"Document not found: {doc_id}")
                 continue
 
             if not doc.text or not doc.text.strip():
+                doc_iterator.set_postfix_str("No text content", refresh=False)
                 logger.warning(f"Document {doc_id} has no text content")
                 continue
 
+            doc_iterator.set_postfix_str(f"Processing {doc.doc_id or doc.id[:8]}...", refresh=False)
+            
             logger.info(f"Generating {num_questions_per_doc} questions from document {doc_id} using {generation_method} method")
 
             # Generate QA pairs based on method
             start_time = time.time()
 
+            # Ensure num_questions_per_doc is valid (default to 1 if None or 0)
+            questions_to_generate = num_questions_per_doc if num_questions_per_doc and num_questions_per_doc > 0 else 1
+            
             if generation_method == "keypoint":
                 result = generate_qa_pairs_keypoint(
                     doc.text,
-                    num_questions=num_questions_per_doc,
+                    num_questions=questions_to_generate,
                     model=model,
                 )
             elif generation_method == "persona":
                 result = generate_qa_pairs_persona(
                     doc.text,
-                    num_questions=num_questions_per_doc,
+                    num_questions=questions_to_generate,
                     personas=personas,
                     model=model,
                 )
@@ -129,6 +146,8 @@ def generate_questions_from_documents(
                 )
                 all_questions.append(question)
 
+            doc_iterator.set_postfix_str(f"{len(qa_pairs)} questions in {elapsed_time:.1f}s", refresh=False)
+            
             logger.info(f"Generated {len(qa_pairs)} questions for document {doc_id} in {elapsed_time:.2f}s")
 
         # Create generation record if questions were generated
@@ -143,19 +162,19 @@ def generate_questions_from_documents(
 
             source_id = source_ids.pop() if len(source_ids) == 1 else None
 
+            # Get or create generation using hash-based deduplication
             # Move model to meta, keep generation_method as column
             meta_without_method = {k: v for k, v in generation_metadata.items() if k != "generation_method"}
-            
-            generation = EvalGeneration(
+
+            generation = get_or_create_eval_generation(
                 generation_type="synthetic",
                 generation_method=generation_method,
-                prompt=generation_metadata.get("prompt"),
                 source_id=source_id,
                 source_type="text",
-                meta=meta_without_method,  # Includes model, type, prompt, personas
+                prompt=generation_metadata.get("prompt"),
+                meta=meta_without_method,
+                session=session,
             )
-            session.add(generation)
-            session.flush()  # Get generation ID
 
             # Link questions to generation
             for question in all_questions:
@@ -201,7 +220,7 @@ def generate_questions_from_source(
     source_id: str,
     doc_type: str = "text",
     num_documents: Optional[int] = None,
-    num_questions_per_doc: int = 5,
+    num_questions_per_doc: int = 1,
     generation_method: str = "keypoint",
     session=None,
     **kwargs
@@ -242,9 +261,10 @@ def generate_questions_from_source(
             docs = [docs]
 
         # Randomly sample if num_documents specified
-        if num_documents is not None and num_documents < len(docs):
+        total_docs = len(docs)
+        if num_documents is not None and num_documents < total_docs:
             docs = random.sample(docs, num_documents)
-            logger.info(f"Randomly sampled {num_documents} documents from {len(docs)} total")
+            logger.info(f"Randomly sampled {num_documents} documents from {total_docs} total")
 
         document_ids = [doc.id for doc in docs]
 

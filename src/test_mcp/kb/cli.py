@@ -107,6 +107,7 @@ try:
     from .eval import (
         generate_questions_from_documents,
         generate_questions_from_source,
+        add_audit,
         audit_question,
         get_unaudited_questions,
         eval as run_eval,
@@ -1299,25 +1300,30 @@ def cmd_eval_generate(args):
         sys.exit(1)
 
     try:
-        # Build filters
-        filters = {}
         if args.source_id:
-            filters["source_id"] = args.source_id
-        if args.doc_id:
-            filters["doc_id"] = args.doc_id
+            # Use generate_questions_from_source when source_id is provided
+            # Convert 0 to None to process all documents
+            num_docs = None if args.num_documents == 0 else args.num_documents
+            # Ensure we have a valid num_questions value (default should be 1 from argparse)
+            num_questions = getattr(args, 'num_questions', 1) or 1
+            result = generate_questions_from_source(
+                source_id=args.source_id,
+                num_documents=num_docs,
+                num_questions_per_doc=num_questions,
+                generation_method=args.strategy,
+                model=args.model,
+            )
+        else:
+            # For document-specific generation, we'd need document_ids
+            # This is not currently supported via CLI
+            print("Error: --source-id is required for question generation")
+            print("  Example: kb eval generate --source-id inspire-hep")
+            sys.exit(1)
 
-        result = generate_questions_from_documents(
-            num_questions=args.num_questions,
-            strategy=args.strategy,
-            model=args.model,
-            filters=filters or None,
-            generation_id=args.generation_id,
-        )
-
-        print(f"Generated {result['num_generated']} questions")
+        print(f"Generated {result['num_questions_generated']} questions")
         print(f"  Generation ID: {result['generation_id']}")
-        if result.get('source_documents'):
-            print(f"  Source documents: {result['source_documents']}")
+        print(f"  Documents processed: {result['num_documents_processed']}")
+        print(f"  Total time: {result['total_time_seconds']:.1f}s")
 
     except Exception as e:
         print(f"Error generating questions: {e}")
@@ -1333,54 +1339,83 @@ def cmd_eval_audit(args):
         sys.exit(1)
 
     try:
-        # Get unaudited questions
+        # Get unaudited questions (convert 0 to None for unlimited)
+        limit = None if args.limit == 0 else args.limit
+        # For LLM auditing, filter for questions without llm_judge audits
+        # For human auditing, filter for questions without any audits
+        audit_type = "llm_judge" if args.llm else None
         questions = get_unaudited_questions(
             generation_id=args.generation_id,
-            limit=args.limit,
+            audit_type=audit_type,
+            limit=limit,
         )
 
         if not questions:
-            print("No unaudited questions found.")
+            if args.generation_id:
+                print(f"No unaudited questions found for generation {args.generation_id}.")
+                print("  All questions may have already been audited, or the generation has no questions.")
+            else:
+                print("No unaudited questions found.")
             return
 
         print(f"Found {len(questions)} unaudited questions\n")
 
-        for i, question in enumerate(questions, 1):
-            print(f"Question {i}/{len(questions)} (ID: {question.id})")
-            print(f"  Q: {question.question}")
-            print(f"  A: {question.answer}")
-            if question.source_document_id:
-                print(f"  Source doc: {question.source_document_id}")
+        if args.llm:
+            # Automated LLM auditing
+            print("Running automated LLM audit...\n")
+            from tqdm import tqdm
+            
+            for question in tqdm(questions, desc="Auditing questions", unit="question"):
+                try:
+                    audit = audit_question(
+                        question_id=question.id,
+                        model=args.model,
+                    )
+                    status = "✓ Valid" if audit.is_valid else "✗ Invalid"
+                    print(f"{status}: {question.id[:8]}... - {audit.comments[:80] if audit.comments else 'No comments'}")
+                except Exception as e:
+                    print(f"Error auditing {question.id}: {e}")
+                    continue
+            print(f"\nCompleted auditing {len(questions)} questions")
+        else:
+            # Interactive human auditing
+            for i, question in enumerate(questions, 1):
+                print(f"Question {i}/{len(questions)} (ID: {question.id})")
+                print(f"  Q: {question.question}")
+                if question.answer:
+                    print(f"  A: {question.answer}")
+                if question.source_document_id:
+                    print(f"  Source doc: {question.source_document_id}")
 
-            print("\nIs this question valid?")
-            print("  y - yes (valid)")
-            print("  n - no (invalid)")
-            print("  s - skip")
-            print("  q - quit")
+                print("\nIs this question valid?")
+                print("  y - yes (valid)")
+                print("  n - no (invalid)")
+                print("  s - skip")
+                print("  q - quit")
 
-            while True:
-                choice = input("\nChoice [y/n/s/q]: ").strip().lower()
-                if choice in ['y', 'n', 's', 'q']:
+                while True:
+                    choice = input("\nChoice [y/n/s/q]: ").strip().lower()
+                    if choice in ['y', 'n', 's', 'q']:
+                        break
+                    print("Invalid choice, please enter y/n/s/q")
+
+                if choice == 'q':
+                    print("Quitting audit.")
                     break
-                print("Invalid choice, please enter y/n/s/q")
+                elif choice == 's':
+                    print("Skipped.\n")
+                    continue
+                elif choice in ['y', 'n']:
+                    is_valid = (choice == 'y')
+                    notes = input("Notes (optional): ").strip() or None
 
-            if choice == 'q':
-                print("Quitting audit.")
-                break
-            elif choice == 's':
-                print("Skipped.\n")
-                continue
-            elif choice in ['y', 'n']:
-                is_valid = (choice == 'y')
-                notes = input("Notes (optional): ").strip() or None
-
-                audit_question(
-                    question_id=question.id,
-                    is_valid=is_valid,
-                    audit_type="human",
-                    notes=notes,
-                )
-                print(f"Marked as {'valid' if is_valid else 'invalid'}.\n")
+                    add_audit(
+                        question_id=question.id,
+                        is_valid=is_valid,
+                        audit_type="human_review",
+                        comments=notes,
+                    )
+                    print(f"Marked as {'valid' if is_valid else 'invalid'}.\n")
 
     except Exception as e:
         print(f"Error auditing questions: {e}")
@@ -1400,6 +1435,8 @@ def cmd_eval_run(args):
         audit_filters = {}
         if not args.include_invalid:
             audit_filters["is_valid"] = True
+        if args.audit_type:
+            audit_filters["audit_type"] = args.audit_type
 
         # Build search filters
         search_filters = {}
@@ -1882,7 +1919,8 @@ def main():
 
     # eval generate
     eval_generate_parser = eval_subparsers.add_parser("generate", help="Generate evaluation questions from documents")
-    eval_generate_parser.add_argument("--num-questions", type=int, default=5, help="Number of questions to generate per document")
+    eval_generate_parser.add_argument("--num-questions", type=int, default=1, help="Number of questions to generate per document (default: 1)")
+    eval_generate_parser.add_argument("--num-documents", type=int, default=10, help="Number of documents to process (default: 10, use --num-documents 0 for all)")
     eval_generate_parser.add_argument("--strategy", default="keypoint", choices=["keypoint", "persona"], help="Question generation strategy")
     eval_generate_parser.add_argument("--model", help="LLM model to use for generation")
     eval_generate_parser.add_argument("--source-id", help="Filter to specific source")
@@ -1893,6 +1931,8 @@ def main():
     eval_audit_parser = eval_subparsers.add_parser("audit", help="Audit generated questions")
     eval_audit_parser.add_argument("--generation-id", help="Filter to specific generation")
     eval_audit_parser.add_argument("--limit", type=int, default=20, help="Max questions to audit")
+    eval_audit_parser.add_argument("--llm", action="store_true", help="Use LLM for automated auditing instead of interactive")
+    eval_audit_parser.add_argument("--model", help="LLM model to use for auditing (if --llm)")
 
     # eval run
     eval_run_parser = eval_subparsers.add_parser("run", help="Run an evaluation")
@@ -1900,6 +1940,7 @@ def main():
     eval_run_parser.add_argument("--description", help="Description for this run")
     eval_run_parser.add_argument("--generation-id", help="Filter to questions from specific generation")
     eval_run_parser.add_argument("--include-invalid", action="store_true", help="Include questions marked as invalid")
+    eval_run_parser.add_argument("--audit-type", help="Filter by audit type (e.g., 'llm_judge', 'human_review')")
     eval_run_parser.add_argument("--embedding-name", help="Embedding model to use")
     eval_run_parser.add_argument("--max-results", type=int, default=10, help="Max search results to retrieve")
     eval_run_parser.add_argument("--search-source-id", help="Filter search to specific source")

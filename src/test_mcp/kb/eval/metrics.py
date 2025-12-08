@@ -3,9 +3,9 @@
 import logging
 from typing import Dict, Optional
 
-from sqlalchemy import func
+from sqlalchemy import func, case, select
 
-from .core import EvalResult, EvalRun
+from .core import EvalResult, EvalRun, EvalDataset, EvalAudit
 from ..database import get_db_session
 
 logger = logging.getLogger(__name__)
@@ -111,6 +111,7 @@ def compute_hit_rate(
 def get_rank_distribution(
     run_id: str,
     use_judge: bool = False,
+    audit_type: Optional[str] = None,
     session=None,
 ) -> Dict[int, int]:
     """Get distribution of hit ranks.
@@ -118,6 +119,7 @@ def get_rank_distribution(
     Args:
         run_id: Run ID to analyze
         use_judge: Whether to use LLM judge results
+        audit_type: Optional filter by audit type
         session: Database session
 
     Returns:
@@ -133,14 +135,26 @@ def get_rank_distribution(
         session = get_db_session().__enter__()
 
     try:
+        # Build base filter
+        base_filter = EvalResult.run_id == run_id
+        
+        # Apply audit filter if specified
+        if audit_type:
+            audited_question_ids = select(EvalAudit.question_id).where(
+                EvalAudit.audit_type == audit_type,
+                EvalAudit.is_valid == True  # noqa: E712
+            ).distinct()
+            base_filter = base_filter & (EvalResult.question_id.in_(audited_question_ids))
+        
+        # Filter by run and hit type
         if use_judge:
             results = session.query(EvalResult.hit_rank, func.count(EvalResult.id)).filter(
-                EvalResult.run_id == run_id,
+                base_filter,
                 EvalResult.is_judge_hit == True  # noqa: E712
             ).group_by(EvalResult.hit_rank).all()
         else:
             results = session.query(EvalResult.hit_rank, func.count(EvalResult.id)).filter(
-                EvalResult.run_id == run_id,
+                base_filter,
                 EvalResult.is_hit == True  # noqa: E712
             ).group_by(EvalResult.hit_rank).all()
 
@@ -155,13 +169,17 @@ def get_rank_distribution(
 def get_summary_stats(
     run_id: str,
     use_judge: bool = False,
+    audit_type: Optional[str] = None,
     session=None,
 ) -> Dict:
     """Get summary statistics for a run.
 
+    Computes both document match and LLM judge stats in a single query for efficiency.
+
     Args:
         run_id: Run ID to analyze
-        use_judge: Whether to use LLM judge results
+        use_judge: Whether to use LLM judge results (for backward compatibility)
+        audit_type: Optional filter by audit type (e.g., 'llm_judge', 'human_review')
         session: Database session
 
     Returns:
@@ -173,47 +191,77 @@ def get_summary_stats(
             "misses": int,
             "hit_rate": float,
             "rank_distribution": {1: count, 2: count, ...},
+            "judge_total_questions": int,  # Only if judge results exist
+            "judge_hits": int,
+            "judge_misses": int,
+            "judge_hit_rate": float,
+            "judge_rank_distribution": {1: count, 2: count, ...},
         }
 
     Example:
         >>> stats = get_summary_stats("run-123")
-        >>> print(f"Hit rate: {stats['hit_rate']:.2%}")
-        >>> print(f"Rank 1 hits: {stats['rank_distribution'].get(1, 0)}")
+        >>> print(f"Doc hit rate: {stats['hit_rate']:.2%}")
+        >>> print(f"Judge hit rate: {stats.get('judge_hit_rate', 0):.2%}")
+        >>> # Filter by audit type
+        >>> stats = get_summary_stats("run-123", audit_type="llm_judge")
     """
     own_session = session is None
     if own_session:
         session = get_db_session().__enter__()
 
     try:
-        # Get hits
+        # Build base filter
+        base_filter = EvalResult.run_id == run_id
+        
+        # Apply audit filter if specified - use subquery to get valid question IDs
+        if audit_type:
+            audited_question_ids = select(EvalAudit.question_id).where(
+                EvalAudit.audit_type == audit_type,
+                EvalAudit.is_valid == True  # noqa: E712
+            ).distinct()
+            base_filter = base_filter & (EvalResult.question_id.in_(audited_question_ids))
+        
+        # Compute both document match and judge stats in one pass using aggregation
+        # Count document hits
+        doc_hits = session.query(func.count(EvalResult.id)).filter(
+            base_filter,
+            EvalResult.is_hit == True  # noqa: E712
+        ).scalar() or 0
+        
+        # Count document total (with is_hit set)
+        doc_total = session.query(func.count(EvalResult.id)).filter(
+            base_filter,
+            EvalResult.is_hit.isnot(None)
+        ).scalar() or 0
+        
+        # Count judge hits
+        judge_hits = session.query(func.count(EvalResult.id)).filter(
+            base_filter,
+            EvalResult.is_judge_hit == True  # noqa: E712
+        ).scalar() or 0
+        
+        # Count judge total (with is_judge_hit set)
+        judge_total = session.query(func.count(EvalResult.id)).filter(
+            base_filter,
+            EvalResult.is_judge_hit.isnot(None)
+        ).scalar() or 0
+        
+        # For backward compatibility, use the requested metric
         if use_judge:
-            hits = session.query(func.count(EvalResult.id)).filter(
-                EvalResult.run_id == run_id,
-                EvalResult.is_judge_hit == True,  # noqa: E712
-            ).scalar()
-            # Get total number of questions with is_judge_hit set (not NULL)
-            total = session.query(func.count(EvalResult.id)).filter(
-                EvalResult.run_id == run_id,
-                EvalResult.is_judge_hit.isnot(None),
-            ).scalar()
+            hits = judge_hits
+            total = judge_total
         else:
-            hits = session.query(func.count(EvalResult.id)).filter(
-                EvalResult.run_id == run_id,
-                EvalResult.is_hit == True,  # noqa: E712
-            ).scalar()
-            # Get total number of questions with is_hit set (not NULL)
-            total = session.query(func.count(EvalResult.id)).filter(
-                EvalResult.run_id == run_id,
-                EvalResult.is_hit.isnot(None),
-            ).scalar()
-
+            hits = doc_hits
+            total = doc_total
+        
         misses = total - hits
         hit_rate = hits / total if total > 0 else 0.0
-
-        # Get rank distribution
-        rank_dist = get_rank_distribution(run_id, use_judge=use_judge, session=session)
-
-        return {
+        
+        # Get rank distributions
+        rank_dist = get_rank_distribution(run_id, use_judge=False, audit_type=audit_type, session=session)
+        judge_rank_dist = get_rank_distribution(run_id, use_judge=True, audit_type=audit_type, session=session) if judge_total > 0 else {}
+        
+        result = {
             "run_id": run_id,
             "total_questions": total,
             "hits": hits,
@@ -221,6 +269,18 @@ def get_summary_stats(
             "hit_rate": hit_rate,
             "rank_distribution": rank_dist,
         }
+        
+        # Add judge stats if available
+        if judge_total > 0:
+            result.update({
+                "judge_total_questions": judge_total,
+                "judge_hits": judge_hits,
+                "judge_misses": judge_total - judge_hits,
+                "judge_hit_rate": judge_hits / judge_total if judge_total > 0 else 0.0,
+                "judge_rank_distribution": judge_rank_dist,
+            })
+        
+        return result
 
     finally:
         if own_session:

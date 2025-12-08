@@ -1,5 +1,7 @@
 """Database models for evaluation and benchmarking."""
 
+import hashlib
+import json
 import uuid
 from typing import Dict, List, Optional, Union
 
@@ -49,6 +51,11 @@ class EvalGeneration(Base):
 
     # Metadata (can include model, specific document IDs used, etc.)
     meta = Column(JSON, nullable=True, default=dict)
+
+    # Content hash for deduplication (SHA256 of all identifying fields)
+    # Allows database-level uniqueness checking even with JSON meta field
+    content_hash = Column(String(64), nullable=True, index=True, unique=True)
+
     created_time = Column(
         DateTime(timezone=True),
         nullable=False,
@@ -413,7 +420,95 @@ class EvalRetrievedDocument(Base):
         )
 
 
-# Helper functions for querying
+# Helper functions
+
+def compute_generation_hash(
+    generation_type: str,
+    generation_method: str,
+    source_id: Optional[str],
+    source_type: str,
+    prompt: Optional[str],
+    meta: Optional[Dict],
+) -> str:
+    """Compute deterministic SHA256 hash of generation identifying fields.
+    
+    Note: Only includes meta.personas (if present), not the full meta dict.
+    Prompt is excluded from hash as it may vary without changing generation identity.
+    """
+    # Extract only personas from meta for hashing
+    meta_for_hash = {}
+    if meta and "personas" in meta:
+        meta_for_hash["personas"] = meta["personas"]
+    
+    hash_data = {
+        "generation_type": generation_type,
+        "generation_method": generation_method,
+        "source_id": source_id,
+        "source_type": source_type,
+        "meta": meta_for_hash,
+    }
+    hash_string = json.dumps(hash_data, sort_keys=True, separators=(',', ':'))
+    return hashlib.sha256(hash_string.encode('utf-8')).hexdigest()
+
+
+def get_or_create_eval_generation(
+    generation_type: str,
+    generation_method: str,
+    source_id: Optional[str] = None,
+    source_type: str = "text",
+    prompt: Optional[str] = None,
+    meta: Optional[Dict] = None,
+    session: Optional[Session] = None,
+) -> EvalGeneration:
+    """Get existing or create new EvalGeneration using database-intrinsic content hash."""
+    own_session = session is None
+    if own_session:
+        session = get_db_session().__enter__()
+
+    try:
+        # Compute content hash from all identifying fields
+        content_hash = compute_generation_hash(
+            generation_type, generation_method, source_id, source_type, prompt, meta or {}
+        )
+
+        # Query by hash (uses unique index)
+        existing = session.query(EvalGeneration).filter_by(content_hash=content_hash).first()
+
+        if existing:
+            if own_session:
+                session.refresh(existing)
+                session.expunge(existing)
+            return existing
+
+        # Create new
+        generation = EvalGeneration(
+            generation_type=generation_type,
+            generation_method=generation_method,
+            source_id=source_id,
+            source_type=source_type,
+            prompt=prompt,
+            meta=meta or {},
+            content_hash=content_hash,
+        )
+        session.add(generation)
+
+        if own_session:
+            session.commit()
+            session.refresh(generation)
+            session.expunge(generation)
+        else:
+            session.flush()
+
+        return generation
+
+    except Exception:
+        if own_session:
+            session.rollback()
+        raise
+    finally:
+        if own_session:
+            session.__exit__(None, None, None)
+
 
 def get_eval_generation(
     generation_id: Optional[str] = None,
