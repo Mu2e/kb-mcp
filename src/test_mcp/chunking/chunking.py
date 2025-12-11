@@ -219,19 +219,21 @@ def chunk(
         - meta: dictionary with chunking configuration parameters
 
     Examples:
-        >>> # Simple usage with defaults
-        >>> chunks = chunk("Some long text...")
-        >>> chunks[0]["chunk_strategy"]
-        "default-1000-200-text_embedding_3_small"
+        ```python
+        # Simple usage with defaults
+        chunks = chunk("Some long text...")
+        chunks[0]["chunk_strategy"]
+        # Returns: "default-1000-200-text_embedding_3_small"
         
-        >>> # With custom config
-        >>> chunks = chunk(
-        ...     "Some long text...",
-        ...     strategy="default",
-        ...     config={"chunk_size": 500, "chunk_overlap": 100, "model": "gpt-4"}
-        ... )
-        >>> chunks[0]["meta"]["chunk_size"]
-        500
+        # With custom config
+        chunks = chunk(
+            "Some long text...",
+            strategy="default",
+            config={"chunk_size": 500, "chunk_overlap": 100, "model": "gpt-4"}
+        )
+        chunks[0]["meta"]["chunk_size"]
+        # Returns: 500
+        ```
     """
 
     # set defaults

@@ -5,7 +5,8 @@ from typing import Dict, Optional
 
 from sqlalchemy import func, case, select
 
-from .core import EvalResult, EvalRun, EvalDataset, EvalAudit
+from .db_models import EvalResult, EvalRun, EvalDataset, EvalAudit
+from ..database import get_db_session
 from ..database import get_db_session
 
 logger = logging.getLogger(__name__)
@@ -34,18 +35,18 @@ def compute_hit_rate(
         float: Hit rate (0.0 to 1.0)
 
     Example:
-        >>> hit_rate = compute_hit_rate(run_id="run-123")
-        >>> print(f"Hit rate: {hit_rate:.2%}")
-        >>> # Or by generation_id (uses latest run)
-        >>> hit_rate = compute_hit_rate(generation_id="gen-123")
-        >>> # Or as positional argument (tries as run_id first, then generation_id)
-        >>> hit_rate = compute_hit_rate("gen-123")
+        ```python
+        hit_rate = compute_hit_rate(run_id="run-123")
+        print(f"Hit rate: {hit_rate:.2%}")
+        # Or by generation_id (uses latest run)
+        hit_rate = compute_hit_rate(generation_id="gen-123")
+        # Or as positional argument (tries as run_id first, then generation_id)
+        hit_rate = compute_hit_rate("gen-123")
+        ```
     """
-    own_session = session is None
-    if own_session:
-        session = get_db_session().__enter__()
+    should_close = session is None
 
-    try:
+    with get_db_session(session) as session:
         # Support positional argument: if only run_id is provided as positional, 
         # try it as run_id first, then as generation_id if no results found
         if run_id and not generation_id:
@@ -103,9 +104,6 @@ def compute_hit_rate(
 
         return hits / total
 
-    finally:
-        if own_session:
-            session.__exit__(None, None, None)
 
 
 def get_rank_distribution(
@@ -126,15 +124,15 @@ def get_rank_distribution(
         Dict mapping rank to count (only hits included)
 
     Example:
-        >>> dist = get_rank_distribution("run-123")
-        >>> print(f"Rank 1: {dist.get(1, 0)} hits")
-        >>> print(f"Rank 2: {dist.get(2, 0)} hits")
+        ```python
+        dist = get_rank_distribution("run-123")
+        print(f"Rank 1: {dist.get(1, 0)} hits")
+        print(f"Rank 2: {dist.get(2, 0)} hits")
+        ```
     """
-    own_session = session is None
-    if own_session:
-        session = get_db_session().__enter__()
+    should_close = session is None
 
-    try:
+    with get_db_session(session) as session:
         # Build base filter
         base_filter = EvalResult.run_id == run_id
         
@@ -161,9 +159,6 @@ def get_rank_distribution(
         distribution = {rank: count for rank, count in results if rank is not None}
         return distribution
 
-    finally:
-        if own_session:
-            session.__exit__(None, None, None)
 
 
 def get_summary_stats(
@@ -199,17 +194,17 @@ def get_summary_stats(
         }
 
     Example:
-        >>> stats = get_summary_stats("run-123")
-        >>> print(f"Doc hit rate: {stats['hit_rate']:.2%}")
-        >>> print(f"Judge hit rate: {stats.get('judge_hit_rate', 0):.2%}")
-        >>> # Filter by audit type
-        >>> stats = get_summary_stats("run-123", audit_type="llm_judge")
+        ```python
+        stats = get_summary_stats("run-123")
+        print(f"Doc hit rate: {stats['hit_rate']:.2%}")
+        print(f"Judge hit rate: {stats.get('judge_hit_rate', 0):.2%}")
+        # Filter by audit type
+        stats = get_summary_stats("run-123", audit_type="llm_judge")
+        ```
     """
-    own_session = session is None
-    if own_session:
-        session = get_db_session().__enter__()
+    should_close = session is None
 
-    try:
+    with get_db_session(session) as session:
         # Build base filter
         base_filter = EvalResult.run_id == run_id
         
@@ -282,6 +277,3 @@ def get_summary_stats(
         
         return result
 
-    finally:
-        if own_session:
-            session.__exit__(None, None, None)

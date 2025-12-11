@@ -7,7 +7,7 @@ from sqlalchemy import text, alias
 
 from sqlalchemy.orm import aliased
 
-from ..core import Document
+from ..db_models import Document
 from .filters import get_filters_pgvector
 
 logger = logging.getLogger(__name__)

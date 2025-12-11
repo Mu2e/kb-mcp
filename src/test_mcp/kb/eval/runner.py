@@ -7,11 +7,11 @@ from typing import Dict, List, Optional
 
 from tqdm import tqdm
 
-from .core import EvalRun, EvalResult, EvalRetrievedDocument, get_eval_questions
-from ..database import get_db_session
+from .db_models import EvalRun, EvalResult, EvalRetrievedDocument, get_eval_questions
 from ..search.search import search
 from ..embedding.utils import get_embedding_name
-from ...eval.judge import llm_judge_answer
+from ...eval_utils.judge import llm_judge_answer
+from ..database import get_db_session
 
 logger = logging.getLogger(__name__)
 
@@ -48,18 +48,18 @@ def create_eval_run(
         EvalRun: Created run configuration
 
     Example:
-        >>> run = create_eval_run(
-        ...     name="Test embeddings v2",
-        ...     generation_id="gen-123",
-        ...     audit_filters={"is_valid": True},
-        ...     max_results=10
-        ... )
+        ```python
+        run = create_eval_run(
+            name="Test embeddings v2",
+            generation_id="gen-123",
+            audit_filters={"is_valid": True},
+            max_results=10
+        )
+        ```
     """
-    own_session = session is None
-    if own_session:
-        session = get_db_session().__enter__()
+    should_close = session is None
 
-    try:
+    with get_db_session(session) as session:
         # Get default embedding name if not provided
         if embedding_name is None:
             embedding_name = get_embedding_name(session=session)
@@ -77,25 +77,14 @@ def create_eval_run(
             meta=meta or {},
         )
         session.add(run)
-        session.commit()
 
-        # Refresh and expunge if we own the session
-        if own_session:
+        # Refresh if we own the session
+        if should_close:
+            session.flush()  # Flush to get the ID
             session.refresh(run)
-            session.expunge(run)
 
         logger.info(f"Created eval run: {run.id} (name={name})")
         return run
-
-    except Exception as e:
-        if own_session:
-            session.rollback()
-        logger.error(f"Error creating eval run: {e}")
-        raise
-
-    finally:
-        if own_session:
-            session.__exit__(None, None, None)
 
 
 def evaluate_single_question(
@@ -118,11 +107,9 @@ def evaluate_single_question(
     Raises:
         ValueError: If question not found or has no source_document_id
     """
-    own_session = session is None
-    if own_session:
-        session = get_db_session().__enter__()
+    should_close = session is None
 
-    try:
+    with get_db_session(session) as session:
         # Get question
         question = get_eval_questions(question_id=question_id, session=session)
         if not question:
@@ -225,12 +212,12 @@ def evaluate_single_question(
             # Result structure: {"document": Document, "chunks": [...]}
             doc = search_result.get("document")
             chunks = search_result.get("chunks", [])
-            
+
             if doc:
                 # Get best similarity from chunks
                 similarity = chunks[0].get("similarity") if chunks else None
                 chunk_ids = [chunk.get("chunk_id") for chunk in chunks if chunk.get("chunk_id")]
-                
+
                 retrieved_doc = EvalRetrievedDocument(
                     result_id=result.id,
                     document_id=doc.id,
@@ -240,12 +227,9 @@ def evaluate_single_question(
                 )
                 session.add(retrieved_doc)
 
-        session.commit()
-
-        # Refresh and expunge if we own the session
-        if own_session:
+        # Refresh if we own the session
+        if should_close:
             session.refresh(result)
-            session.expunge(result)
 
         logger.debug(
             f"Evaluated question {question_id}: is_hit={is_hit}, "
@@ -253,16 +237,6 @@ def evaluate_single_question(
         )
 
         return result
-
-    except Exception as e:
-        if own_session:
-            session.rollback()
-        logger.error(f"Error evaluating question {question_id}: {e}")
-        raise
-
-    finally:
-        if own_session:
-            session.__exit__(None, None, None)
 
 
 def execute_eval_run(
@@ -294,15 +268,13 @@ def execute_eval_run(
         ValueError: If run not found
 
     Example:
-        >>> run = create_eval_run(...)
-        >>> stats = execute_eval_run(run.id)
-        >>> print(f"Hit rate: {stats['num_hits'] / stats['num_questions']:.2%}")
+        ```python
+        run = create_eval_run(...)
+        stats = execute_eval_run(run.id)
+        print(f"Hit rate: {stats['num_hits'] / stats['num_questions']:.2%}")
+        ```
     """
-    own_session = session is None
-    if own_session:
-        session = get_db_session().__enter__()
-
-    try:
+    with get_db_session(session) as session:
         # Get run configuration
         run = session.query(EvalRun).filter_by(id=run_id).first()
         if not run:
@@ -400,16 +372,6 @@ def execute_eval_run(
 
         return stats
 
-    except Exception as e:
-        if own_session:
-            session.rollback()
-        logger.error(f"Error executing eval run: {e}")
-        raise
-
-    finally:
-        if own_session:
-            session.__exit__(None, None, None)
-
 
 def eval(
     name: Optional[str] = None,
@@ -448,19 +410,17 @@ def eval(
         Dict with execution statistics including run_id
 
     Example:
-        >>> stats = eval(
-        ...     name="Test new embeddings",
-        ...     generation_id="gen-123",
-        ...     audit_filters={"is_valid": True},
-        ...     max_results=10
-        ... )
-        >>> print(f"Run {stats['run_id']}: {stats['num_hits']}/{stats['num_questions']} hits")
+        ```python
+        stats = eval(
+            name="Test new embeddings",
+            generation_id="gen-123",
+            audit_filters={"is_valid": True},
+            max_results=10
+        )
+        print(f"Run {stats['run_id']}: {stats['num_hits']}/{stats['num_questions']} hits")
+        ```
     """
-    own_session = session is None
-    if own_session:
-        session = get_db_session().__enter__()
-
-    try:
+    with get_db_session(session) as session:
         # Create run configuration
         run = create_eval_run(
             name=name,
@@ -485,10 +445,6 @@ def eval(
 
         return stats
 
-    finally:
-        if own_session:
-            session.__exit__(None, None, None)
-
 
 def get_run_results(
     run_id: str,
@@ -506,14 +462,12 @@ def get_run_results(
         List[EvalResult]: List of results
 
     Example:
-        >>> results = get_run_results(run_id="abc-123", is_hit=False)
-        >>> print(f"Found {len(results)} misses")
+        ```python
+        results = get_run_results(run_id="abc-123", is_hit=False)
+        print(f"Found {len(results)} misses")
+        ```
     """
-    own_session = session is None
-    if own_session:
-        session = get_db_session().__enter__()
-
-    try:
+    with get_db_session(session) as session:
         query = session.query(EvalResult).filter_by(run_id=run_id)
 
         if is_hit is not None:
@@ -521,13 +475,4 @@ def get_run_results(
 
         results = query.order_by(EvalResult.created_time).all()
 
-        if own_session and results:
-            for result in results:
-                session.refresh(result)
-                session.expunge(result)
-
         return results
-
-    finally:
-        if own_session:
-            session.__exit__(None, None, None)

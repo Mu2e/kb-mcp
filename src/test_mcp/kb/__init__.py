@@ -1,7 +1,7 @@
 """Knowledge base module for document storage and retrieval."""
 
-from .base import add, add_from_path, add_many, add_source, get, get_count, get_options, get_children, delete_document
-from .core import Document, Source
+from .documents import add, add_from_path, add_many, add_source, get, get_count, get_options, get_children, delete_document
+from .db_models import Document, Source
 from .database import get_db_session, init_db
 from .utils import deduplicate, find_all_duplicates, get_stats, list_sources, get_metadata_keys
 from .tools import chunk_and_embed_all, image_chunk_and_embed_all
@@ -16,7 +16,7 @@ except ImportError:
 # Import embedding models to ensure they're registered with Base.metadata
 # This ensures database tables are created when init_db() is called
 try:
-    from .embedding.core import Chunk, EmbeddingConfig
+    from .embedding.db_models import Chunk, EmbeddingConfig
 except ImportError:
     # Embedding module may not be available if dependencies aren't installed
     Chunk = None

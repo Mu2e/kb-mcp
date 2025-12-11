@@ -34,22 +34,25 @@ openssl req -x509 -newkey rsa:4096 -nodes -keyout certs/key.pem -out certs/cert.
 
 ## Documentation
 
-Documentation is organized by module to mirror the code structure:
+Comprehensive documentation is available in the [docs/](docs/) directory:
 
-### Server (`test_mcp.server`)
-- [docs/server/install.md](docs/server/install.md) - Installation and setup
-- [docs/server/configuration.md](docs/server/configuration.md) - Configuration options
-- [docs/server/api-keys.md](docs/server/api-keys.md) - API key authentication
-- [docs/server/clients.md](docs/server/clients.md) - Client integration (Claude Desktop, Cursor, Cline, MCP Inspector, curl)
-- [docs/server/docker.md](docs/server/docker.md) - Docker deployment
-- [docs/server/deploy-cloudrun.md](docs/server/deploy-cloudrun.md) - Google Cloud Run deployment
-- [docs/server/admin-api.md](docs/server/admin-api.md) - Admin API for managing API keys on Cloud Run
+### Quick Links
+- [Architecture Overview](docs/ARCHITECTURE.md) - System architecture and design
+- [Configuration Guide](docs/configuration.md) - Centralized configuration
+- [Module Documentation](docs/modules/README.md) - Detailed module guides
 
-### Knowledge Base (`test_mcp.kb`)
-- Coming soon...
+### Module Guides
+- [Server Module](docs/modules/server.md) - MCP server and web interface
+- [Knowledge Base Module](docs/modules/kb.md) - Document storage and search
+- [Parser Module](docs/modules/parser.md) - Document parsing
+- [Evaluation Utilities](docs/modules/eval_utils.md) - QA generation and judging
 
-### Parser (`test_mcp.parser`)
-- Coming soon...
+### Server Documentation
+- [Installation](docs/server/install.md) - Setup and configuration
+- [Client Integration](docs/server/clients.md) - Claude Desktop, Cursor, etc.
+- [API Keys](docs/server/api-keys.md) - API authentication
+- [Docker](docs/server/docker.md) - Docker deployment
+- [Cloud Run](docs/server/deploy-cloudrun.md) - Google Cloud deployment
 
 ## Requirements
 

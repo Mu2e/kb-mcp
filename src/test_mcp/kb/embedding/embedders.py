@@ -35,15 +35,18 @@ class OpenAIEmbedder(BaseEmbedder):
                 "openai package is required. Install with: pip install openai"
             )
 
+        from ...config import get_llm_config
+        llm_config = get_llm_config()
+
         self.provider = "openai"
         self.model = model_name
-        self.api_key = api_key or os.getenv("OPENAI_API_KEY")
+        self.api_key = api_key or llm_config['openai_api_key']
         if not self.api_key:
             raise ValueError(
                 "OpenAI API key is required. Set OPENAI_API_KEY env var or pass api_key parameter"
             )
 
-        base_url = base_url or os.getenv("OPENAI_BASE_URL")
+        base_url = base_url or llm_config['openai_base_url']
         self.client = OpenAI(api_key=self.api_key, base_url=base_url)
         self.config = kwargs
 

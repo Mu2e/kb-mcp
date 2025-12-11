@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 # Import Document type for type hints (avoid circular import)
 try:
-    from ...kb.core import Document
+    from ...kb.db_models import Document
     HAS_KB = True
 except ImportError:
     HAS_KB = False

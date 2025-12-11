@@ -9,26 +9,26 @@ from sqlalchemy import create_engine, event, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
-from .core import Base
+from .db_models import Base
 
 # Import embedding models to ensure they're registered with Base.metadata
 # This ensures database tables are created when init_db() is called
 try:
-    from .embedding.core import Chunk, EmbeddingConfig  # noqa: F401
+    from .embedding.db_models import Chunk, EmbeddingConfig  # noqa: F401
 except ImportError:
     # Embedding module may not be available if dependencies aren't installed
     pass
 
 # Import search models to ensure they're registered with Base.metadata
 try:
-    from .search.core import SearchLog  # noqa: F401
+    from .search.db_models import SearchLog  # noqa: F401
 except ImportError:
     # Search module may not be available if dependencies aren't installed
     pass
 
 # Import eval models to ensure they're registered with Base.metadata
 try:
-    from .eval.core import (  # noqa: F401
+    from .eval.db_models import (  # noqa: F401
         EvalGeneration,
         EvalDataset,
         EvalAudit,
@@ -53,30 +53,31 @@ def get_database_url() -> str:
     Returns:
         Database URL string
     """
+    from ..config import get_database_config
+
+    # Get configuration from config module
+    db_config = get_database_config()
+
     # Check for explicit DATABASE_URL first
-    database_url = os.getenv("DATABASE_URL")
-    if database_url:
-        return database_url
+    if db_config['url']:
+        return db_config['url']
 
     # Check for PostgreSQL components
-    db_host = os.getenv("DB_HOST")
-    db_port = os.getenv("DB_PORT", "5432")
-    db_name = os.getenv("DB_NAME", "test_mcp")
-    db_user = os.getenv("DB_USER")
-    db_password = os.getenv("DB_PASSWORD")
-
-    if db_host and db_user and db_password:
-        return f"postgresql://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}"
+    if db_config['host'] and db_config['user'] and db_config['password']:
+        return f"postgresql://{db_config['user']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/{db_config['name']}"
 
     # Default to SQLite for development
-    sqlite_path = os.getenv("SQLITE_DB_PATH", "data/kb.db")
+    sqlite_path = db_config['sqlite_path']
     logger.info(f"Using SQLite database: {sqlite_path}")
     return f"sqlite:///{sqlite_path}"
 
 
 def create_engine_with_config() -> Engine:
     """Create SQLAlchemy engine with appropriate configuration."""
+    from ..config import get_database_config
+
     database_url = get_database_url()
+    db_config = get_database_config()
 
     # SQLite-specific configuration
     if database_url.startswith("sqlite"):
@@ -84,7 +85,7 @@ def create_engine_with_config() -> Engine:
         engine = create_engine(
             database_url,
             connect_args={"check_same_thread": False},
-            echo=os.getenv("DB_ECHO", "false").lower() == "true",
+            echo=db_config['echo'],
         )
 
         @event.listens_for(engine, "connect")
@@ -99,9 +100,9 @@ def create_engine_with_config() -> Engine:
     # PostgreSQL configuration
     return create_engine(
         database_url,
-        echo=os.getenv("DB_ECHO", "false").lower() == "true",
-        pool_size=int(os.getenv("DB_POOL_SIZE", "5")),
-        max_overflow=int(os.getenv("DB_MAX_OVERFLOW", "10")),
+        echo=db_config['echo'],
+        pool_size=db_config['pool_size'],
+        max_overflow=db_config['max_overflow'],
     )
 
 
@@ -131,23 +132,81 @@ def get_session_factory() -> sessionmaker:
 
 
 @contextmanager
-def get_db_session() -> Generator[Session, None, None]:
-    """Get a database session (context manager).
+def get_db_session(session=None, auto_commit: bool = True) -> Generator[Session, None, None]:
+    """
+    Get or create a database session (context manager).
+
+    This function handles session management automatically:
+    - Creates a new session if none provided
+    - Auto-commits on success (for new sessions only)
+    - Auto-refreshes all objects before expunging (for new sessions)
+    - Auto-expunges all objects (for new sessions, so they can be used after session closes)
+    - Handles rollback on errors
+    - Closes session when done
+
+    Args:
+        session: Existing session to use, or None to create new one
+        auto_commit: If True, commit on success (only applies to new sessions)
+
+    Yields:
+        Database session with .is_local attribute indicating if it was created here
 
     Usage:
+        ```python
+        # Create new session (auto-commits, auto-expunges):
         with get_db_session() as session:
-            # use session
+            doc = session.query(Document).first()
+            return doc  # Works! Objects are refreshed and expunged automatically
+
+        # Use existing session (no commit, no expunge):
+        with get_db_session(existing_session) as session:
+            doc = session.query(Document).first()
+            return doc  # Stays attached to existing_session
+        ```
     """
-    SessionLocal = get_session_factory()
-    session = SessionLocal()
+    is_local = session is None
+
+    if is_local:
+        SessionLocal = get_session_factory()
+        session = SessionLocal()
+
+    # Mark whether this is a local session
+    session.is_local = is_local
+
     try:
         yield session
-        session.commit()
+
+        # Auto-refresh and expunge if local session
+        if is_local:
+            from sqlalchemy.orm import make_transient
+            
+            # Refresh all objects to load their data before expunging
+            # This ensures objects can be used after the session closes
+            for obj in list(session.identity_map.values()):
+                try:
+                    # Refresh to ensure we have the latest data and load all attributes
+                    session.refresh(obj)
+                    # Make transient: this fully detaches the object from the session
+                    # refresh() should have loaded all attributes into __dict__, so they'll
+                    # be available after make_transient()
+                    make_transient(obj)
+                except Exception:
+                    # Skip invalid/deleted objects
+                    pass
+
+            if auto_commit:
+                session.commit()
+
+            # Expunge all objects (make_transient already detached them, but this cleans up)
+            session.expunge_all()
+
     except Exception:
-        session.rollback()
+        if is_local:
+            session.rollback()
         raise
     finally:
-        session.close()
+        if is_local:
+            session.close()
 
 
 def init_db(create_tables: bool = True) -> None:
@@ -159,7 +218,7 @@ def init_db(create_tables: bool = True) -> None:
     # Ensure eval models are imported before creating tables
     # This ensures they're registered with Base.metadata
     try:
-        from .eval.core import (  # noqa: F401
+        from .eval.db_models import (  # noqa: F401
             EvalGeneration,
             EvalDataset,
             EvalAudit,

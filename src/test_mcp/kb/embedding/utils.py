@@ -82,14 +82,16 @@ def get_embedder(
         EMBEDDING_MODEL: Default model (e.g., "text-embedding-3-small")
 
     Examples:
-        >>> # By embedding name
-        >>> emb = get_embedder(embedding_name="openai-small")
-        >>> # By provider/model
-        >>> emb = get_embedder(provider="openai", model="text-embedding-3-small")
-        >>> # With defaults (reads from env vars)
-        >>> emb = get_embedder()  # Uses EMBEDDING_PROVIDER and EMBEDDING_MODEL
-        >>> embeddings = emb(["text1", "text2"])  # Callable
-        >>> dimension = emb.embedding_dimension
+        ```python
+        # By embedding name
+        emb = get_embedder(embedding_name="openai-small")
+        # By provider/model
+        emb = get_embedder(provider="openai", model="text-embedding-3-small")
+        # With defaults (reads from env vars)
+        emb = get_embedder()  # Uses EMBEDDING_PROVIDER and EMBEDDING_MODEL
+        embeddings = emb(["text1", "text2"])  # Callable
+        dimension = emb.embedding_dimension
+        ```
     """
     # Validate: cannot have both embedding_name and (provider, model)
     if embedding_name is not None and (provider is not None or model is not None):
@@ -100,14 +102,13 @@ def get_embedder(
     
     # If embedding_name is provided, load provider/model from database
     if embedding_name is not None:
-        from .core import EmbeddingConfig
+        from .db_models import EmbeddingConfig
+        from ..database import get_db_session
         from ..database import get_db_session
 
-        own_session = session is None
-        if own_session:
-            session = get_db_session().__enter__()
+        should_close = session is None
 
-        try:
+        with get_db_session(session) as session:
             config = session.query(EmbeddingConfig).filter(
                 EmbeddingConfig.short_name == embedding_name
             ).first()
@@ -128,15 +129,14 @@ def get_embedder(
                 session=None,  # Don't pass session to avoid conflicts
                 **kwargs
             )
-        finally:
-            if own_session:
-                session.close()
 
     # Otherwise, use provider/model (with defaults from env vars if not provided)
     # If neither embedding_name nor (provider, model) are provided, read from env vars
     # Get provider from argument, env var, or default
-    provider = provider or os.getenv("EMBEDDING_PROVIDER", DEFAULT_PROVIDER)
-    
+    from ...config import get_embedding_config
+    embedding_config = get_embedding_config()
+    provider = provider or embedding_config['provider']
+
     provider_lower = provider.lower()
 
     if provider_lower not in EMBEDDER_CLASSES:
@@ -147,7 +147,7 @@ def get_embedder(
         )
 
     # Get model from argument, env var, or provider-specific default
-    model = model or os.getenv("EMBEDDING_MODEL") or DEFAULT_MODELS.get(provider_lower)
+    model = model or embedding_config['model'] or DEFAULT_MODELS.get(provider_lower)
     if not model:
         raise ValueError(
             f"model is required for provider '{provider}'. "
@@ -217,11 +217,13 @@ def embed(
         List of embedding vectors (each is a list of floats)
 
     Examples:
-        >>> embeddings = embed(
-        ...     ["text1", "text2"],
-        ...     provider="openai",
-        ...     model="text-embedding-3-small"
-        ... )
+        ```python
+        embeddings = embed(
+            ["text1", "text2"],
+            provider="openai",
+            model="text-embedding-3-small"
+        )
+        ```
     """
     emb = get_embedder(provider=provider, model=model, **kwargs)
     return emb(texts)
@@ -244,8 +246,10 @@ def get_embedding_dimension(
         Embedding dimension
 
     Examples:
-        >>> dimension = get_embedding_dimension("openai", "text-embedding-3-small")
-        1536
+        ```python
+        dimension = get_embedding_dimension("openai", "text-embedding-3-small")
+        # Returns: 1536
+        ```
     """
     emb = get_embedder(provider=provider, model=model, **kwargs)
     return emb.embedding_dimension

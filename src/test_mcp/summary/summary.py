@@ -1,12 +1,12 @@
 """Document summarization and gist generation using LLMs."""
 
-import os
 import json
 import logging
 import time
 from typing import Dict, Optional
 
 from ..llm import get_openai_client
+from ..config import get_llm_config
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +56,8 @@ def summarize(
 
     # Get model from parameter or environment
     if model is None:
-        model = os.getenv('SUMMARY_MODEL', 'gemini-2.5-flash-lite')
+        llm_config = get_llm_config()
+        model = llm_config['summary_model']
 
     client = get_openai_client()
 

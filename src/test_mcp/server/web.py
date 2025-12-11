@@ -213,9 +213,10 @@ def _create_gist_field(content: str) -> str:
 
 def setup_web_routes(app, oauth_provider, session_manager: WebSessionManager):
     """Setup web interface routes."""
-    
+    from ..config import get_data_dir
+
     # Get upload directory
-    data_dir = os.getenv("DATA_DIR", "data")
+    data_dir = get_data_dir()
     upload_dir = Path(data_dir) / "uploads"
     upload_dir.mkdir(parents=True, exist_ok=True)
     
@@ -736,7 +737,7 @@ def setup_web_routes(app, oauth_provider, session_manager: WebSessionManager):
             eval_results_html = ""
             eval_questions_html = ""
             try:
-                from ..kb.eval.core import EvalRetrievedDocument, EvalDataset, EvalResult
+                from ..kb.eval.db_models import EvalRetrievedDocument, EvalDataset, EvalResult
                 from ..kb.database import get_db_session
                 from sqlalchemy.orm import joinedload
                 
@@ -1789,9 +1790,11 @@ def setup_web_routes(app, oauth_provider, session_manager: WebSessionManager):
             
             # Read file content
             file_content = await file.read()
-            
+
             # Security: Check file size (100MB default limit, configurable via MAX_UPLOAD_SIZE env var)
-            MAX_UPLOAD_SIZE = int(os.getenv("MAX_UPLOAD_SIZE", "104857600"))  # Default: 100MB
+            from ..config import get_server_config
+            server_config = get_server_config()
+            MAX_UPLOAD_SIZE = server_config['max_upload_size']
             if len(file_content) > MAX_UPLOAD_SIZE:
                 size_mb = MAX_UPLOAD_SIZE / (1024 * 1024)
                 return HTMLResponse(

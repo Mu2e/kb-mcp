@@ -4,8 +4,8 @@ import logging
 from typing import Optional, Dict, Any
 
 from .database import get_db_session
-from .embedding.core import Chunk, EmbeddingConfig, create_embedding_table
-from .core import Document
+from .embedding.db_models import Chunk, EmbeddingConfig, create_embedding_table
+from .db_models import Document
 from sqlalchemy import select, func
 from sqlalchemy.inspection import inspect as sqlalchemy_inspect
 
@@ -46,9 +46,11 @@ def get_statistics(
         }
     
     Example:
-        >>> from test_mcp.kb.statistics import get_statistics
-        >>> stats = get_statistics(source_id="mu2e-docdb")
-        >>> print(stats["data"]["tokens_1000_200"]["openai-small"]["documents"])
+        ```python
+        from test_mcp.kb.statistics import get_statistics
+        stats = get_statistics(source_id="mu2e-docdb")
+        print(stats["data"]["tokens_1000_200"]["openai-small"]["documents"])
+        ```
     """
     
     def _query(sess):

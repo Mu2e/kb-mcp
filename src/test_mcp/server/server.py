@@ -11,7 +11,6 @@ env_path = project_root / ".env"
 load_dotenv(env_path)
 
 import logging
-import os
 from mcp.server.fastmcp import FastMCP
 from mcp.server.auth.settings import AuthSettings, ClientRegistrationOptions
 
@@ -19,11 +18,13 @@ from .oauth import GitHubOAuthProvider
 from . import html_templates
 from . import audit
 from . import admin
+from ..config import get_server_config
 
 # Configure logging
-LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()  # Default for all libraries
-MCP_LOG_LEVEL = os.getenv("MCP_LOG_LEVEL", LOG_LEVEL).upper()  # For our code
-AUDIT_LOG_FILE = os.getenv("AUDIT_LOG_FILE", "")
+_server_config = get_server_config()
+LOG_LEVEL = _server_config['log_level']
+MCP_LOG_LEVEL = _server_config['mcp_log_level']
+AUDIT_LOG_FILE = _server_config['audit_log_file']
 
 logging.basicConfig(
     level=LOG_LEVEL,
@@ -50,10 +51,13 @@ if AUDIT_LOG_FILE:
 logger = logging.getLogger(__name__)
 
 # Configuration
-BASE_URL = os.getenv("BASE_URL", "https://127.0.0.1")
-PORT = int(os.getenv("PORT", "8443"))
-HOST = os.getenv("HOST", "127.0.0.1")
-USE_HTTPS = os.getenv("USE_HTTPS", "true").lower() == "true"
+from ..config import get_server_config
+
+_server_config = get_server_config()
+BASE_URL = _server_config['base_url']
+PORT = _server_config['port']
+HOST = _server_config['host']
+USE_HTTPS = _server_config['use_https']
 
 # Create OAuth provider
 oauth_provider = GitHubOAuthProvider()
@@ -301,7 +305,7 @@ def main():
         return HTMLResponse(html_templates.status_page(active_sessions))
 
     # Setup shared web session manager for admin and web interfaces
-    from .web_auth import WebSessionManager, setup_shared_auth_routes
+    from .web import WebSessionManager, setup_shared_auth_routes
 
     web_session_manager = WebSessionManager(oauth_provider)
 
@@ -313,8 +317,8 @@ def main():
     admin.setup_admin_routes(app, oauth_provider, web_session_manager)
 
     # Setup web routes (OAuth protected web interface for interactive tools)
-    from . import web
-    web.setup_web_routes(app, oauth_provider, web_session_manager)
+    from .web import setup_web_routes
+    setup_web_routes(app, oauth_provider, web_session_manager)
 
     # Setup API routes (OAuth protected API endpoints)
     from . import api

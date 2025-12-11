@@ -2,13 +2,14 @@
 
 import json
 import logging
-import os
 from typing import List, Optional
 
-from .core import EvalDataset, EvalAudit
-from ..base import get
+from .db_models import EvalDataset, EvalAudit
+from ..documents import get
 from ..database import get_db_session
 from ...llm import get_openai_client
+from ...config import get_eval_config
+from ..database import get_db_session
 
 logger = logging.getLogger(__name__)
 
@@ -37,19 +38,19 @@ def add_audit(
         EvalAudit: Created audit record
 
     Example:
-        >>> audit = add_audit(
-        ...     question_id="abc-123",
-        ...     is_valid=True,
-        ...     audit_type="human_review",
-        ...     auditor_name="reviewer1",
-        ...     comments="Good question, clear and answerable"
-        ... )
+        ```python
+        audit = add_audit(
+            question_id="abc-123",
+            is_valid=True,
+            audit_type="human_review",
+            auditor_name="reviewer1",
+            comments="Good question, clear and answerable"
+        )
+        ```
     """
-    own_session = session is None
-    if own_session:
-        session = get_db_session().__enter__()
+    should_close = session is None
 
-    try:
+    with get_db_session(session) as session:
         # Verify question exists
         question = session.query(EvalDataset).filter_by(id=question_id).first()
         if not question:
@@ -65,25 +66,15 @@ def add_audit(
             meta=meta or {},
         )
         session.add(audit)
-        session.commit()
 
         # Refresh and expunge if we own the session (to prevent DetachedInstanceError)
-        if own_session:
+        if should_close:
+            session.flush()
             session.refresh(audit)
-            session.expunge(audit)
+            
 
         logger.info(f"Created {audit_type} audit for question {question_id}: valid={is_valid}")
         return audit
-
-    except Exception as e:
-        if own_session:
-            session.rollback()
-        logger.error(f"Error creating audit: {e}")
-        raise
-
-    finally:
-        if own_session:
-            session.__exit__(None, None, None)
 
 
 def audit_question(
@@ -108,16 +99,16 @@ def audit_question(
         EvalAudit: Created audit record with metadata including model and prompt
 
     Example:
-        >>> audit = audit_question("abc-123")
-        >>> print(audit.is_valid)  # True or False
-        >>> print(audit.comments)  # LLM explanation
-        >>> print(audit.meta['model'])  # Model used
+        ```python
+        audit = audit_question("abc-123")
+        print(audit.is_valid)  # True or False
+        print(audit.comments)  # LLM explanation
+        print(audit.meta['model'])  # Model used
+        ```
     """
-    own_session = session is None
-    if own_session:
-        session = get_db_session().__enter__()
+    should_close = session is None
 
-    try:
+    with get_db_session(session) as session:
         # Get the question
         question = session.query(EvalDataset).filter_by(id=question_id).first()
         if not question:
@@ -130,7 +121,8 @@ def audit_question(
 
         # Get model
         if model is None:
-            model = os.getenv('EVAL_GEN_MODEL', 'gemini-2.5-flash-lite')
+            eval_config = get_eval_config()
+            model = eval_config['gen_model']
 
         client = get_openai_client()
 
@@ -214,25 +206,15 @@ Respond with ONLY a valid JSON object:
             meta=meta,
         )
         session.add(audit)
-        session.commit()
 
         # Refresh and expunge if we own the session (to prevent DetachedInstanceError)
-        if own_session:
+        if should_close:
+            session.flush()
             session.refresh(audit)
-            session.expunge(audit)
+            
 
         logger.info(f"LLM audit for question {question_id}: valid={is_valid} (model: {model})")
         return audit
-
-    except Exception as e:
-        if own_session:
-            session.rollback()
-        logger.error(f"Error auditing question with LLM: {e}")
-        raise
-
-    finally:
-        if own_session:
-            session.__exit__(None, None, None)
 
 
 def get_question_audits(
@@ -253,15 +235,15 @@ def get_question_audits(
         List[EvalAudit]: List of audit records, ordered by creation time (newest first)
 
     Example:
-        >>> audits = get_question_audits("abc-123", is_valid=True)
-        >>> for audit in audits:
-        ...     print(f"{audit.auditor_name} ({audit.audit_type}): {audit.is_valid}")
+        ```python
+        audits = get_question_audits("abc-123", is_valid=True)
+        for audit in audits:
+            print(f"{audit.auditor_name} ({audit.audit_type}): {audit.is_valid}")
+        ```
     """
-    own_session = session is None
-    if own_session:
-        session = get_db_session().__enter__()
+    should_close = session is None
 
-    try:
+    with get_db_session(session) as session:
         query = session.query(EvalAudit).filter_by(question_id=question_id)
 
         if is_valid is not None:
@@ -271,18 +253,14 @@ def get_question_audits(
             query = query.filter_by(audit_type=audit_type)
 
         audits = query.order_by(EvalAudit.created_time.desc()).all()
-        
+
         # Refresh and expunge if we own the session
-        if audits and own_session:
+        if audits and should_close:
             for audit in audits:
                 session.refresh(audit)
-                session.expunge(audit)
-        
-        return audits
+                
 
-    finally:
-        if own_session:
-            session.__exit__(None, None, None)
+        return audits
 
 
 def get_unaudited_questions(
@@ -305,17 +283,15 @@ def get_unaudited_questions(
         List[EvalDataset]: List of unaudited questions
 
     Example:
-        >>> # Get questions from a generation that haven't been LLM audited yet
-        >>> questions = get_unaudited_questions(
-        ...     generation_id="gen-123",
-        ...     audit_type="llm_judge"
-        ... )
+        ```python
+        # Get questions from a generation that haven't been LLM audited yet
+        questions = get_unaudited_questions(
+            generation_id="gen-123",
+            audit_type="llm_judge"
+        )
+        ```
     """
-    own_session = session is None
-    if own_session:
-        session = get_db_session().__enter__()
-
-    try:
+    with get_db_session(session) as session:
         # Start with base query
         query = session.query(EvalDataset)
 
@@ -343,7 +319,3 @@ def get_unaudited_questions(
         questions = query.all()
         logger.info(f"Found {len(questions)} unaudited questions")
         return questions
-
-    finally:
-        if own_session:
-            session.__exit__(None, None, None)

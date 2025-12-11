@@ -1,12 +1,12 @@
 """Image description generation using LLMs."""
 
 import base64
-import os
 import logging
 from typing import List, Dict, Any
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from .image_utils import detect_image_format
+from ..config import get_llm_config, get_parser_config
 
 logger = logging.getLogger(__name__)
 
@@ -102,22 +102,24 @@ def generate_image_descriptions(
     
     try:
         from openai import OpenAI
-        
-        api_key = os.getenv('OPENAI_API_KEY')
+
+        llm_config = get_llm_config()
+        parser_config = get_parser_config()
+        api_key = llm_config['openai_api_key']
         if not api_key:
             logger.warning("OPENAI_API_KEY not set, skipping image descriptions")
             return image_dicts
-        
-        # Get model name and workers from environment variables
-        model = os.getenv('PARSE_IMAGE_DESCRIPTION_MODEL', 'gpt-4o-mini')
-        max_workers = int(os.getenv('PARSE_IMAGE_DESCRIPTION_NUMWORKERS', '6'))
-        
+
+        # Get model name and workers from configuration
+        model = parser_config['image_description_model']
+        max_workers = parser_config['image_description_num_workers']
+
         # Create OpenAI client with optional base URL
         client_kwargs = {'api_key': api_key}
-        base_url = os.getenv('OPENAI_BASE_URL')
+        base_url = llm_config['openai_base_url']
         if base_url:
             client_kwargs['base_url'] = base_url
-        
+
         client = OpenAI(**client_kwargs)
         
         # Prepare images for description generation

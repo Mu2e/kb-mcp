@@ -4,8 +4,8 @@ import logging
 from typing import Dict, Any, Optional
 
 from .database import get_db_session
-from .core import Document
-from .embedding.core import Chunk
+from .db_models import Document
+from .embedding.db_models import Chunk
 
 logger = logging.getLogger(__name__)
 
@@ -51,10 +51,12 @@ def chunk_and_embed_all(
         - image_errors: Number of image documents that failed (if include_images=True)
 
     Example:
-        >>> from test_mcp.kb.tools import chunk_and_embed_all
-        >>> result = chunk_and_embed_all("inspire-hep")
-        >>> print(f"Processed {result['processed']} documents, chunked {result['chunked']}")
-        >>> print(f"Processed {result['image_processed']} images, chunked {result['image_chunked']}")
+        ```python
+        from test_mcp.kb.tools import chunk_and_embed_all
+        result = chunk_and_embed_all("inspire-hep")
+        print(f"Processed {result['processed']} documents, chunked {result['chunked']}")
+        print(f"Processed {result['image_processed']} images, chunked {result['image_chunked']}")
+        ```
     """
     if not EMBEDDING_AVAILABLE:
         raise ImportError(
@@ -182,9 +184,11 @@ def image_chunk_and_embed_all(
         - errors: Number of image documents that failed
 
     Example:
-        >>> from test_mcp.kb.tools import image_chunk_and_embed_all
-        >>> result = image_chunk_and_embed_all("inspire-hep")
-        >>> print(f"Processed {result['processed']} images, chunked {result['chunked']}")
+        ```python
+        from test_mcp.kb.tools import image_chunk_and_embed_all
+        result = image_chunk_and_embed_all("inspire-hep")
+        print(f"Processed {result['processed']} images, chunked {result['chunked']}")
+        ```
     """
     if not EMBEDDING_AVAILABLE:
         raise ImportError(
@@ -193,11 +197,7 @@ def image_chunk_and_embed_all(
 
     logger.info(f"Starting image_chunk_and_embed_all for source_id: {source_id}")
 
-    own_session = session is None
-    if own_session:
-        session = get_db_session().__enter__()
-
-    try:
+    with get_db_session(session) as session:
         # Find image documents without chunks using LEFT JOIN
         query = session.query(Document).filter(
             Document.source_id == source_id,
@@ -263,10 +263,6 @@ def image_chunk_and_embed_all(
 
         return result
 
-    finally:
-        if own_session:
-            session.close()
-
 
 def summarize_all(
     source_id: str,
@@ -301,13 +297,15 @@ def summarize_all(
         - errors: Number of documents that failed
 
     Example:
-        >>> from test_mcp.kb.tools import summarize_all
-        >>> # Generate summaries and create chunks (but don't embed yet)
-        >>> result = summarize_all("inspire-hep", create_summary_chunk=True)
-        >>> print(f"Summarized {result['summarized']} documents, created {result['chunked']} chunks")
+        ```python
+        from test_mcp.kb.tools import summarize_all
+        # Generate summaries and create chunks (but don't embed yet)
+        result = summarize_all("inspire-hep", create_summary_chunk=True)
+        print(f"Summarized {result['summarized']} documents, created {result['chunked']} chunks")
 
-        >>> # Generate summaries and create+embed chunks
-        >>> result = summarize_all("inspire-hep", create_summary_chunk=True, embed_summary_chunk=True)
+        # Generate summaries and create+embed chunks
+        result = summarize_all("inspire-hep", create_summary_chunk=True, embed_summary_chunk=True)
+        ```
     """
     # Summary module availability is checked by doc.generate_summary()
 

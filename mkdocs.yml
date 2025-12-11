@@ -1,0 +1,61 @@
+site_name: test-mcp Documentation
+site_description: Knowledge base system with document parsing, chunking, embedding, and semantic search
+
+theme:
+  name: material
+  palette:
+    - scheme: default
+      primary: indigo
+      accent: indigo
+  features:
+    - navigation.sections
+    - navigation.top
+    - search.suggest
+    - content.code.copy
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          options:
+            docstring_style: google
+            show_source: false
+            show_root_heading: true
+            heading_level: 3
+            members_order: source
+            show_signature_annotations: true
+
+nav:
+  - Home: index.md
+  - Guides:
+    - Installation: guides/installation.md
+    - MCP Setup: guides/mcp-setup.md
+    - MCP Clients: guides/mcp-clients.md
+    - Web Interface: guides/web-interface.md
+    - CLI Usage: guides/cli.md
+    - Evaluation: guides/evaluation.md
+    - Database Schema: guides/database.md
+    - Deployment: guides/deployment.md
+  - API Reference:
+    - Configuration: reference/config.md
+    - KB/Knowledge Base: reference/kb.md
+    - KB Server: reference/server.md
+    - KB Importer: reference/importer.md
+    - Parser: reference/parser.md
+    - Summary: reference/summary.md
+    - Eval Utils: reference/eval-utils.md
+
+
+markdown_extensions:
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.snippets:
+      base_path: ["."]  # Allow access to project root
+  - admonition
+  - pymdownx.details

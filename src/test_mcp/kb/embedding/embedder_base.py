@@ -6,7 +6,7 @@ from abc import ABC, abstractmethod
 from typing import List, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from .core import Chunk
+    from .db_models import Chunk
 
 logger = logging.getLogger(__name__)
 
@@ -83,7 +83,8 @@ class BaseEmbedder(ABC):
             ValueError: If number of embeddings doesn't match number of chunks
         """
         from ..database import get_db_session
-        from .core import EmbeddingConfig, create_embedding_table
+        from ..database import get_db_session
+        from .db_models import EmbeddingConfig, create_embedding_table
         
         if not chunks:
             return []
@@ -120,13 +121,11 @@ class BaseEmbedder(ABC):
             short_name = self._generate_short_name()
         
         # Use provided session or create a new one
-        own_session = session is None
-        if own_session:
-            session = get_db_session().__enter__()
-        
-        try:
+        should_close = session is None
+
+        with get_db_session(session) as session:
             # Ensure base tables exist (embedding_configs, chunks)
-            from ..core import Base
+            from ..db_models import Base
             Base.metadata.create_all(bind=session.bind, checkfirst=True)
             
             # Get or create EmbeddingConfig (each config corresponds to a table)
@@ -246,22 +245,14 @@ class BaseEmbedder(ABC):
                     )
                 
                 session.execute(stmt)
-                if own_session:
+                if should_close:
                     session.commit()
                 else:
                     session.flush()
             
             logger.info(f"Stored {len(embedding_rows)} embeddings in {config.get_table_name()}")
-            
+
             return embeddings
-        except Exception as e:
-            if own_session:
-                session.rollback()
-            logger.error(f"Error storing embeddings: {e}")
-            raise
-        finally:
-            if own_session:
-                session.close()
 
     def _generate_short_name(self) -> str:
         """Generate default short name from provider and model."""
@@ -278,7 +269,7 @@ class BaseEmbedder(ABC):
         Returns:
             Table name (e.g., "embeddings_openai-small")
         """
-        from .core import sanitize_table_name
+        from .db_models import sanitize_table_name
         
         if short_name is None:
             short_name = self._generate_short_name()

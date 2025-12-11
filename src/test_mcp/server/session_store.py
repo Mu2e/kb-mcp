@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import time
 from pathlib import Path
 from typing import Any, Dict, Optional
+
+from ..config import get_web_session_config, get_data_dir, get_api_keys_file
 
 logger = logging.getLogger(__name__)
 
@@ -22,11 +23,11 @@ class SessionStore:
             collection_name: Firestore collection name or base file name
         """
         self.collection_name = collection_name
-        self.use_firestore = os.getenv("SESSION_STORE_FIRESTORE", "false").lower() == "true"
+        self.use_firestore = get_web_session_config()['use_firestore']
 
         # File storage setup - path determined from collection name
         # Use DATA_DIR env var if set (e.g., /data for Cloud Storage mount), otherwise "data/"
-        data_dir = os.getenv("DATA_DIR", "data")
+        data_dir = get_data_dir()
         self.persistence_file = Path(data_dir) / f"{collection_name}.json"
         self.persistence_file.parent.mkdir(parents=True, exist_ok=True)
 
@@ -270,8 +271,7 @@ class SessionStore:
             if isinstance(token_users, dict):
                 # Load current API keys to check which ones are still valid
                 try:
-                    data_dir = os.getenv("DATA_DIR", "data")
-                    api_keys_file = Path(data_dir) / "api_keys.json"
+                    api_keys_file = Path(get_api_keys_file())
                     if api_keys_file.exists():
                         with open(api_keys_file) as f:
                             valid_api_keys = set(json.load(f).keys())

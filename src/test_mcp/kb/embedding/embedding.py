@@ -2,7 +2,8 @@
 
 import logging
 from typing import List, Optional, Dict, Any, Union
-from .core import Chunk, EmbeddingConfig
+from .db_models import Chunk, EmbeddingConfig
+from ..database import get_db_session
 from ..database import get_db_session
 from sqlalchemy import select, delete, func, inspect as sqlalchemy_inspect
 
@@ -10,7 +11,7 @@ from sqlalchemy import select, delete, func, inspect as sqlalchemy_inspect
 # Helper functions
 def _get_embedding_table(sess, embedding_name: Optional[str] = None, embedder=None):
     """Get EmbeddingConfig and table for an embedding_name, resolving default if needed."""
-    from .core import create_embedding_table
+    from .db_models import create_embedding_table
     from .utils import get_embedding_name
     
     # Resolve embedding_name if not provided
@@ -80,20 +81,22 @@ def embed_chunk(
         ValueError: If chunk doesn't have an ID or isn't saved to database
 
     Example:
-        >>> from test_mcp.kb.embedding import embed_chunk
-        >>> from test_mcp.kb import Chunk
-        >>>
-        >>> chunk = Chunk.from_dict({...})
-        >>> # Save chunk first
-        >>> with get_db_session() as session:
-        ...     session.add(chunk)
-        ...     session.commit()
-        ...     # By embedding name
-        ...     embedding = embed_chunk(chunk, embedding_name="openai-small", session=session)
-        ...     # Or by provider/model
-        ...     embedding = embed_chunk(chunk, provider="openai", model="text-embedding-3-small", session=session)
-        ...     # Or use defaults from env vars
-        ...     embedding = embed_chunk(chunk, session=session)
+        ```python
+        from test_mcp.kb.embedding import embed_chunk
+        from test_mcp.kb import Chunk
+
+        chunk = Chunk.from_dict({...})
+        # Save chunk first
+        with get_db_session() as session:
+            session.add(chunk)
+            session.commit()
+            # By embedding name
+            embedding = embed_chunk(chunk, embedding_name="openai-small", session=session)
+            # Or by provider/model
+            embedding = embed_chunk(chunk, provider="openai", model="text-embedding-3-small", session=session)
+            # Or use defaults from env vars
+            embedding = embed_chunk(chunk, session=session)
+        ```
     """
     from .utils import get_embedder
 
@@ -153,14 +156,16 @@ def embed_chunks(
         ValueError: If chunks don't have IDs or aren't saved to database
 
     Example:
-        >>> from test_mcp.kb.embedding import embed_chunks
-        >>> chunks = get_chunks(document_id="abc-123")
-        >>> # By embedding name
-        >>> embed_chunks(chunks, embedding_name="openai-small", batch_size=100)
-        >>> # Or by provider/model
-        >>> embed_chunks(chunks, provider="openai", model="text-embedding-3-small", batch_size=100)
-        >>> # Or use defaults from env vars
-        >>> embed_chunks(chunks, batch_size=100)
+        ```python
+        from test_mcp.kb.embedding import embed_chunks
+        chunks = get_chunks(document_id="abc-123")
+        # By embedding name
+        embed_chunks(chunks, embedding_name="openai-small", batch_size=100)
+        # Or by provider/model
+        embed_chunks(chunks, provider="openai", model="text-embedding-3-small", batch_size=100)
+        # Or use defaults from env vars
+        embed_chunks(chunks, batch_size=100)
+        ```
     """
     from .utils import get_embedder
 
@@ -234,26 +239,26 @@ def chunk_and_embed(
         ValueError: If document has no text content or isn't saved to database
 
     Example:
-        >>> from test_mcp.kb import Document
-        >>> from test_mcp.kb.embedding import chunk_and_embed
-        >>>
-        >>> doc = Document.from_dict({...})
-        >>> # Save document first
-        >>> with get_db_session() as session:
-        ...     session.add(doc)
-        ...     session.commit()
-        ...     # Chunk and embed (creates its own session if not provided)
-        ...     chunks = chunk_and_embed(doc, embedding_name="openai-small")
+        ```python
+        from test_mcp.kb import Document
+        from test_mcp.kb.embedding import chunk_and_embed
+
+        doc = Document.from_dict({...})
+        # Save document first
+        with get_db_session() as session:
+            session.add(doc)
+            session.commit()
+            # Chunk and embed (creates its own session if not provided)
+            chunks = chunk_and_embed(doc, embedding_name="openai-small")
+        ```
     """
     import time
     from .chunking import chunk_document
 
     # Create session if not provided
-    own_session = session is None
-    if own_session:
-        session = get_db_session().__enter__()
+    should_close = session is None
 
-    try:
+    with get_db_session(session) as session:
         # Measure chunking time
         chunk_start = time.time()
         chunks = chunk_document(
@@ -286,7 +291,7 @@ def chunk_and_embed(
             num_embeddings = len(chunks)
 
         # Create log entry for this operation
-        from .core import ChunkEmbeddingLog
+        from .db_models import ChunkEmbeddingLog
         import socket
 
         total_time = chunk_time + embed_time
@@ -309,21 +314,14 @@ def chunk_and_embed(
         session.add(log_entry)
 
         # Commit if we created the session
-        if own_session:
+        if should_close:
             session.commit()
             # Refresh and expunge chunks so they can be used after session closes
             for chunk in chunks:
                 session.refresh(chunk)
-                session.expunge(chunk)
+                
 
         return chunks
-    except Exception as e:
-        if own_session:
-            session.rollback()
-        raise
-    finally:
-        if own_session:
-            session.close()
 
 
 def get_embedding_names(session=None) -> List[Dict[str, Any]]:
@@ -346,7 +344,7 @@ def get_embedding_names(session=None) -> List[Dict[str, Any]]:
         - created_time: str - ISO format timestamp
         - meta: dict - Additional metadata
     """
-    from .core import create_embedding_table
+    from .db_models import create_embedding_table
 
     def _query(sess):
         # Get all embedding configs
@@ -405,11 +403,13 @@ def drop_embedding_table(
         ValueError: If embedding_name is not found in EmbeddingConfig
 
     Example:
-        >>> from test_mcp.kb.embedding import drop_embedding_table
-        >>> result = drop_embedding_table("openai-small")
-        >>> print(f"Dropped {result['count']} embeddings from {result['table_name']}")
+        ```python
+        from test_mcp.kb.embedding import drop_embedding_table
+        result = drop_embedding_table("openai-small")
+        print(f"Dropped {result['count']} embeddings from {result['table_name']}")
+        ```
     """
-    from .core import get_embedding_table_name
+    from .db_models import get_embedding_table_name
     import logging
 
     logger = logging.getLogger(__name__)
@@ -466,13 +466,15 @@ def drop_embedding(
         Number of embeddings deleted
 
     Example:
-        >>> from test_mcp.kb.embedding import drop_embedding
-        >>> # Drop from specific embedding table
-        >>> count = drop_embedding("chunk-123", embedding_name="openai-small")
-        >>> print(f"Deleted {count} embedding(s)")
-        >>> # Drop from all embedding tables
-        >>> count = drop_embedding("chunk-123")
-        >>> print(f"Deleted {count} embedding(s) from all tables")
+        ```python
+        from test_mcp.kb.embedding import drop_embedding
+        # Drop from specific embedding table
+        count = drop_embedding("chunk-123", embedding_name="openai-small")
+        print(f"Deleted {count} embedding(s)")
+        # Drop from all embedding tables
+        count = drop_embedding("chunk-123")
+        print(f"Deleted {count} embedding(s) from all tables")
+        ```
     """
     with get_db_session() as sess:
         total_deleted = 0
@@ -491,7 +493,7 @@ def drop_embedding(
             # Delete from all embedding tables
             configs = sess.query(EmbeddingConfig).all()
             for config in configs:
-                from .core import create_embedding_table
+                from .db_models import create_embedding_table
                 embedding_table = create_embedding_table(config.short_name, config.dimension)
                 try:
                     if _table_exists(inspector, embedding_table.name):
@@ -527,15 +529,17 @@ def get_embeddings(
         Empty dict if no embeddings found
 
     Example:
-        >>> from test_mcp.kb.embedding import get_embeddings
-        >>> # Get specific embedding
-        >>> result = get_embeddings("chunk-123", embedding_name="openai-small")
-        >>> # Returns: {"openai-small": {"id": "...", "embedding": [0.1, 0.2, ...]}}
-        >>> # Get all embeddings
-        >>> all_embeddings = get_embeddings("chunk-123")
-        >>> # Returns: {"openai-small": {"id": "...", "embedding": [...]}, "st-minilm": {...}}
+        ```python
+        from test_mcp.kb.embedding import get_embeddings
+        # Get specific embedding
+        result = get_embeddings("chunk-123", embedding_name="openai-small")
+        # Returns: {"openai-small": {"id": "...", "embedding": [0.1, 0.2, ...]}}
+        # Get all embeddings
+        all_embeddings = get_embeddings("chunk-123")
+        # Returns: {"openai-small": {"id": "...", "embedding": [...]}, "st-minilm": {...}}
+        ```
     """
-    from .core import create_embedding_table
+    from .db_models import create_embedding_table
 
     with get_db_session() as sess:
         inspector = sqlalchemy_inspect(sess.bind)
@@ -594,11 +598,13 @@ def get_embedding_vector(
         The embedding vector (List[float]) or None if not found
 
     Example:
-        >>> from test_mcp.kb.embedding import get_embedding_vector
-        >>> embedding = get_embedding_vector("chunk-123", embedding_name="openai-small")
-        >>> # Returns: [0.1, 0.2, ...] or None
+        ```python
+        from test_mcp.kb.embedding import get_embedding_vector
+        embedding = get_embedding_vector("chunk-123", embedding_name="openai-small")
+        # Returns: [0.1, 0.2, ...] or None
+        ```
     """
-    from .core import create_embedding_table
+    from .db_models import create_embedding_table
 
     with get_db_session() as sess:
         inspector = sqlalchemy_inspect(sess.bind)
@@ -644,9 +650,11 @@ def optimize_embedding_index(embedding_name: str, session=None) -> Dict[str, Any
         }
         
     Example:
-        >>> from test_mcp.kb.embedding import optimize_embedding_index
-        >>> result = optimize_embedding_index("openai-small")
-        >>> print(result["message"])
+        ```python
+        from test_mcp.kb.embedding import optimize_embedding_index
+        result = optimize_embedding_index("openai-small")
+        print(result["message"])
+        ```
     """
     from sqlalchemy import text
     
@@ -788,8 +796,10 @@ def vacuum_analyze_embedding_table(embedding_name: str, session=None) -> Dict[st
         }
         
     Example:
-        >>> from test_mcp.kb.embedding import vacuum_analyze_embedding_table
-        >>> result = vacuum_analyze_embedding_table("openai-small")
+        ```python
+        from test_mcp.kb.embedding import vacuum_analyze_embedding_table
+        result = vacuum_analyze_embedding_table("openai-small")
+        ```
     """
     from sqlalchemy import text
     

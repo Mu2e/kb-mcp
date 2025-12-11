@@ -12,25 +12,28 @@ from .image_descriptions import generate_image_descriptions
 
 def cmd_image(args):
     """Generate LLM description for an image file."""
+    from ..config import get_llm_config, get_parser_config
+    import os
+
     file_path = args.file
-    
+
     if not file_path.exists():
         print(f"Error: File not found: {file_path}", file=sys.stderr)
         sys.exit(1)
-    
+
     # Check for required environment variables
-    import os
-    api_key = os.getenv('OPENAI_API_KEY')
+    llm_config = get_llm_config()
+    api_key = llm_config['openai_api_key']
     if not api_key:
         print("Error: OPENAI_API_KEY environment variable not set", file=sys.stderr)
         print("  Set it with: export OPENAI_API_KEY=sk-...", file=sys.stderr)
         sys.exit(1)
-    
+
     try:
         # Load image file as binary
         with open(file_path, 'rb') as f:
             image_binary = f.read()
-        
+
         # Create fake image_dict
         image_dict = {
             'doc_type': 'image',
@@ -40,10 +43,11 @@ def cmd_image(args):
                 'filename': file_path.name,
             }
         }
-        
+
         # Generate description with empty text context
         print(f"Generating description for: {file_path.name}")
-        model = args.model or os.getenv('PARSE_IMAGE_DESCRIPTION_MODEL', 'gpt-4o-mini')
+        parser_config = get_parser_config()
+        model = args.model or parser_config['image_description_model']
         if args.model:
             os.environ['PARSE_IMAGE_DESCRIPTION_MODEL'] = model
         

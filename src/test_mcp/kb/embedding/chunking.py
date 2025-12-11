@@ -2,7 +2,7 @@
 
 import logging
 from typing import List, Optional, Dict, Any
-from .core import Chunk, Document
+from .db_models import Chunk, Document
 
 logger = logging.getLogger(__name__)
 
@@ -34,24 +34,27 @@ def chunk_document(
         ValueError: If document has no text content or if strategy="summary" and document has no summary
 
     Example:
-        >>> from test_mcp.kb import Document
-        >>> from test_mcp.kb.embedding import chunk_document
-        >>>
-        >>> doc = Document.from_dict({
-        ...     "source_id": "test",
-        ...     "doc_id": "123",
-        ...     "text": "Long document text..."
-        ... })
-        >>> # Save document first
-        >>> with get_db_session() as session:
-        ...     session.add(doc)
-        ...     session.commit()
-        ...     chunks = chunk_document(doc, session=session)
+        ```python
+        from test_mcp.kb import Document
+        from test_mcp.kb.embedding import chunk_document
+
+        doc = Document.from_dict({
+            "source_id": "test",
+            "doc_id": "123",
+            "text": "Long document text..."
+        })
+        # Save document first
+        with get_db_session() as session:
+            session.add(doc)
+            session.commit()
+            chunks = chunk_document(doc, session=session)
+        ```
     """
     import os
     from ...chunking import chunk
     from ..database import get_db_session
-    from .core import ChunkStrategy
+    from ..database import get_db_session
+    from .db_models import ChunkStrategy
 
     if not document.text:
         raise ValueError("Document must have text content to chunk")
@@ -61,7 +64,9 @@ def chunk_document(
 
     # Get strategy from env var if not provided
     if chunk_strategy is None:
-        chunk_strategy = os.getenv("CHUNK_STRATEGY", "tokens")
+        from ...config import get_embedding_config
+        embedding_config = get_embedding_config()
+        chunk_strategy = embedding_config['chunk_strategy']
 
     # Extract embedding context flags from config (default to True)
     if config is None:
@@ -104,6 +109,7 @@ def chunk_document(
 
         # Prepend parent's gist if enabled and available
         if prepend_gist and document.parent_id:
+            from ..database import get_db_session
             from ..database import get_db_session
             # Use existing session if available, otherwise create temporary one
             temp_session = session if session else get_db_session().__enter__()
@@ -152,12 +158,9 @@ def chunk_document(
 
 
     # Determine if we need to create a session
-    own_session = session is None
+    should_close = session is None
 
-    if own_session:
-        session = get_db_session().__enter__()
-
-    try:
+    with get_db_session(session) as session:
         # Get all strategy names from chunks
         strategy_names = {chunk_dict["chunk_strategy"] for chunk_dict in chunk_dicts}
 
@@ -251,22 +254,14 @@ def chunk_document(
         _save_chunks_to_session(chunks, session, commit=False)
 
         # Commit if we own the session
-        if own_session:
+        if should_close:
             session.commit()
             # Refresh and expunge chunks so they can be used after session closes
             for chunk in chunks:
                 session.refresh(chunk)
-                session.expunge(chunk)
+                
 
         return chunks
-    except Exception:
-        if own_session:
-            session.rollback()
-        raise
-    finally:
-        # Close session if we created it
-        if own_session and session:
-            session.close()
 
 
 def _save_chunks_to_session(chunks: List[Chunk], session, commit: bool = False) -> None:
@@ -284,7 +279,7 @@ def _save_chunks_to_session(chunks: List[Chunk], session, commit: bool = False) 
 
     # Detach chunks from session so they can be used outside
     #for chunk_obj in chunks:
-    #    session.expunge(chunk_obj)
+    #    
 
 
 def get_chunk_strategies(document_id: Optional[str] = None, session=None) -> List[Dict[str, Any]]:
@@ -301,7 +296,8 @@ def get_chunk_strategies(document_id: Optional[str] = None, session=None) -> Lis
         - count: int - Number of chunks using this strategy (for the document if document_id provided)
         - created_time: str - ISO format timestamp
     """
-    from .core import Chunk, ChunkStrategy
+    from .db_models import Chunk, ChunkStrategy
+    from ..database import get_db_session
     from ..database import get_db_session
     from sqlalchemy import func
 
@@ -365,20 +361,23 @@ def get_chunks(
         If session is None: List of chunk dictionaries (from Chunk.to_dict())
 
     Examples:
-        >>> # Get all chunks for a document
-        >>> chunks = get_chunks(document_id="abc-123")
+        ```python
+        # Get all chunks for a document
+        chunks = get_chunks(document_id="abc-123")
 
-        >>> # Get all chunks across all documents
-        >>> all_chunks = get_chunks()
+        # Get all chunks across all documents
+        all_chunks = get_chunks()
 
-        >>> # Get first 100 chunks with pagination
-        >>> page1 = get_chunks(limit=100, offset=0)
-        >>> page2 = get_chunks(limit=100, offset=100)
+        # Get first 100 chunks with pagination
+        page1 = get_chunks(limit=100, offset=0)
+        page2 = get_chunks(limit=100, offset=100)
 
-        >>> # Get chunks with specific strategy across all documents
-        >>> token_chunks = get_chunks(chunk_strategy="tokens_1000_200")
+        # Get chunks with specific strategy across all documents
+        token_chunks = get_chunks(chunk_strategy="tokens_1000_200")
+        ```
     """
-    from .core import Chunk
+    from .db_models import Chunk
+    from ..database import get_db_session
     from ..database import get_db_session
 
     def _query(sess, return_dicts=False):
@@ -443,15 +442,18 @@ def drop_chunks(
         Number of chunks deleted
 
     Example:
-        >>> # Drop all chunks for a document
-        >>> count = drop_chunks(document_id="abc-123")
-        >>> print(f"Deleted {count} chunks")
+        ```python
+        # Drop all chunks for a document
+        count = drop_chunks(document_id="abc-123")
+        print(f"Deleted {count} chunks")
 
-        >>> # Drop only chunks with specific strategy
-        >>> count = drop_chunks(document_id="abc-123", chunk_strategy="tokens_1000_200")
-        >>> print(f"Deleted {count} chunks with strategy tokens_1000_200")
+        # Drop only chunks with specific strategy
+        count = drop_chunks(document_id="abc-123", chunk_strategy="tokens_1000_200")
+        print(f"Deleted {count} chunks with strategy tokens_1000_200")
+        ```
     """
-    from .core import Chunk
+    from .db_models import Chunk
+    from ..database import get_db_session
     from ..database import get_db_session
 
     def _delete(sess):

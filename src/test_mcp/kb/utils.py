@@ -4,8 +4,8 @@ import hashlib
 import logging
 from typing import Dict, Any, List, Tuple, Optional
 from .database import get_db_session
-from .core import Document, Source
-from .base import get
+from .db_models import Document, Source
+from .documents import get
 
 logger = logging.getLogger(__name__)
 
@@ -216,15 +216,13 @@ def get_metadata_keys(session=None, limit: int = 1000) -> List[str]:
         List of unique metadata keys, sorted alphabetically.
     
     Examples:
-        >>> keys = get_metadata_keys()
-        >>> print(keys)
-        ['author', 'category', 'date', 'title']
+        ```python
+        keys = get_metadata_keys()
+        print(keys)
+        # Returns: ['author', 'category', 'date', 'title']
+        ```
     """
-    own_session = session is None
-    if own_session:
-        session = get_db_session().__enter__()
-    
-    try:
+    with get_db_session(session) as session:
         dialect_name = session.bind.dialect.name if session.bind else None
         all_keys = set()
         
@@ -251,9 +249,6 @@ def get_metadata_keys(session=None, limit: int = 1000) -> List[str]:
         sorted_keys = sorted(list(all_keys))
         return sorted_keys
     
-    finally:
-        if own_session:
-            session.close()
 
 
 def deduplicate(

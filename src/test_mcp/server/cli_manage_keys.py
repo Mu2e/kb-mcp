@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
 """CLI tool for managing MCP API keys (server package)."""
 
-import os
 import sys
 from pathlib import Path
 
 from .api_keys import ApiKeyManager
+from ..config import get_data_dir, get_api_keys_file
 
 
 def main():
     """Main CLI entry point."""
     # Get API keys file from environment or use default
     # Use DATA_DIR env var if set (e.g., /data for Cloud Storage mount), otherwise "data/"
-    data_dir = os.getenv("DATA_DIR", "data")
-    api_keys_file = os.getenv("API_KEYS_FILE", f"{data_dir}/api_keys.json")
+    api_keys_file = get_api_keys_file()
     manager = ApiKeyManager(api_keys_file)
 
     if len(sys.argv) < 2:

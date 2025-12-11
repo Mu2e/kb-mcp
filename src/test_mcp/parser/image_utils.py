@@ -92,7 +92,7 @@ def detect_image_format(image_base64: str) -> str:
         return 'jpeg'  # Default fallback
 
 
-def show_image(image_data: Union[bytes, dict, 'Document']) -> None:
+def display_image(image_data: Union[bytes, dict, 'Document']) -> None:
     """Display an image from bytes, dict, or Document object.
     
     Works in both scripts (opens default image viewer) and Jupyter notebooks (displays inline).
@@ -103,22 +103,27 @@ def show_image(image_data: Union[bytes, dict, 'Document']) -> None:
             - dict: Image dictionary with 'binary' field (from parser)
             - Document: Document object with binary field (from kb)
     
+    Returns:
+        PIL Image object
+    
     Raises:
         ImportError: If PIL/Pillow is not installed
         ValueError: If image_data doesn't contain binary data
     
     Example:
+        ```
         # From bytes
-        show_image(image_bytes)
+        display_image(image_bytes)
         
         # From parser dict
         doc_dicts = parse("document.pdf", {...})
-        show_image(doc_dicts[1])  # Show first image
+        display_image(doc_dicts[1])  # Show first image
         
         # From Document object
         from test_mcp.kb import get
         doc = get("image-doc-id")
-        show_image(doc)
+        ```
+        display_image(doc)
     """
     if not HAS_PIL:
         raise ImportError("PIL/Pillow is required to display images. Install with: pip install pillow")
@@ -144,10 +149,13 @@ def show_image(image_data: Union[bytes, dict, 'Document']) -> None:
         pass
     return img
     # Try to use IPython display if available (Jupyter)
-    #try:
-    #    from IPython.display import display
-    #    display(img)
-    #except ImportError:
-    #    # Not in Jupyter, use PIL's show() method (opens default viewer)
-    #    img.show()
+    try:
+        from IPython.display import display
+        display(img)
+    except ImportError:
+        # Not in Jupyter, use PIL's show() method (opens default viewer)
+        try:
+            img.show()
+        except Exception:
+            pass
 

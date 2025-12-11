@@ -6,17 +6,18 @@ from pathlib import Path
 from starlette.responses import JSONResponse, Response
 from starlette.requests import Request
 
-from .web_auth import WebSessionManager
-from .web import require_auth_api, document_to_dict
+from .web import WebSessionManager, require_auth_api
+from .web.routes.documents import document_to_dict
 
 logger = logging.getLogger(__name__)
 
 
 def setup_api_routes(app, session_manager: WebSessionManager):
     """Setup API routes for knowledge base operations."""
-    
+    from ..config import get_data_dir
+
     # Get upload directory (needed for serving uploaded files)
-    data_dir = os.getenv("DATA_DIR", "data")
+    data_dir = get_data_dir()
     upload_dir = Path(data_dir) / "uploads"
     upload_dir.mkdir(parents=True, exist_ok=True)
 
@@ -82,20 +83,28 @@ def setup_api_routes(app, session_manager: WebSessionManager):
         try:
             # Query documents from knowledge base
             from ..kb import get, get_count, get_options
+            from ..kb.database import get_db_session
 
-            # Get documents with filters and pagination
-            documents_result = get(filter_dict=filter_dict if filter_dict else None, limit=limit, offset=offset)
-            if documents_result is None:
-                documents = []
-            elif isinstance(documents_result, list):
-                documents = documents_result
-            else:
-                documents = [documents_result]
+            # Get documents with filters and pagination within a session
+            # This ensures all attributes are loaded before session closes
+            with get_db_session() as session:
+                # Get documents with filters and pagination
+                documents_result = get(filter_dict=filter_dict if filter_dict else None, limit=limit, offset=offset, session=session)
+                if documents_result is None:
+                    documents = []
+                elif isinstance(documents_result, list):
+                    documents = documents_result
+                else:
+                    documents = [documents_result]
 
-            # Get total count
+                # Convert documents to dictionaries while still in session
+                # This ensures all attributes are accessible
+                documents_data = [document_to_dict(doc, include_text=include_text) for doc in documents]
+
+            # Get total count (outside session, doesn't need objects)
             total_count = get_count(filter_dict=filter_dict if filter_dict else None)
 
-            # Get base filter options
+            # Get base filter options (outside session)
             base_options = get_options()
 
             # Calculate filtered counts for options based on current filters
@@ -136,9 +145,6 @@ def setup_api_routes(app, session_manager: WebSessionManager):
                 "source_options": filtered_source_options,
                 "doc_type_options": filtered_doc_type_options,
             }
-
-            # Convert documents to dictionaries
-            documents_data = [document_to_dict(doc, include_text=include_text) for doc in documents]
 
             return JSONResponse({
                 "documents": documents_data,
@@ -482,7 +488,8 @@ def setup_api_routes(app, session_manager: WebSessionManager):
 
         try:
             # Get local directory from DATA_DIR
-            data_dir = os.getenv("DATA_DIR", "data")
+            from ..config import get_data_dir
+            data_dir = get_data_dir()
             local_dir = Path(data_dir) / "local"
             file_path = local_dir / filename
             

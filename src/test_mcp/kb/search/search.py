@@ -6,7 +6,7 @@ from typing import Optional, Dict, Any
 
 from ..database import get_db_session
 from ..embedding.utils import get_embedder
-from .core import SearchLog
+from .db_models import SearchLog
 from .similarity import get_closest
 
 logger = logging.getLogger(__name__)
@@ -51,56 +51,58 @@ def search(
                  as metadata filters. Example: author="John" filters meta.author == "John"
     
     Examples:
-        >>> # Basic search
-        >>> response = search("track reconstruction", embedding_name="openai-small")
+        ```python
+        # Basic search
+        response = search("track reconstruction", embedding_name="openai-small")
         
-        >>> # Simple metadata filter (backward compatible)
-        >>> response = search("track reconstruction", author="John Doe")
+        # Simple metadata filter (backward compatible)
+        response = search("track reconstruction", author="John Doe")
         
-        >>> # Elasticsearch-style term query (exact match)
-        >>> response = search("track reconstruction", filter={"term": {"author": "John Doe"}})
+        # Elasticsearch-style term query (exact match)
+        response = search("track reconstruction", filter={"term": {"author": "John Doe"}})
         
-        >>> # Elasticsearch-style terms query (OR - match any)
-        >>> response = search("track reconstruction", filter={"terms": {"author": ["John Doe", "Jane Smith"]}})
+        # Elasticsearch-style terms query (OR - match any)
+        response = search("track reconstruction", filter={"terms": {"author": ["John Doe", "Jane Smith"]}})
         
-        >>> # Elasticsearch-style range query (date range)
-        >>> response = search(
-        ...     "track reconstruction",
-        ...     filter={"range": {"date": {"gte": "2020-01-01", "lte": "2023-12-31"}}}
-        ... )
+        # Elasticsearch-style range query (date range)
+        response = search(
+            "track reconstruction",
+            filter={"range": {"date": {"gte": "2020-01-01", "lte": "2023-12-31"}}}
+        )
         
-        >>> # Elasticsearch-style match query (contains/substring)
-        >>> response = search("track reconstruction", filter={"match": {"author": "Simon"}})
+        # Elasticsearch-style match query (contains/substring)
+        response = search("track reconstruction", filter={"match": {"author": "Simon"}})
         
-        >>> # Elasticsearch-style wildcard query (pattern matching)
-        >>> response = search("track reconstruction", filter={"wildcard": {"author": "Sim*n"}})
+        # Elasticsearch-style wildcard query (pattern matching)
+        response = search("track reconstruction", filter={"wildcard": {"author": "Sim*n"}})
         
-        >>> # Elasticsearch-style bool query (complex filtering)
-        >>> response = search(
-        ...     "track reconstruction",
-        ...     filter={
-        ...         "bool": {
-        ...             "must": [
-        ...                 {"term": {"author": "John Doe"}},
-        ...                 {"range": {"date": {"gte": "2020-01-01"}}}
-        ...             ],
-        ...             "should": [
-        ...                 {"term": {"category": "A"}},
-        ...                 {"term": {"category": "B"}}
-        ...             ],
-        ...             "minimum_should_match": 1
-        ...         }
-        ...     }
-        ... )
+        # Elasticsearch-style bool query (complex filtering)
+        response = search(
+            "track reconstruction",
+            filter={
+                "bool": {
+                    "must": [
+                        {"term": {"author": "John Doe"}},
+                        {"range": {"date": {"gte": "2020-01-01"}}}
+                    ],
+                    "should": [
+                        {"term": {"category": "A"}},
+                        {"term": {"category": "B"}}
+                    ],
+                    "minimum_should_match": 1
+                }
+            }
+        )
         
-        >>> # Combined: simple kwargs + filter
-        >>> response = search(
-        ...     "track reconstruction",
-        ...     chunking_strategy="tokens",
-        ...     source_id="atlas-docdb",
-        ...     author="John Doe",  # Simple filter
-        ...     filter={"range": {"date": {"gte": "2020"}}}  # Complex filter
-        ... )
+        # Combined: simple kwargs + filter
+        response = search(
+            "track reconstruction",
+            chunking_strategy="tokens",
+            source_id="atlas-docdb",
+            author="John Doe",  # Simple filter
+            filter={"range": {"date": {"gte": "2020"}}}  # Complex filter
+        )
+        ```
     
     Returns:
         Dictionary containing:
@@ -120,21 +122,21 @@ def search(
             - max_results: Maximum results requested
             # Future fields can be added here (e.g., summary, filters_applied, etc.)
     
-        >>> # Access results
-        >>> for result in response['results']:
-        ...     print(f"Document: {result['document'].id}")
-        ...     if result['chunks']:
-        ...         print(f"  Best chunk: {result['chunks'][0]['chunk_id']}, Score: {result['chunks'][0]['similarity']:.3f}")
+        # Access results
+        for result in response['results']:
+            print(f"Document: {result['document'].id}")
+            if result['chunks']:
+                print(f"  Best chunk: {result['chunks'][0]['chunk_id']}, Score: {result['chunks'][0]['similarity']:.3f}")
         
-        >>> # Check timing information
-        >>> print(f"Total search time: {response['metadata']['time_search_total']:.3f}s")
-        >>> print(f"Embedding time: {response['metadata']['time_embedding']:.3f}s")
+        # Check timing information
+        print(f"Total search time: {response['metadata']['time_search_total']:.3f}s")
+        print(f"Embedding time: {response['metadata']['time_embedding']:.3f}s")
+        ```
     """
-    own_session = session is None
-    if own_session:
-        session = get_db_session().__enter__()
-    
-    try:
+    # Determine if we own the session
+    should_close = session is None
+
+    with get_db_session(session) as session:
         # Track total time from the beginning
         total_start = time.time()
         
@@ -216,24 +218,17 @@ def search(
             session.add(search_log)
             
             # Only commit if we own the session; otherwise let caller handle it
-            if own_session:
+            if should_close:
                 session.commit()
             
         except Exception as e:
             # Don't fail the search if logging fails
             logger.warning(f"Failed to log search to database: {e}", exc_info=True)
-            if own_session:
+            if should_close:
                 try:
                     session.rollback()
                 except Exception:
                     pass  # Ignore rollback errors
         
         return result
-        
-    except Exception as e:
-        logger.error(f"Error during search: {e}", exc_info=True)
-        raise
-    finally:
-        if own_session:
-            session.close()
 

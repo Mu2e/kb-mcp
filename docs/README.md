@@ -1,37 +1,41 @@
 # Documentation
 
-This directory contains documentation organized by module to mirror the code structure.
+This Knowledge Base (KB) is designed to be **used** through an MCP server. Examples of how to connect clients can be found in [MCP Clients](server/mcp_clients.md).
 
-## Structure
+The KB is built around a SQL-based documentation [database](kb/database.md). It offers:
 
-- **`server/`** - Documentation for the MCP server (`test_mcp.server`)
-  - Installation, configuration, deployment
-  - Client integration guides
-  - API key management
-  - Admin interfaces
+ - [MCP server](server/mcp.md): Available as [remote server](server/mcp_remote.md) or [local stdio-based server](server/mcp_stdio.md)
+ - [Web-based management interface](server/web.md): for testing and administration
+ - [Comprehensive CLI](cli/cli.md): command-line interface for administration
 
-- **`kb/`** - Documentation for the knowledge base (`test_mcp.kb`)
-  - Database schema and models
-  - Document storage and retrieval
-  - [CLI usage](kb/cli.md)
-  - [Configuration](kb/configuration.md)
+## Quick Start
 
-- **`parser/`** - Documentation for document parsers (`test_mcp.parser`)
-  - [CLI usage](parser/cli.md)
-  - Supported file formats
-  - Text extraction pipelines
-  - Image processing
-  - [Configuration](parser/configuration.md)
+ - [Connect an MCP client](server/mcp_clients.md) to a remote server
+ - [Installation guide](install.md)
+ - [Running the MCP server](server/mcp.md)
+ - [Running the web server](server/web.md)
 
-## Quick Links
+## Code Base
 
-- [CLI Tools](cli.md) - Overview of all command-line tools
-- [Server Installation](server/install.md)
-- [Server Configuration](server/configuration.md)
-- [API Keys](server/api-keys.md)
-- [Client Integration](server/clients.md)
-- [KB CLI](kb/cli.md)
-- [KB Configuration](kb/configuration.md)
-- [Parser CLI](parser/cli.md)
-- [Parser Configuration](parser/configuration.md)
+The codebase is [configured](module/config.md) through environment variables accessible via `test_mcp.config`.
+
+### Knowledge Base Core
+
+These components integrate with the database:
+
+ - [kb](api/kb.md) - Knowledge Base core (storage, chunking, embeddings, search)
+ - [server](api/server.md) - Server interfaces (MCP and web) for the knowledge base
+ - [imports](api/imports.md) - Utilities to import documents from external sources
+
+### Standalone Components
+
+Standalone tools that have **no database dependencies** and can be used independently:
+
+
+ - [llm](api/llm.md) - OpenAI-compatible LLM interface
+ - [parser](api/parser.md) - Document-to-text parsing (PDF, DOCX, etc.)
+ - [summary](api/summary.md) - Document summarization and gist extraction
+ - [eval_utils](api/eval.md) - Evaluation utilities (synthetic question generation, LLM-based judging)
+
+
 

@@ -9,10 +9,11 @@ from typing import Dict, List, Optional
 
 from tqdm import tqdm
 
-from .core import EvalDataset, get_or_create_eval_generation
-from ..base import get
+from .db_models import EvalDataset, get_or_create_eval_generation
+from ..documents import get
 from ..database import get_db_session
-from ...eval.generation import generate_qa_pairs_keypoint, generate_qa_pairs_persona
+from ..database import get_db_session
+from ...eval_utils.qa_generation import generate_qa_pairs_keypoint, generate_qa_pairs_persona
 
 logger = logging.getLogger(__name__)
 
@@ -49,11 +50,9 @@ def generate_questions_from_documents(
         - 'keypoint': Extract key facts and generate questions (single LLM call)
         - 'persona': Generate questions from different user perspectives
     """
-    own_session = session is None
-    if own_session:
-        session = get_db_session().__enter__()
+    should_close = session is None
 
-    try:
+    with get_db_session(session) as session:
         all_questions = []
         total_time = 0.0
         generation_metadata = None
@@ -205,15 +204,6 @@ def generate_questions_from_documents(
                 "method": generation_method,
             }
 
-    except Exception as e:
-        if own_session:
-            session.rollback()
-        logger.error(f"Error generating questions: {e}")
-        raise
-
-    finally:
-        if own_session:
-            session.__exit__(None, None, None)
 
 
 def generate_questions_from_source(
@@ -241,11 +231,9 @@ def generate_questions_from_source(
     Returns:
         Dict with generation statistics (same as generate_questions_from_documents)
     """
-    own_session = session is None
-    if own_session:
-        session = get_db_session().__enter__()
+    should_close = session is None
 
-    try:
+    with get_db_session(session) as session:
         # Get documents from source
         docs = get(
             source_id=source_id,
@@ -281,9 +269,6 @@ def generate_questions_from_source(
 
         return result
 
-    finally:
-        if own_session:
-            session.__exit__(None, None, None)
 
 
 def import_questions_from_file(

@@ -17,20 +17,23 @@ class WebSessionManager:
     """Manages browser sessions for web interfaces."""
 
     def __init__(self, oauth_provider):
+        from ..config import get_web_session_config
+
         self.oauth_provider = oauth_provider
+        web_config = get_web_session_config()
 
         # Initialize session store for persistence (local at data/web_sessions.json or firestore)
         # Lazy loading: data loads on first access
         self.session_store = SessionStore(collection_name="web_sessions")
 
         # Session timeout in seconds (default: 24 hours)
-        self.session_timeout = int(os.getenv("WEB_SESSION_TIMEOUT", "86400"))
+        self.session_timeout = web_config['timeout']
         # Re-verification interval in seconds (default: 1 hour)
-        self.reverify_interval = int(os.getenv("WEB_REVERIFY_INTERVAL", "3600"))
+        self.reverify_interval = web_config['reverify_interval']
 
         # Flag to disable authentication (for local development only)
         # Default: authentication is REQUIRED (secure by default)
-        disable_auth = os.getenv("DISABLE_WEB_AUTH", "false").lower() == "true"
+        disable_auth = web_config['disable_auth']
         self.require_auth = not disable_auth
         if disable_auth:
             logger.warning(

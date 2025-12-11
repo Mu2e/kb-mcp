@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import secrets
 import time
 from typing import Any, Dict
@@ -23,6 +22,11 @@ from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
 
 from .api_keys import ApiKeyManager
 from .session_store import SessionStore
+from ..config import (
+    get_server_config,
+    get_github_oauth_config,
+    get_api_keys_file,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -33,10 +37,12 @@ class GitHubOAuthProvider(
     """OAuth provider that uses GitHub for authentication."""
 
     def __init__(self):
-        self.base_url = os.getenv("BASE_URL", "https://127.0.0.1")
-        self.github_client_id = os.getenv("GITHUB_CLIENT_ID", "")
-        self.github_client_secret = os.getenv("GITHUB_CLIENT_SECRET", "")
-        self.required_repo = os.getenv("GITHUB_REQUIRED_REPO", "")  # Format: "owner/repo"
+        server_config = get_server_config()
+        github_config = get_github_oauth_config()
+        self.base_url = server_config['base_url']
+        self.github_client_id = github_config['client_id']
+        self.github_client_secret = github_config['client_secret']
+        self.required_repo = github_config['required_repo']  # Format: "owner/repo"
 
         if not self.github_client_id or not self.github_client_secret:
             logger.warning(
@@ -54,8 +60,7 @@ class GitHubOAuthProvider(
 
         # API key authentication - always enabled
         # Use DATA_DIR env var if set (e.g., /data for Cloud Storage mount), otherwise "data/"
-        data_dir = os.getenv("DATA_DIR", "data")
-        api_keys_file = os.getenv("API_KEYS_FILE", f"{data_dir}/api_keys.json")
+        api_keys_file = get_api_keys_file()
         self.api_key_manager = ApiKeyManager(api_keys_file)
         logger.info(f"API key authentication enabled: {api_keys_file}")
 

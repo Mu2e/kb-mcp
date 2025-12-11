@@ -3,7 +3,7 @@
 import logging
 from starlette.responses import HTMLResponse, RedirectResponse
 
-from .web_auth import WebSessionManager
+from .web import WebSessionManager
 from . import html_templates
 
 logger = logging.getLogger(__name__)

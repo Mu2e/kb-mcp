@@ -7,25 +7,27 @@ This module provides tools for evaluating and benchmarking knowledge base retrie
 - Metrics computation
 
 Basic usage:
-    >>> from test_mcp.kb.eval import generate_questions_from_documents, eval, get_summary_stats
-    >>>
-    >>> # Generate questions
-    >>> result = generate_questions_from_documents(
-    ...     document_ids=["doc-1", "doc-2"],
-    ...     num_questions_per_doc=5,
-    ...     generation_method="keypoint"
-    ... )
-    >>>
-    >>> # Run evaluation
-    >>> stats = eval(
-    ...     name="Test embedding v1",
-    ...     generation_id=result["generation_id"],
-    ...     audit_filters={"is_valid": True}
-    ... )
-    >>>
-    >>> # Get detailed stats
-    >>> summary = get_summary_stats(stats["run_id"])
-    >>> print(f"Hit rate: {summary['hit_rate']:.2%}")
+    ```python
+    from test_mcp.kb.eval import generate_questions_from_documents, eval, get_summary_stats
+
+    # Generate questions
+    result = generate_questions_from_documents(
+        document_ids=["doc-1", "doc-2"],
+        num_questions_per_doc=5,
+        generation_method="keypoint"
+    )
+
+    # Run evaluation
+    stats = eval(
+        name="Test embedding v1",
+        generation_id=result["generation_id"],
+        audit_filters={"is_valid": True}
+    )
+
+    # Get detailed stats
+    summary = get_summary_stats(stats["run_id"])
+    print(f"Hit rate: {summary['hit_rate']:.2%}")
+    ```
 """
 
 # Question generation
@@ -49,7 +51,7 @@ from .runner import (
     eval,
     get_run_results,
 )
-from .core import get_eval_run, get_or_create_eval_generation
+from .db_models import get_eval_run, get_or_create_eval_generation
 
 # Metrics
 from .metrics import (

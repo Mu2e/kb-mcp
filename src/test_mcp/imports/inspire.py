@@ -37,7 +37,7 @@ if _IS_MAIN:
     from test_mcp.imports.base import Source
     from test_mcp.kb import add_from_path
 else:
-    from .base import Source
+    from .documents import Source
     from ..kb import add_from_path
 
 

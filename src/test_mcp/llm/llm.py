@@ -1,7 +1,8 @@
 """LLM client utilities for OpenAI-compatible APIs."""
 
-import os
 import logging
+
+from ..config import get_llm_config
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +28,8 @@ def get_openai_client():
             "openai package not installed. Install with: pip install openai"
         )
 
-    api_key = os.getenv('OPENAI_API_KEY')
+    llm_config = get_llm_config()
+    api_key = llm_config['openai_api_key']
     if not api_key:
         raise ValueError(
             "OPENAI_API_KEY environment variable not set. "
@@ -36,7 +38,7 @@ def get_openai_client():
 
     # Create client with optional base URL
     client_kwargs = {'api_key': api_key}
-    base_url = os.getenv('OPENAI_BASE_URL')
+    base_url = llm_config['openai_base_url']
     if base_url:
         client_kwargs['base_url'] = base_url
         logger.debug(f"Using OpenAI base URL: {base_url}")

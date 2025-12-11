@@ -7,8 +7,8 @@ import numpy as np
 from sqlalchemy import select, and_
 from sqlalchemy.orm import aliased
 
-from ..core import Document
-from ..embedding.core import Chunk
+from ..db_models import Document
+from ..embedding.db_models import Chunk
 from .filters import get_filters_fallback
 
 logger = logging.getLogger(__name__)

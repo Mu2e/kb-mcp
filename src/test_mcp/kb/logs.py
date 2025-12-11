@@ -6,7 +6,7 @@ from sqlalchemy import desc
 from sqlalchemy.orm import Session
 
 from .database import get_db_session
-from .search.core import SearchLog
+from .search.db_models import SearchLog
 
 
 def _to_utc_iso(dt: Optional[datetime]) -> Optional[str]:
@@ -32,7 +32,7 @@ def _to_utc_iso(dt: Optional[datetime]) -> Optional[str]:
 
 
 try:
-    from .embedding.core import ParsingLog, ChunkEmbeddingLog, SummaryLog
+    from .embedding.db_models import ParsingLog, ChunkEmbeddingLog, SummaryLog
     EMBEDDING_LOGS_AVAILABLE = True
 except ImportError:
     EMBEDDING_LOGS_AVAILABLE = False
@@ -66,12 +66,8 @@ def get_search_logs(
     Returns:
         List of search log dictionaries
     """
-    
-    own_session = session is None
-    if own_session:
-        with get_db_session() as session:
-            return _get_search_logs_impl(session, limit, offset, query, embedding_name, date_from, date_to, min_time_search_total)
-    else:
+
+    with get_db_session(session) as session:
         return _get_search_logs_impl(session, limit, offset, query, embedding_name, date_from, date_to, min_time_search_total)
 
 
@@ -155,12 +151,8 @@ def get_parsing_logs(
     """
     if not EMBEDDING_LOGS_AVAILABLE or ParsingLog is None:
         return []
-    
-    own_session = session is None
-    if own_session:
-        with get_db_session() as session:
-            return _get_parsing_logs_impl(session, document_id, limit)
-    else:
+
+    with get_db_session(session) as session:
         return _get_parsing_logs_impl(session, document_id, limit)
 
 
@@ -227,12 +219,8 @@ def get_chunking_logs(
     """
     if not EMBEDDING_LOGS_AVAILABLE or ChunkEmbeddingLog is None:
         return []
-    
-    own_session = session is None
-    if own_session:
-        with get_db_session() as session:
-            return _get_chunking_logs_impl(session, document_id, limit)
-    else:
+
+    with get_db_session(session) as session:
         return _get_chunking_logs_impl(session, document_id, limit)
 
 
@@ -286,11 +274,7 @@ def get_summary_logs(
     if not EMBEDDING_LOGS_AVAILABLE or SummaryLog is None:
         return []
 
-    own_session = session is None
-    if own_session:
-        with get_db_session() as session:
-            return _get_summary_logs_impl(session, document_id, limit)
-    else:
+    with get_db_session(session) as session:
         return _get_summary_logs_impl(session, document_id, limit)
 
 
@@ -337,16 +321,7 @@ def get_all_logs_for_document(
         Dictionary with keys: "parsing", "chunking", "summary", "search"
         Each contains a list of log dictionaries
     """
-    own_session = session is None
-    if own_session:
-        with get_db_session() as session:
-            return {
-                "parsing": get_parsing_logs(document_id, limit=limit, session=session),
-                "chunking": get_chunking_logs(document_id, limit=limit, session=session),
-                "summary": get_summary_logs(document_id, limit=limit, session=session),
-                "search": [],  # Search logs are not per-document
-            }
-    else:
+    with get_db_session(session) as session:
         return {
             "parsing": get_parsing_logs(document_id, limit=limit, session=session),
             "chunking": get_chunking_logs(document_id, limit=limit, session=session),

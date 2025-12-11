@@ -4,12 +4,6 @@ import tempfile
 from pathlib import Path
 from typing import List, Optional
 
-try:
-    from dotenv import load_dotenv
-    load_dotenv()
-except ImportError:
-    pass  # dotenv is optional
-
 from .utils import detect_mime_type, get_parser
 
 
@@ -78,6 +72,7 @@ def parse(
         NotImplementedError: If the document type is not supported
     
     Example:
+        ```
         from test_mcp.parser import parse
         from test_mcp.kb import Document, add, add_many
         
@@ -97,6 +92,7 @@ def parse(
         
         # Convert to Document objects
         documents = [Document.from_dict(d) for d in doc_dicts]
+        ```
         
         # Add main document
         main_doc = add(documents[0])
@@ -169,14 +165,15 @@ def parse(
             doc_data["uri"] = f"file://{file_path.absolute()}"
         
         # Check if we need to extract images (for additional docs or descriptions)
-        import os
+        from ..config import get_parser_config
+        parser_config = get_parser_config()
         if parse_image_additional_doc is None:
-            create_additional_docs = os.getenv('PARSE_IMAGE_ADDITIONAL_DOC', 'false').lower() == 'true'
+            create_additional_docs = parser_config['image_additional_doc']
         else:
             create_additional_docs = parse_image_additional_doc
-        
+
         if parse_image_llm_description is None:
-            generate_llm_descriptions = os.getenv('PARSE_IMAGE_LLM_DESCRIPTION', 'false').lower() == 'true'
+            generate_llm_descriptions = parser_config['image_llm_description']
         else:
             generate_llm_descriptions = parse_image_llm_description
         

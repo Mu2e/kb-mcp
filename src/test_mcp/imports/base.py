@@ -1,11 +1,12 @@
 """Base class for document importers."""
 
 import logging
-import os
 import time
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Dict, List, Optional, Any
+
+from ..config import get_data_dir
 
 logger = logging.getLogger(__name__)
 
@@ -110,7 +111,7 @@ class Source(ABC):
         """
         # Setup output directory
         if output_dir is None:
-            data_dir = os.getenv("DATA_DIR", "data")
+            data_dir = get_data_dir()
             output_dir = Path(data_dir) / "local" / self.source_id
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)

@@ -265,28 +265,30 @@ def get_filters_fallback(
         List of SQLAlchemy filter conditions (can be combined with and_() or or_())
     
     Examples:
-        >>> # Simple filters (backward compatible)
-        >>> filters = get_filters_fallback(
-        ...     doc_alias, source_id="atlas", author="John"
-        ... )
-        
-        >>> # Elasticsearch-style filter with contains
-        >>> filters = get_filters_fallback(
-        ...     doc_alias,
-        ...     filter={
-        ...         "bool": {
-        ...             "must": [
-        ...                 {"match": {"author": "Simon"}},  # Contains "Simon"
-        ...                 {"range": {"date": {"gte": "2020-01-01"}}}
-        ...             ],
-        ...             "should": [
-        ...                 {"term": {"category": "A"}},
-        ...                 {"wildcard": {"title": "*test*"}}  # Pattern match
-        ...             ],
-        ...             "minimum_should_match": 1
-        ...         }
-        ...     }
-        ... )
+        ```python
+        # Simple filters (backward compatible)
+        filters = get_filters_fallback(
+            doc_alias, source_id="atlas", author="John"
+        )
+
+        # Elasticsearch-style filter with contains
+        filters = get_filters_fallback(
+            doc_alias,
+            filter={
+                "bool": {
+                    "must": [
+                        {"match": {"author": "Simon"}},  # Contains "Simon"
+                        {"range": {"date": {"gte": "2020-01-01"}}}
+                    ],
+                    "should": [
+                        {"term": {"category": "A"}},
+                        {"wildcard": {"title": "*test*"}}  # Pattern match
+                    ],
+                    "minimum_should_match": 1
+                }
+            }
+        )
+        ```
     """
     filters = []
     
