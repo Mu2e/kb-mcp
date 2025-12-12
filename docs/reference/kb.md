@@ -16,7 +16,7 @@ See [database schema](../guides/database.md) for details on data models and stor
 ## Quick Start
 
 ```python
-from test_mcp.kb import get, search
+from kb_mcp.kb import get, search
 
 # Get a document
 doc = get("papers_paper-001")

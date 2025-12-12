@@ -9,7 +9,7 @@ from pathlib import Path
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from test_mcp.kb import add, add_source, get
+from kb_mcp.kb import add, add_source, get
 
 
 def main():
@@ -50,7 +50,7 @@ def main():
 
     # Example 2: Add document using Document.from_dict()
     print("\n3. Adding document using Document.from_dict()...")
-    from test_mcp.kb.core import Document
+    from kb_mcp.kb.core import Document
     doc_obj = Document.from_dict({
         "source_id": "mu2e-wiki",
         "uri": "https://mu2e.fnal.gov/wiki/DetectorOverview",

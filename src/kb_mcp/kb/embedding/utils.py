@@ -12,7 +12,7 @@ from .embedders import OpenAIEmbedder, SentenceTransformersEmbedder
 
 # Load environment variables from .env file
 # Find project root (where .env file is located)
-# Go up from src/test_mcp/kb/embedding/utils.py to project root
+# Go up from src/kb_mcp/kb/embedding/utils.py to project root
 project_root = Path(__file__).parent.parent.parent.parent.parent
 env_path = project_root / ".env"
 load_dotenv(env_path)

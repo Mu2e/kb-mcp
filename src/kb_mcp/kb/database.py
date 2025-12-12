@@ -47,7 +47,7 @@ def get_database_url() -> str:
     """Get database URL from environment variables.
 
     Supports:
-    - PostgreSQL: DATABASE_URL or individual components
+    - PostgreSQL: DB_URL or individual components
     - SQLite: SQLITE_DB_PATH (defaults to 'data/kb.db' for dev)
 
     Returns:
@@ -58,7 +58,7 @@ def get_database_url() -> str:
     # Get configuration from config module
     db_config = get_database_config()
 
-    # Check for explicit DATABASE_URL first
+    # Check for explicit DB_URL first
     if db_config['url']:
         return db_config['url']
 

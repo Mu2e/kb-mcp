@@ -5,7 +5,7 @@ Container runs HTTP (no HTTPS) - meant for reverse proxy or Cloud Run deployment
 ## Build
 
 ```bash
-docker build -t test-mcp .
+docker build -t kb-mcp .
 ```
 
 ## Run
@@ -15,8 +15,8 @@ docker run -d -p 8443:8443 \
   -e GITHUB_CLIENT_ID=your_client_id \
   -e GITHUB_CLIENT_SECRET=your_client_secret \
   -e GITHUB_REQUIRED_REPO=owner/repo \
-  --name test-mcp \
-  test-mcp
+  --name kb-mcp \
+  kb-mcp
 ```
 
 **Note**: GitHub OAuth environment variables only needed if using OAuth authentication. For API key only deployments, these can be omitted.
@@ -30,8 +30,8 @@ curl http://localhost:8443/status
 ## Stop
 
 ```bash
-docker stop test-mcp
-docker rm test-mcp
+docker stop kb-mcp
+docker rm kb-mcp
 ```
 # Google Cloud Run Deployment
 
@@ -121,7 +121,7 @@ To use a custom domain instead of the auto-generated Cloud Run URL:
 2. **Map custom domain** to the deployed service:
    ```bash
    gcloud beta run domain-mappings create \
-     --service test-mcp \
+     --service kb-mcp \
      --domain mcp.example.com \
      --region us-central1
    ```

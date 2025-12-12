@@ -82,8 +82,8 @@ def embed_chunk(
 
     Example:
         ```python
-        from test_mcp.kb.embedding import embed_chunk
-        from test_mcp.kb import Chunk
+        from kb_mcp.kb.embedding import embed_chunk
+        from kb_mcp.kb import Chunk
 
         chunk = Chunk.from_dict({...})
         # Save chunk first
@@ -157,7 +157,7 @@ def embed_chunks(
 
     Example:
         ```python
-        from test_mcp.kb.embedding import embed_chunks
+        from kb_mcp.kb.embedding import embed_chunks
         chunks = get_chunks(document_id="abc-123")
         # By embedding name
         embed_chunks(chunks, embedding_name="openai-small", batch_size=100)
@@ -240,8 +240,8 @@ def chunk_and_embed(
 
     Example:
         ```python
-        from test_mcp.kb import Document
-        from test_mcp.kb.embedding import chunk_and_embed
+        from kb_mcp.kb import Document
+        from kb_mcp.kb.embedding import chunk_and_embed
 
         doc = Document.from_dict({...})
         # Save document first
@@ -404,7 +404,7 @@ def drop_embedding_table(
 
     Example:
         ```python
-        from test_mcp.kb.embedding import drop_embedding_table
+        from kb_mcp.kb.embedding import drop_embedding_table
         result = drop_embedding_table("openai-small")
         print(f"Dropped {result['count']} embeddings from {result['table_name']}")
         ```
@@ -467,7 +467,7 @@ def drop_embedding(
 
     Example:
         ```python
-        from test_mcp.kb.embedding import drop_embedding
+        from kb_mcp.kb.embedding import drop_embedding
         # Drop from specific embedding table
         count = drop_embedding("chunk-123", embedding_name="openai-small")
         print(f"Deleted {count} embedding(s)")
@@ -530,7 +530,7 @@ def get_embeddings(
 
     Example:
         ```python
-        from test_mcp.kb.embedding import get_embeddings
+        from kb_mcp.kb.embedding import get_embeddings
         # Get specific embedding
         result = get_embeddings("chunk-123", embedding_name="openai-small")
         # Returns: {"openai-small": {"id": "...", "embedding": [0.1, 0.2, ...]}}
@@ -599,7 +599,7 @@ def get_embedding_vector(
 
     Example:
         ```python
-        from test_mcp.kb.embedding import get_embedding_vector
+        from kb_mcp.kb.embedding import get_embedding_vector
         embedding = get_embedding_vector("chunk-123", embedding_name="openai-small")
         # Returns: [0.1, 0.2, ...] or None
         ```
@@ -651,7 +651,7 @@ def optimize_embedding_index(embedding_name: str, session=None) -> Dict[str, Any
         
     Example:
         ```python
-        from test_mcp.kb.embedding import optimize_embedding_index
+        from kb_mcp.kb.embedding import optimize_embedding_index
         result = optimize_embedding_index("openai-small")
         print(result["message"])
         ```
@@ -797,7 +797,7 @@ def vacuum_analyze_embedding_table(embedding_name: str, session=None) -> Dict[st
         
     Example:
         ```python
-        from test_mcp.kb.embedding import vacuum_analyze_embedding_table
+        from kb_mcp.kb.embedding import vacuum_analyze_embedding_table
         result = vacuum_analyze_embedding_table("openai-small")
         ```
     """

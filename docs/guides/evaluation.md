@@ -30,7 +30,7 @@ kb eval generate --source-id inspire-hep --num-documents 0
 ### Python
 
 ```python
-from test_mcp.kb.eval import generate_questions_from_source
+from kb_mcp.kb.eval import generate_questions_from_source
 
 # Generate questions from inspire-hep source
 result = generate_questions_from_source(
@@ -68,7 +68,7 @@ kb eval audit --generation-id <generation_id> --limit 100
 ### Python
 
 ```python
-from test_mcp.kb.eval import get_unaudited_questions, audit_question
+from kb_mcp.kb.eval import get_unaudited_questions, audit_question
 
 # Get unaudited questions
 questions = get_unaudited_questions(generation_id=generation_id)
@@ -100,7 +100,7 @@ kb eval run --generation-id <generation_id> --name "all-questions" --include-inv
 ### Python
 
 ```python
-from test_mcp.kb.eval import eval
+from kb_mcp.kb.eval import eval
 
 # Basic evaluation run
 result = eval(
@@ -143,7 +143,7 @@ Access results via web interface:
 ### Python
 
 ```python
-from test_mcp.kb.eval import get_summary_stats
+from kb_mcp.kb.eval import get_summary_stats
 
 stats = get_summary_stats(run_id=run1['run_id'])
 print(f"Hit rate: {stats['hit_rate']:.2%}")

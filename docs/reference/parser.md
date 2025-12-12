@@ -11,10 +11,10 @@ Document parsing utilities for extracting text and metadata from various formats
 
 ## Main Parser Function
 
-::: test_mcp.parser.parse
+::: kb_mcp.parser.parse
 
 ## Utilities
 
-::: test_mcp.parser.detect_mime_type
+::: kb_mcp.parser.detect_mime_type
 
-::: test_mcp.parser.display_image
+::: kb_mcp.parser.display_image

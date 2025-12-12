@@ -17,7 +17,7 @@ The KB is built around a SQL-based documentation [database](kb/database.md). It 
 
 ## Code Base
 
-The codebase is [configured](module/config.md) through environment variables accessible via `test_mcp.config`.
+The codebase is [configured](module/config.md) through environment variables accessible via `kb_mcp.config`.
 
 ### Knowledge Base Core
 

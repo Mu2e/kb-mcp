@@ -5,13 +5,13 @@ API keys provide authentication as an alternative to GitHub OAuth.
 ## Generating API Keys
 
 ```bash
-test-mcp-manage-keys generate <username> [description]
+kb-server-manage-keys generate <username> [description]
 ```
 
 Example:
 
 ```bash
-test-mcp-manage-keys generate alice "CI pipeline key"
+kb-server-manage-keys generate alice "CI pipeline key"
 ```
 
 Output:
@@ -30,7 +30,7 @@ Username: alice
 ## Listing API Keys
 
 ```bash
-test-mcp-manage-keys list
+kb-server-manage-keys list
 ```
 
 Example output:
@@ -51,13 +51,13 @@ Key: sk_x9y8z7...w6v5u4t3
 ## Revoking API Keys
 
 ```bash
-test-mcp-manage-keys revoke <api_key>
+kb-server-manage-keys revoke <api_key>
 ```
 
 Example:
 
 ```bash
-test-mcp-manage-keys revoke sk_a1b2c3d4e5f6...
+kb-server-manage-keys revoke sk_a1b2c3d4e5f6...
 ```
 
 ## Using API Keys

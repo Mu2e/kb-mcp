@@ -584,8 +584,8 @@ class Document(Base):
             ValueError: If source_id is not provided (in data or as default)
 
         Example:
-            from test_mcp.kb import Document
-            from test_mcp.parser import parse
+            from kb_mcp.kb import Document
+            from kb_mcp.parser import parse
 
             # Simple usage
             doc = Document.from_file("document.pdf", {

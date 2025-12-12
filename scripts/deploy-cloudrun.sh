@@ -39,7 +39,7 @@ if [ -z "$PROJECT_ID" ]; then
     echo "  --firestore: Use Firestore instead of file-based storage"
     exit 1
 fi
-SERVICE_NAME="test-mcp"
+SERVICE_NAME="kb-mcp"
 REGION="us-central1"
 BUCKET_NAME="${PROJECT_ID}-mcp-data"  # Cloud Storage bucket for persistent data
 IMAGE_NAME="gcr.io/${PROJECT_ID}/${SERVICE_NAME}"
@@ -92,7 +92,7 @@ if [ "$USE_FIRESTORE" = true ]; then
         --min-instances 0 \
         --max-instances 1 \
         --execution-environment gen2 \
-        --set-env-vars="USE_HTTPS=false,HOST=0.0.0.0,GITHUB_REQUIRED_REPO=corrodis/test-mcp,${SESSION_STORE}" \
+        --set-env-vars="USE_HTTPS=false,HOST=0.0.0.0,GITHUB_REQUIRED_REPO=corrodis/kb-mcp,${SESSION_STORE}" \
         --set-secrets="GITHUB_CLIENT_ID=github-client-id:latest,GITHUB_CLIENT_SECRET=github-client-secret:latest"
 else
     # Deploy with file-based storage (Cloud Storage volume)
@@ -109,7 +109,7 @@ else
         --execution-environment gen2 \
         --add-volume name=data,type=cloud-storage,bucket=${BUCKET_NAME} \
         --add-volume-mount volume=data,mount-path=/app/data \
-        --set-env-vars="USE_HTTPS=false,HOST=0.0.0.0,GITHUB_REQUIRED_REPO=corrodis/test-mcp,${SESSION_STORE}" \
+        --set-env-vars="USE_HTTPS=false,HOST=0.0.0.0,GITHUB_REQUIRED_REPO=corrodis/kb-mcp,${SESSION_STORE}" \
         --set-secrets="GITHUB_CLIENT_ID=github-client-id:latest,GITHUB_CLIENT_SECRET=github-client-secret:latest"
 fi
 

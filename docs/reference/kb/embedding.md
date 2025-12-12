@@ -4,32 +4,32 @@ Functions for chunking documents and generating embeddings.
 
 ## Chunking
 
-::: test_mcp.kb.embedding.chunk_document
+::: kb_mcp.kb.embedding.chunk_document
 
-::: test_mcp.kb.embedding.get_chunk_strategies
+::: kb_mcp.kb.embedding.get_chunk_strategies
 
-::: test_mcp.kb.embedding.get_chunks
+::: kb_mcp.kb.embedding.get_chunks
 
-::: test_mcp.kb.embedding.drop_chunks
+::: kb_mcp.kb.embedding.drop_chunks
 
 ## Embedding
 
-::: test_mcp.kb.embedding.embed_chunk
+::: kb_mcp.kb.embedding.embed_chunk
 
-::: test_mcp.kb.embedding.embed_chunks
+::: kb_mcp.kb.embedding.embed_chunks
 
-::: test_mcp.kb.embedding.chunk_and_embed
+::: kb_mcp.kb.embedding.chunk_and_embed
 
-::: test_mcp.kb.embedding.get_embeddings
+::: kb_mcp.kb.embedding.get_embeddings
 
-::: test_mcp.kb.embedding.get_embedding_vector
+::: kb_mcp.kb.embedding.get_embedding_vector
 
-::: test_mcp.kb.embedding.get_embedding_names
+::: kb_mcp.kb.embedding.get_embedding_names
 
 ## Utilities
 
-::: test_mcp.kb.embedding.get_embedder
+::: kb_mcp.kb.embedding.get_embedder
 
-::: test_mcp.kb.embedding.embed
+::: kb_mcp.kb.embedding.embed
 
-::: test_mcp.kb.embedding.get_embedding_dimension
+::: kb_mcp.kb.embedding.get_embedding_dimension

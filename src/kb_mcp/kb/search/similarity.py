@@ -73,7 +73,7 @@ def get_closest(
     
     Example:
         ```python
-        from test_mcp.kb.search.similarity import get_closest
+        from kb_mcp.kb.search.similarity import get_closest
         embedding = [0.1, 0.2, 0.3, ...]  # Your embedding vector
         results = get_closest(
             embedding,
@@ -177,7 +177,7 @@ def get_similar(
     
     Example:
         ```python
-        from test_mcp.kb.search.similarity import get_similar
+        from kb_mcp.kb.search.similarity import get_similar
         # Find documents similar to a specific chunk
         results = get_similar(
             chunk_id="abc-123",

@@ -39,7 +39,7 @@ elif screen -list | grep -q "mcp-server"; then
     echo "Server screen session exists. Attach with: screen -r mcp-server"
 else
     echo "Starting MCP server on port ${PORT} in screen session 'mcp-server'..."
-    screen -dmS mcp-server test-mcp
+    screen -dmS mcp-server kb-mcp
     echo "Server started. Attach with: screen -r mcp-server"
 fi
 

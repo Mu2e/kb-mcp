@@ -8,7 +8,7 @@ This module provides tools for evaluating and benchmarking knowledge base retrie
 
 Basic usage:
     ```python
-    from test_mcp.kb.eval import generate_questions_from_documents, eval, get_summary_stats
+    from kb_mcp.kb.eval import generate_questions_from_documents, eval, get_summary_stats
 
     # Generate questions
     result = generate_questions_from_documents(

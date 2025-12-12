@@ -116,7 +116,7 @@ Configuration is managed through environment variables. See [configuration](../r
 
 Key environment variables:
 
-- `DATABASE_URL` - Database connection string
+- `DB_URL` - Database connection string
 - `EMBEDDING_PROVIDER` - Embedding provider (st, openai, etc.)
 - `EMBEDDING_MODEL` - Specific model to use
 - `CHUNK_STRATEGY` - Chunking strategy (tokens, recursive, etc.)

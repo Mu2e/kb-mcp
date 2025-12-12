@@ -19,12 +19,12 @@ The knowledge base uses SQLAlchemy and supports both PostgreSQL and SQLite.
 
 **PostgreSQL (Production):**
 ```bash
-export DATABASE_URL="postgresql://user:password@localhost:5432/kb"
+export DB_URL="postgresql://user:password@localhost:5432/kb"
 ```
 
 **SQLite (Development):**
 ```bash
-export DATABASE_URL="sqlite:///./kb.db"
+export DB_URL="sqlite:///./kb.db"
 # Or leave unset to use default SQLite database
 ```
 
@@ -85,7 +85,7 @@ kb stats
 ### Python API
 
 ```python
-from test_mcp.kb import add, get, add_source
+from kb_mcp.kb import add, get, add_source
 
 # Add a source
 source = add_source(

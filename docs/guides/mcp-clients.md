@@ -16,7 +16,7 @@ Claude Desktop connects to remote MCP servers through **Connectors**.
 1. In Claude Desktop:
    - Go to **Connectors**
    - Click **Add custom connector**
-   - Name: `test-mcp`
+   - Name: `kb-mcp`
    - URL: `https://your-server-url/mcp`
      - Cloud Run: `https://mcp.example.com/mcp`
      - Local (ngrok): `https://your-ngrok-url/mcp`
@@ -38,7 +38,7 @@ ollmcp connects to MCP servers via a local configuration file.
 
 1. Generate an API key:
    ```bash
-   test-mcp-manage-keys generate your-username "ollmcp"
+   kb-server-manage-keys generate your-username "ollmcp"
    ```
    Save the generated key.
 
@@ -46,7 +46,7 @@ ollmcp connects to MCP servers via a local configuration file.
    ```json
    {
      "mcpServers": {
-       "test-mcp": {
+       "kb-mcp": {
          "type": "streamable_http",
          "url": "https://your-server-url/mcp",
          "headers": {
@@ -76,7 +76,7 @@ Cursor connects to MCP servers via a local configuration file.
 
 2. Generate an API key:
    ```bash
-   test-mcp-manage-keys generate your-username "Cursor IDE"
+   kb-server-manage-keys generate your-username "Cursor IDE"
    ```
    Save the generated key.
 
@@ -89,7 +89,7 @@ Cursor connects to MCP servers via a local configuration file.
    ```json
    {
      "mcpServers": {
-       "test-mcp": {
+       "kb-mcp": {
          "url": "https://localhost:8443/mcp",
          "headers": {
            "Authorization": "Bearer YOUR_API_KEY"
@@ -107,20 +107,20 @@ To connect Cursor to your Cloud Run deployment:
 
 1. Generate an API key (run locally or via Cloud Shell):
    ```bash
-   test-mcp-manage-keys generate your-username "Cursor IDE"
+   kb-server-manage-keys generate your-username "Cursor IDE"
    ```
 
 2. Add to your Cursor settings file (`.cursor/mcp.json`):
    ```json
    {
      "mcpServers": {
-       "test-mcp-local": {
+       "kb-mcp-local": {
          "url": "https://localhost:8443/mcp",
          "headers": {
            "Authorization": "Bearer YOUR_LOCAL_API_KEY"
          }
        },
-       "test-mcp-cloud": {
+       "kb-mcp-cloud": {
          "url": "https://mcp.scorrodi.dev/mcp",
          "headers": {
            "Authorization": "Bearer YOUR_CLOUD_API_KEY"
@@ -148,7 +148,7 @@ Cline connects to MCP servers via VS Code settings.
 ```json
 {
   "mcpServers": {
-    "test-mcp": {
+    "kb-mcp": {
       "url": "https://mcp.scorrodi.dev/mcp",
       "type": "streamableHttp"
     }
@@ -160,7 +160,7 @@ Cline connects to MCP servers via VS Code settings.
 ```json
 {
   "mcpServers": {
-    "test-mcp": {
+    "kb-mcp": {
       "url": "https://localhost:8443/mcp",
       "type": "streamableHttp",
       "headers": {

@@ -1,4 +1,4 @@
-# test-mcp Documentation
+# kb-mcp Documentation
 
 A knowledge base system designed to be **used** via MCP (Model Context Protocol) with a web interface for testing and administration, and an evaluation suite.
 
@@ -11,7 +11,7 @@ A knowledge base system designed to be **used** via MCP (Model Context Protocol)
 
 **Running the server:**
 
-- [Installation](guides/installation.md) - Install and configure test-mcp
+- [Installation](guides/installation.md) - Install and configure kb-mcp
 - [MCP Server Setup](guides/mcp-setup.md) - Run as stdio or remote MCP server
 
 ## Documentation

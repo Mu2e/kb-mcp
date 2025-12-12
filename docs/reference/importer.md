@@ -11,4 +11,4 @@ The imports module provides a base `Source` class for creating custom importers 
 
 **Standalone usage:** This module can be used independently or via the CLI tool `kb-import` for command-line importing from external sources.
 
-::: test_mcp.imports.Source
+::: kb_mcp.imports.Source

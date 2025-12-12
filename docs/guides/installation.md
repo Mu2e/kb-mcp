@@ -1,86 +1,130 @@
 # Installation
 
+For instructions on connecting an MCP client to a remote MCP server (this codebase), see the [mc client documentation](https://github.com/corrodis/mc).
+
+## 0. Clone the Repository
+
+Clone this repository using:
+
+```bash
+git clone https://github.com/corrodis/kb-mcp.git
+cd kb-mcp
+```
+
 ## 1. Python Dependencies
 
-```bash
-# Install server with KB support (recommended, since server uses KB features)
-pip install -e ".[server,kb]"
+### (Optional) Create Virtual Environment
 
-# Or install just the server (KB features will not work)
-pip install -e ".[server]"
+```bash
+# (Recommended) Create a new Python 3.11+ virtual environment
+python3.11 -m venv .venv
+source .venv/bin/activate  # On Windows: .venv\Scripts\activate
 ```
 
-## 2. ngrok Setup
-
-ngrok is required to expose your local server to Claude Desktop.
+### Install Core Dependencies
 
 ```bash
-# Install ngrok
-brew install ngrok
-
-# Sign up at https://ngrok.com and get your authtoken
-# Then authenticate
-ngrok authtoken YOUR_NGROK_TOKEN
+# Install all core dependencies
+pip install -e .
 ```
 
-## 3. GitHub OAuth App Setup
-
-1. Go to https://github.com/settings/developers
-2. Click "New OAuth App"
-3. Fill in:
-   - **Application name**: test-mcp (or any name)
-   - **Homepage URL**: `https://your-ngrok-url` (you'll update this after starting ngrok)
-   - **Authorization callback URL**: `https://your-ngrok-url/oauth/github/callback`
-4. Click "Register application"
-5. Copy the **Client ID** and generate a **Client secret**
-
-## 4. Environment Configuration
+### Optional Dependencies
 
 ```bash
+# Add Google Cloud Platform support (for Firestore session storage)
+pip install -e ".[gcp]"
+
+# Add documentation tools (for building docs)
+# (Optional) Build and preview the documentation locally
+pip install -e ".[docs]"
+cd docs
+mkdocs serve
+```
+
+## 2. Environment Configuration
+
+### Create Environment File
+
+```bash
+# Copy the example environment file
 cp .env.example .env
 ```
 
-Edit `.env` and set:
-- `GITHUB_CLIENT_ID` - Your GitHub OAuth App Client ID
-- `GITHUB_CLIENT_SECRET` - Your GitHub OAuth App Client Secret
-- `GITHUB_REQUIRED_REPO` - Repository to restrict access (format: `owner/repo`)
-- `BASE_URL` - Your ngrok URL (update after starting ngrok)
+### Configure Environment Variables
 
-## 5. SSL Certificates
+Edit your `.env` file with your configuration.  See [Configuration Reference](../reference/config.md) for detailed explanations of all available environment variables.
+ Key settings include:
 
-Install and use mkcert to create locally-trusted certificates:
+- **OPENAI_BASE_URL**: Base URL for OpenAI-compatible LLM interface
+- **OPENAI_API_KEY**: Optional API key for `OPENAI_BASE_URL`
+- **Database Configuration**: See [Database Setup](#3-database-setup) below
 
-```bash
-# Install mkcert
-brew install mkcert
 
-# Install local CA
-mkcert -install
+## 3. Database Setup
 
-# Generate certificates
-mkdir -p certs
-mkcert -key-file certs/key.pem -cert-file certs/cert.pem localhost 127.0.0.1
-```
+The knowledge base supports both **SQLite** (for development) and **PostgreSQL** (for production).
 
-## 6. Start the Server
+### SQLite (Default, Development)
+
+SQLite is the default and requires no additional setup. The database file will be created automatically at `data/kb.db`.
+
+### PostgreSQL (Production)
+
+For production use, configure PostgreSQL connection in `.env`:
 
 ```bash
-./scripts/start.sh
+# Option 1: Use DB_URL
+DB_URL=postgresql://user:password@localhost:5432/dbname
+
+# Option 2: Use individual components
+DB_HOST=localhost
+DB_PORT=5432
+DB_USER=user
+DB_PASSWORD=password
+DB_NAME=dbname
 ```
 
-The script will:
-1. Start ngrok tunnel and display the public URL
-2. Start the MCP server
+### Test Python Import
 
-Update your `.env` file's `BASE_URL` with the ngrok URL shown, and update your GitHub OAuth App's callback URL to match.
+```bash
+python -c "import kb_mcp; print('Installation successful!')"
+```
 
-## 7. Connect Claude Desktop
+### Test CLI Commands
 
-1. Open Claude Desktop
-2. Go to Connectors
-3. Click "Add custom connector"
-4. Enter:
-   - **Name**: test-mcp
-   - **URL**: `https://your-ngrok-url/mcp`
-5. Click "Connect" (and pray)
-6. Browser will open for GitHub OAuth flow
+```bash
+# Test KB CLI
+kb --help
+```
+
+## 6. Next Steps
+
+After installation, you may want to:
+
+1. **Start the Server**
+   ```bash
+   kb-server
+   ```
+   The default setting start the server at (localhost:8443)[localhost:8443] which you can access with your browser.
+
+**Note**: For production (if bound other than localhost), use an authentification scheme with https.
+
+2. **Connect an MCP Client**  
+   See the [MCP client documentation](https://github.com/corrodis/mc) for instructions on connecting to a remote MCP server.
+
+
+3. **Use the CLI**
+
+   For detailed usage of all available CLI tools, see the [CLI Guide](cli.md).
+
+   For example, you can test the knowledge base CLI:
+   ```bash
+   kb --help
+   ```
+
+4. **Explore Documentation**
+   - [Configuration Guide](../reference/config.md) - All configuration options
+   - [Knowledge Base Guide](../reference/kb.md) - Using the KB module
+   - [Server Guide](../reference/server.md) - Running the MCP server
+   - [Web Interface Guide](web-interface.md) - Using the web UI
+

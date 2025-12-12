@@ -6,10 +6,10 @@ These utilities can be used independently of the knowledge base. For KB-integrat
 
 ## Question Generation
 
-::: test_mcp.eval_utils.generate_qa_pairs_keypoint
+::: kb_mcp.eval_utils.generate_qa_pairs_keypoint
 
-::: test_mcp.eval_utils.generate_qa_pairs_persona
+::: kb_mcp.eval_utils.generate_qa_pairs_persona
 
 ## Answer Judging
 
-::: test_mcp.eval_utils.llm_judge_answer
+::: kb_mcp.eval_utils.llm_judge_answer

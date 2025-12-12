@@ -340,7 +340,7 @@ def add_many(
     
     Usage:
         ```python
-        from test_mcp.kb import add_many
+        from kb_mcp.kb import add_many
         
         docs = add_many([doc1, doc2, doc3])
         
@@ -405,7 +405,7 @@ def add_from_path(
     
     Usage:
         ```python
-        from test_mcp.kb import add_from_path
+        from kb_mcp.kb import add_from_path
         
         # Using data dict (recommended for complex cases)
         docs = add_from_path(
@@ -473,7 +473,7 @@ def add_from_path(
     
     Example:
         ```python
-        from test_mcp.kb import add_from_path
+        from kb_mcp.kb import add_from_path
         
         # Using data dict with metadata
         documents = add_from_path(

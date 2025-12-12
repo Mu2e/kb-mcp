@@ -26,10 +26,10 @@ def setup_logging(verbose: bool = False):
     
     # Set import module loggers to INFO level (regardless of verbose flag)
     # This ensures we see INFO messages from the import modules
-    imports_base_logger = logging.getLogger("test_mcp.imports.base")
+    imports_base_logger = logging.getLogger("kb_mcp.imports.base")
     imports_base_logger.setLevel(logging.INFO)
     
-    imports_inspire_logger = logging.getLogger("test_mcp.imports.inspire")
+    imports_inspire_logger = logging.getLogger("kb_mcp.imports.inspire")
     imports_inspire_logger.setLevel(logging.INFO)
 
 

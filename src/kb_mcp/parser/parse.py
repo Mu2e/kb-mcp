@@ -73,8 +73,8 @@ def parse(
     
     Example:
         ```
-        from test_mcp.parser import parse
-        from test_mcp.kb import Document, add, add_many
+        from kb_mcp.parser import parse
+        from kb_mcp.kb import Document, add, add_many
         
         # Parse from file path
         doc_dicts = parse("document.pdf", {

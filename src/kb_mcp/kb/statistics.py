@@ -47,7 +47,7 @@ def get_statistics(
     
     Example:
         ```python
-        from test_mcp.kb.statistics import get_statistics
+        from kb_mcp.kb.statistics import get_statistics
         stats = get_statistics(source_id="mu2e-docdb")
         print(stats["data"]["tokens_1000_200"]["openai-small"]["documents"])
         ```

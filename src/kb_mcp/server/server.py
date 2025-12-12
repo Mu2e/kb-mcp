@@ -5,7 +5,7 @@ from pathlib import Path
 
 # Load environment variables early
 # Find project root (where .env file is located)
-# Go up from src/test_mcp/server/server.py to project root
+# Go up from src/kb_mcp/server/server.py to project root
 project_root = Path(__file__).parent.parent.parent.parent
 env_path = project_root / ".env"
 load_dotenv(env_path)
@@ -33,7 +33,7 @@ logging.basicConfig(
 )
 
 # Set our own modules to MCP_LOG_LEVEL
-logging.getLogger("test_mcp").setLevel(MCP_LOG_LEVEL)
+logging.getLogger("kb_mcp").setLevel(MCP_LOG_LEVEL)
 
 # Setup audit logging to file if path is set
 if AUDIT_LOG_FILE:
@@ -42,7 +42,7 @@ if AUDIT_LOG_FILE:
     audit_log_path = Path(AUDIT_LOG_FILE)
     audit_log_path.parent.mkdir(parents=True, exist_ok=True)
 
-    audit_logger = logging.getLogger("test_mcp.audit")
+    audit_logger = logging.getLogger("kb_mcp.audit")
     file_handler = logging.FileHandler(audit_log_path)
     file_handler.setFormatter(logging.Formatter("%(asctime)s - %(message)s"))
     audit_logger.addHandler(file_handler)
@@ -64,7 +64,7 @@ oauth_provider = GitHubOAuthProvider()
 
 # Create FastMCP with OAuth
 mcp = FastMCP(
-    "test-mcp",
+    "kb-mcp",
     auth=AuthSettings(
         issuer_url=BASE_URL,
         resource_server_url=f"{BASE_URL}/mcp",
@@ -163,7 +163,7 @@ async def server_status() -> str:
     active_sessions = await oauth_provider.get_active_sessions_count()
     return json.dumps(
         {
-            "server": "test-mcp",
+            "server": "kb-mcp",
             "timestamp": now.strftime("%Y-%m-%d %H:%M:%S"),
             "uptime_info": "Server is running",
             "active_sessions": active_sessions,

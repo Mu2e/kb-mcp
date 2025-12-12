@@ -3,9 +3,9 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "test-mcp"
+name = "kb-mcp"
 version = "0.1.0"
-description = "Minimal streamable-http MCP server with GitHub OAuth authentication"
+description = "Knowledge Base MCP server with GitHub OAuth authentication"
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
@@ -81,17 +81,17 @@ imports = [
 
 [project.scripts]
 # Server module CLI commands
-test-mcp = "test_mcp.server:main"
-test-mcp-manage-keys = "test_mcp.server.cli_manage_keys:main"
+kb-server = "kb_mcp.server:main"
+kb-server-manage-keys = "kb_mcp.server.cli_manage_keys:main"
 
 # Knowledge Base module CLI commands
-kb = "test_mcp.kb.cli:main"
+kb = "kb_mcp.kb.cli:main"
 
 # Import module CLI commands
-kb-import = "test_mcp.imports.cli:main"
+kb-import = "kb_mcp.imports.cli:main"
 
 # Parser module CLI commands
-kb-parse = "test_mcp.parser.cli:main"
+kb-parse = "kb_mcp.parser.cli:main"
 
 [project.urls]
-Repository = "https://github.com/corrodis/test-mcp"
+Repository = "https://github.com/corrodis/kb-mcp"

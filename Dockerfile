@@ -26,4 +26,4 @@ ENV HOST=0.0.0.0
 ENV USE_HTTPS=false
 
 # Run the server
-CMD ["test-mcp"]
+CMD ["kb-mcp"]

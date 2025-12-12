@@ -1,4 +1,4 @@
-site_name: test-mcp Documentation
+site_name: kb-mcp Documentation
 site_description: Knowledge base system with document parsing, chunking, embedding, and semantic search
 
 theme:

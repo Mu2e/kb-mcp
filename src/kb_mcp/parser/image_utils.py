@@ -120,7 +120,7 @@ def display_image(image_data: Union[bytes, dict, 'Document']) -> None:
         display_image(doc_dicts[1])  # Show first image
         
         # From Document object
-        from test_mcp.kb import get
+        from kb_mcp.kb import get
         doc = get("image-doc-id")
         ```
         display_image(doc)

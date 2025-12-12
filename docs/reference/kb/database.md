@@ -2,6 +2,6 @@
 
 Database session management and initialization.
 
-::: test_mcp.kb.init_db
+::: kb_mcp.kb.init_db
 
-::: test_mcp.kb.get_db_session
+::: kb_mcp.kb.get_db_session

@@ -16,7 +16,7 @@ def main():
     manager = ApiKeyManager(api_keys_file)
 
     if len(sys.argv) < 2:
-        print("Usage: test-mcp-manage-keys <command> [args]")
+        print("Usage: kb-mcp-manage-keys <command> [args]")
         print()
         print("Commands:")
         print("  generate <username> [description]  - Generate a new API key")
@@ -31,7 +31,7 @@ def main():
     if command == "generate":
         if len(sys.argv) < 3:
             print("Error: username required")
-            print("Usage: test-mcp-manage-keys generate <username> [description]")
+            print("Usage: kb-mcp-manage-keys generate <username> [description]")
             sys.exit(1)
 
         username = sys.argv[2]
@@ -54,7 +54,7 @@ def main():
             print("No API keys found.")
             print()
             print("Generate a key with:")
-            print("  test-mcp-manage-keys generate <username> [description]")
+                print("  kb-mcp-manage-keys generate <username> [description]")
         else:
             print(f"Found {len(keys)} API key(s):")
             print()
@@ -69,7 +69,7 @@ def main():
     elif command == "revoke":
         if len(sys.argv) < 3:
             print("Error: API key required")
-            print("Usage: test-mcp-manage-keys revoke <api_key>")
+            print("Usage: kb-mcp-manage-keys revoke <api_key>")
             sys.exit(1)
 
         api_key = sys.argv[2]

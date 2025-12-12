@@ -13,4 +13,4 @@ See [MCP documentation](../guides/mcp-setup.md) and [Web Interface documentation
 
 ## Server Entrypoint
 
-::: test_mcp.server.main
+::: kb_mcp.server.main

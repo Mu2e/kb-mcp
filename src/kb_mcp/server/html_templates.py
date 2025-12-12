@@ -81,7 +81,7 @@ def root_page(active_sessions: int, required_repo: str, username: str | None = N
         """
 
     content = f"""
-    <h1>MCP Server: test-mcp</h1>
+    <h1>MCP Server: kb-mcp</h1>
     <p class="success-box" style="display: inline-block; padding: 10px 20px;">
         <strong>Server Status:</strong> Running
     </p>
@@ -134,7 +134,7 @@ def root_page(active_sessions: int, required_repo: str, username: str | None = N
     </p>
     """
     
-    return base_template("MCP Server - test-mcp", content, None, username)
+    return base_template("MCP Server - kb-mcp", content, None, username)
 
 
 def status_page(active_sessions: int) -> str:
@@ -142,7 +142,7 @@ def status_page(active_sessions: int) -> str:
     content = f"""
     <h1>MCP Server Status: OK</h1>
     <div class="success-box">
-        <p><strong>Server:</strong> test-mcp v0.1.0</p>
+        <p><strong>Server:</strong> kb-mcp v0.1.0</p>
         <p><strong>Endpoint:</strong> <a href="/mcp">/mcp</a> (OAuth protected with GitHub)</p>
         <p><strong>Active sessions:</strong> {active_sessions}</p>
         <p>OAuth is handled automatically by MCP clients</p>

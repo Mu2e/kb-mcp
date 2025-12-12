@@ -35,8 +35,8 @@ def chunk_document(
 
     Example:
         ```python
-        from test_mcp.kb import Document
-        from test_mcp.kb.embedding import chunk_document
+        from kb_mcp.kb import Document
+        from kb_mcp.kb.embedding import chunk_document
 
         doc = Document.from_dict({
             "source_id": "test",

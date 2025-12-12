@@ -34,8 +34,8 @@ except ImportError:
 
 # Use absolute imports when running as script, relative when imported as module
 if _IS_MAIN:
-    from test_mcp.imports.base import Source
-    from test_mcp.kb import add_from_path
+    from kb_mcp.imports.base import Source
+    from kb_mcp.kb import add_from_path
 else:
     from .documents import Source
     from ..kb import add_from_path
@@ -278,7 +278,7 @@ if __name__ == "__main__":
     
     # Import based on whether we're running as script or module
     if _IS_MAIN:
-        from test_mcp.imports.cli import cmd_inspire
+        from kb_mcp.imports.cli import cmd_inspire
     else:
         from .cli import cmd_inspire
     

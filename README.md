@@ -1,20 +1,20 @@
-# test-mcp
+# kb-mcp
 
-Minimal streamable-http MCP server with GitHub OAuth authentication support.
+Knowledge Base MCP server with GitHub OAuth authentication support.
 
 The server runs locally on your machine. For clients like Claude Desktop that require a public URL, we use [ngrok](https://ngrok.com) to create a secure tunnel.
 
 ## Quick Start
 
 ```bash
-# Install dependencies (see docs/server/install.md)
-# For server with KB support (typical installation):
-pip install -e ".[server,kb]"
+# Install dependencies
+pip install -e .
 
-# Or install just what you need:
-# pip install -e ".[server]"  # Server only
-# pip install -e ".[kb]"       # Knowledge base only
-# pip install -e ".[parser]"   # Parser only
+# Optional: Add GCP support
+# pip install -e ".[gcp]"
+
+# Optional: Add documentation tools
+# pip install -e ".[docs]"
 
 # Setup GitHub OAuth App (see docs/server/install.md)
 # Then configure environment

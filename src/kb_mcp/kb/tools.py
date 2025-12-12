@@ -52,7 +52,7 @@ def chunk_and_embed_all(
 
     Example:
         ```python
-        from test_mcp.kb.tools import chunk_and_embed_all
+        from kb_mcp.kb.tools import chunk_and_embed_all
         result = chunk_and_embed_all("inspire-hep")
         print(f"Processed {result['processed']} documents, chunked {result['chunked']}")
         print(f"Processed {result['image_processed']} images, chunked {result['image_chunked']}")
@@ -185,7 +185,7 @@ def image_chunk_and_embed_all(
 
     Example:
         ```python
-        from test_mcp.kb.tools import image_chunk_and_embed_all
+        from kb_mcp.kb.tools import image_chunk_and_embed_all
         result = image_chunk_and_embed_all("inspire-hep")
         print(f"Processed {result['processed']} images, chunked {result['chunked']}")
         ```
@@ -298,7 +298,7 @@ def summarize_all(
 
     Example:
         ```python
-        from test_mcp.kb.tools import summarize_all
+        from kb_mcp.kb.tools import summarize_all
         # Generate summaries and create chunks (but don't embed yet)
         result = summarize_all("inspire-hep", create_summary_chunk=True)
         print(f"Summarized {result['summarized']} documents, created {result['chunked']} chunks")

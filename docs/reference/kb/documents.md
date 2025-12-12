@@ -4,25 +4,25 @@ Functions for adding, retrieving, and managing documents.
 
 ## Add Documents
 
-::: test_mcp.kb.add
+::: kb_mcp.kb.add
 
-::: test_mcp.kb.add_from_path
+::: kb_mcp.kb.add_from_path
 
-::: test_mcp.kb.add_many
+::: kb_mcp.kb.add_many
 
 ## Retrieve Documents
 
-::: test_mcp.kb.get
+::: kb_mcp.kb.get
 
-::: test_mcp.kb.get_count
+::: kb_mcp.kb.get_count
 
-::: test_mcp.kb.get_options
+::: kb_mcp.kb.get_options
 
-::: test_mcp.kb.get_children
+::: kb_mcp.kb.get_children
 
 ## Delete Documents
 
-::: test_mcp.kb.delete_document
+::: kb_mcp.kb.delete_document
 
 ## Document Class Methods
 
@@ -30,22 +30,22 @@ The `Document` class provides convenience methods for common operations on docum
 
 ### Chunking and Embedding
 
-::: test_mcp.kb.db_models.Document.chunk
+::: kb_mcp.kb.db_models.Document.chunk
 
-::: test_mcp.kb.db_models.Document.get_chunks
+::: kb_mcp.kb.db_models.Document.get_chunks
 
-::: test_mcp.kb.db_models.Document.drop_chunks
+::: kb_mcp.kb.db_models.Document.drop_chunks
 
-::: test_mcp.kb.db_models.Document.chunk_and_embed
+::: kb_mcp.kb.db_models.Document.chunk_and_embed
 
 ### Summary Generation
 
-::: test_mcp.kb.db_models.Document.generate_summary
+::: kb_mcp.kb.db_models.Document.generate_summary
 
 ### Creation Methods
 
-::: test_mcp.kb.db_models.Document.from_dict
+::: kb_mcp.kb.db_models.Document.from_dict
 
-::: test_mcp.kb.db_models.Document.from_file
+::: kb_mcp.kb.db_models.Document.from_file
 
-::: test_mcp.kb.db_models.Document.to_dict
+::: kb_mcp.kb.db_models.Document.to_dict
