@@ -74,7 +74,7 @@ from . import add, add_from_path, add_source, deduplicate, get, get_stats, list_
 from .utils import find_all_duplicates
 from .db_models import Document, Source
 from .database import get_db_session
-from ..parser import parse
+from kb_mcp.parser import parse
 
 # Import embedding functions (may not be available if dependencies not installed)
 try:

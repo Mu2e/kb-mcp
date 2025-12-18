@@ -20,7 +20,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import relationship
 
-from ..db_models import Base, Document
+from ..db_models import Base, Document, JSONB
 from .types import Vector
 
 
@@ -133,7 +133,7 @@ class EmbeddingConfig(Base):
     dimension = Column(Integer, nullable=False)
 
     # Metadata - flexible JSON field for API parameters, version, etc.
-    meta = Column(JSON, nullable=True, default=dict)
+    meta = Column(JSONB, nullable=True, default=dict)  # JSONB for PostgreSQL, JSON for SQLite
 
     # Timestamp
     created_time = Column(
@@ -224,7 +224,7 @@ class ChunkStrategy(Base):
     strategy = Column(String(128), primary_key=True)
 
     # Metadata - flexible JSON field for chunking parameters
-    meta = Column(JSON, nullable=True, default=dict)
+    meta = Column(JSONB, nullable=True, default=dict)  # JSONB for PostgreSQL, JSON for SQLite
 
     # Timestamp
     created_time = Column(
@@ -327,7 +327,7 @@ class ParsingLog(Base):
     )
 
     # Additional metadata (JSON)
-    meta = Column(JSON, nullable=True, default=dict)
+    meta = Column(JSONB, nullable=True, default=dict)  # JSONB for PostgreSQL, JSON for SQLite
 
     # Relationships
     document = relationship("Document", backref="parsing_logs")
@@ -412,7 +412,7 @@ class ChunkEmbeddingLog(Base):
     )
 
     # Additional metadata (JSON)
-    meta = Column(JSON, nullable=True, default=dict)
+    meta = Column(JSONB, nullable=True, default=dict)  # JSONB for PostgreSQL, JSON for SQLite
 
     # Relationships
     document = relationship("Document", backref="chunk_embedding_logs")
@@ -474,7 +474,7 @@ class SummaryLog(Base):
     )
 
     # Additional metadata (JSON) - can store token counts, prompt info, etc.
-    meta = Column(JSON, nullable=True, default=dict)
+    meta = Column(JSONB, nullable=True, default=dict)  # JSONB for PostgreSQL, JSON for SQLite
 
     # Relationships
     document = relationship("Document", backref="summary_logs")
@@ -552,7 +552,7 @@ class Chunk(Base):
     )
 
     # Additional metadata (JSON)
-    meta = Column(JSON, nullable=True, default=dict)
+    meta = Column(JSONB, nullable=True, default=dict)  # JSONB for PostgreSQL, JSON for SQLite
 
     # Timestamp
     created_time = Column(

@@ -202,6 +202,32 @@ def _ensure_db_initialized() -> None:
         _db_initialized = True
 
 
+def _sanitize_text(text: Optional[str]) -> Optional[str]:
+    """Remove NULL bytes from text (PostgreSQL doesn't allow them).
+    
+    Args:
+        text: Text string that may contain NULL bytes
+        
+    Returns:
+        Text with NULL bytes removed, or None if input was None
+    """
+    if text is None:
+        return None
+    return text.replace('\x00', '')
+
+
+def _sanitize_document(document: Document) -> None:
+    """Sanitize document fields to remove NULL bytes and other problematic characters.
+    
+    Args:
+        document: Document object to sanitize
+    """
+    if document.text:
+        document.text = _sanitize_text(document.text)
+    if document.title:
+        document.title = _sanitize_text(document.title)
+
+
 def _compute_hash(document: Document) -> None:
     """Compute and set SHA256 hash for document content.
 
@@ -285,6 +311,9 @@ def add(
     if document.doc_type == "image" and document.binary is None:
         raise ValueError("binary must be provided for image documents")
 
+    # Sanitize document fields (remove NULL bytes, etc.)
+    _sanitize_document(document)
+    
     # Always compute content hash
     _compute_hash(document)
 
@@ -499,7 +528,7 @@ def add_from_path(
     
     # Import parse function (lazy import to avoid circular dependencies)
     try:
-        from ..parser import parse
+        from kb_mcp.parser import parse
     except ImportError:
         raise ImportError(
             "Parser module not available. Install with: pip install -e '.[parser]'"

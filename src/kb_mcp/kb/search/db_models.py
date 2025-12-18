@@ -12,7 +12,7 @@ from sqlalchemy import (
     func,
 )
 
-from ..db_models import Base
+from ..db_models import Base, JSONB
 
 
 class SearchLog(Base):
@@ -61,12 +61,12 @@ class SearchLog(Base):
     chunking_strategy = Column(String(128), nullable=True, index=True)
     
     # Filter parameters (stored as JSON)
-    filter_params = Column(JSON, nullable=True)  # Elasticsearch-style filter
-    metadata_filters = Column(JSON, nullable=True)  # Simple key=value filters
+    filter_params = Column(JSONB, nullable=True)  # Elasticsearch-style filter (JSONB for PostgreSQL, JSON for SQLite)
+    metadata_filters = Column(JSONB, nullable=True)  # Simple key=value filters (JSONB for PostgreSQL, JSON for SQLite)
     
     # Results - stored as JSON list of dicts with document_id and chunk_ids
     # Format: [{"document_id": "...", "chunk_ids": ["...", "..."]}, ...]
-    results = Column(JSON, nullable=False)  # List of result objects with document_id and chunk_ids
+    results = Column(JSONB, nullable=False)  # List of result objects with document_id and chunk_ids (JSONB for PostgreSQL, JSON for SQLite)
     best_similarity = Column(Float, nullable=True)  # Best similarity score across all results
     total_results = Column(Integer, nullable=False, default=0)
     

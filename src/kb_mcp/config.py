@@ -22,9 +22,6 @@ def _get_int(key: str, default: int) -> int:
 # --- Configuration Getters ---
 
 # Database
-def get_database_url() -> str:
-    """**Env Variable:** `DB_URL`"""
-    return os.getenv("DB_URL", "")
 
 def get_database_config() -> dict:
     """All database settings.
@@ -32,28 +29,20 @@ def get_database_config() -> dict:
     Returns:
         dict: Database configuration with keys:
 
-            * `url` (str): Full connection URL (Env: `DB_URL`).
-            * `host` (str): Database host (Env: `DB_HOST`).
+            * `host` (str): Database host (Env: `DB_HOST`, default: 'localhost').
             * `port` (int): Database port (Env: `DB_PORT`, default: 5432).
             * `name` (str): Database name (Env: `DB_NAME`, default: 'kb_mcp').
             * `user` (str): Database user (Env: `DB_USER`).
             * `password` (str): Database password (Env: `DB_PASSWORD`).
             * `sqlite_path` (str): Path to SQLite DB (Env: `SQLITE_DB_PATH`, default: 'data/kb.db').
-            * `echo` (bool): Log SQL queries (Env: `DB_ECHO`, default: False).
-            * `pool_size` (int): Connection pool size (Env: `DB_POOL_SIZE`, default: 5).
-            * `max_overflow` (int): Max overflow connections (Env: `DB_MAX_OVERFLOW`, default: 10).
     """
     return {
-        'url': get_database_url(),
-        'host': os.getenv("DB_HOST"),
+        'host': os.getenv("DB_HOST","localhost"),
         'port': _get_int("DB_PORT", 5432),
         'name': os.getenv("DB_NAME", "kb_mcp"),
         'user': os.getenv("DB_USER"),
         'password': os.getenv("DB_PASSWORD"),
         'sqlite_path': os.getenv("SQLITE_DB_PATH", "data/kb.db"),
-        'echo': _get_bool("DB_ECHO", False),
-        'pool_size': _get_int("DB_POOL_SIZE", 5),
-        'max_overflow': _get_int("DB_MAX_OVERFLOW", 10),
     }
 
 # Server

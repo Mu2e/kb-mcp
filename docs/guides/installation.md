@@ -101,19 +101,26 @@ kb --help
 
 After installation, you may want to:
 
-1. **Start the Server**
+
+### **Start the Server**
+
    ```bash
    kb-server
    ```
-   The default setting start the server at (localhost:8443)[localhost:8443] which you can access with your browser.
+   The default setting start the server at [localhost:8443](https://localhost:8443) which you can access with your browser.
 
-**Note**: For production (if bound other than localhost), use an authentification scheme with https.
+   **Note**: For production (if bound other than localhost), use an authentification scheme with https.
 
-2. **Connect an MCP Client**  
+
+### **Connect an MCP Client**
    See the [MCP client documentation](https://github.com/corrodis/mc) for instructions on connecting to a remote MCP server.
 
+### **Add New Documents**
 
-3. **Use the CLI**
+See the [Adding Documents Guide](adding-documents.md) for instructions on how to add new documents to your knowledge base.
+
+
+### **Use the CLI**
 
    For detailed usage of all available CLI tools, see the [CLI Guide](cli.md).
 
@@ -122,7 +129,9 @@ After installation, you may want to:
    kb --help
    ```
 
-4. **Explore Documentation**
+
+### Explore Documentation
+   
    - [Configuration Guide](../reference/config.md) - All configuration options
    - [Knowledge Base Guide](../reference/kb.md) - Using the KB module
    - [Server Guide](../reference/server.md) - Running the MCP server

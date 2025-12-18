@@ -15,12 +15,30 @@ from sqlalchemy import (
     String,
     Text,
     func,
+    TypeDecorator,
 )
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
 from sqlalchemy.inspection import inspect as sqlalchemy_inspect
 
 Base = declarative_base()
+
+
+class JSONB(TypeDecorator):
+    """JSONB type for PostgreSQL, JSON for SQLite.
+    
+    This type uses PostgreSQL's JSONB type for better performance and indexing,
+    but falls back to JSON for SQLite compatibility.
+    """
+    impl = JSON
+    cache_ok = True
+
+    def load_dialect_impl(self, dialect):
+        if dialect.name == 'postgresql':
+            return dialect.type_descriptor(postgresql.JSONB)
+        else:
+            return dialect.type_descriptor(JSON)
 
 
 class Source(Base):
@@ -45,7 +63,7 @@ class Source(Base):
     name = Column(String(512), nullable=True)  # Human-readable name
     description = Column(Text, nullable=True)
     base_uri = Column(String(2048), nullable=True)  # Base URI for this source
-    meta = Column(JSON, nullable=True, default=dict)  # Additional metadata (JSON)
+    meta = Column(JSONB, nullable=True, default=dict)  # Additional metadata (JSONB for PostgreSQL, JSON for SQLite)
 
     # Timestamps
     created_time = Column(
@@ -134,7 +152,7 @@ class Document(Base):
     binary = Column(LargeBinary, nullable=True)
 
     # Meta - flexible JSON field for additional metadata
-    meta = Column(JSON, nullable=True, default=dict)
+    meta = Column(JSONB, nullable=True, default=dict)  # JSONB for PostgreSQL, JSON for SQLite
 
     # Timestamps
     # creating_time: when document was created in source system
@@ -618,7 +636,7 @@ class Document(Base):
         # Auto-detect MIME type if not provided
         if "source_type" not in doc_data:
             try:
-                from ..parser import detect_mime_type
+                from kb_mcp.parser import detect_mime_type
                 mime_type = detect_mime_type(file_path)
             except ImportError:
                 # Fallback to mimetypes if parser not available

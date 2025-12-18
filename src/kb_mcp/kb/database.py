@@ -58,13 +58,14 @@ def get_database_url() -> str:
     # Get configuration from config module
     db_config = get_database_config()
 
-    # Check for explicit DB_URL first
-    if db_config['url']:
-        return db_config['url']
 
     # Check for PostgreSQL components
-    if db_config['host'] and db_config['user'] and db_config['password']:
-        return f"postgresql://{db_config['user']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/{db_config['name']}"
+    if db_config['user'] and db_config['name']:
+        if db_config['password']:
+            return f"postgresql://{db_config['user']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/{db_config['name']}"
+        else:
+            return f"postgresql://{db_config['user']}@{db_config['host']}:{db_config['port']}/{db_config['name']}"
+
 
     # Default to SQLite for development
     sqlite_path = db_config['sqlite_path']
@@ -84,8 +85,7 @@ def create_engine_with_config() -> Engine:
         # Enable foreign keys for SQLite
         engine = create_engine(
             database_url,
-            connect_args={"check_same_thread": False},
-            echo=db_config['echo'],
+            connect_args={"check_same_thread": False}
         )
 
         @event.listens_for(engine, "connect")
@@ -99,10 +99,7 @@ def create_engine_with_config() -> Engine:
 
     # PostgreSQL configuration
     return create_engine(
-        database_url,
-        echo=db_config['echo'],
-        pool_size=db_config['pool_size'],
-        max_overflow=db_config['max_overflow'],
+        database_url
     )
 
 
@@ -234,6 +231,16 @@ def init_db(create_tables: bool = True) -> None:
     database_url = get_database_url()
 
     logger.info(f"Initializing database: {database_url.split('@')[-1] if '@' in database_url else database_url}")
+
+    # Enable pgvector extension for PostgreSQL (required for vector columns)
+    if database_url.startswith('postgresql'):
+        try:
+            with engine.connect() as conn:
+                conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+                conn.commit()
+            logger.info("PostgreSQL vector extension enabled")
+        except Exception as e:
+            logger.warning(f"Could not enable vector extension (may not have permissions): {e}")
 
     if create_tables:
         # Create all tables (including SearchLog from search module and eval models)

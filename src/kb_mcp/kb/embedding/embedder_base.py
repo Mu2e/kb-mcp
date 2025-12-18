@@ -124,9 +124,9 @@ class BaseEmbedder(ABC):
         should_close = session is None
 
         with get_db_session(session) as session:
-            # Ensure base tables exist (embedding_configs, chunks)
-            from ..db_models import Base
-            Base.metadata.create_all(bind=session.bind, checkfirst=True)
+            # Ensure database is initialized (creates base tables and enables pgvector extension)
+            from ..database import init_db
+            init_db()
             
             # Get or create EmbeddingConfig (each config corresponds to a table)
             config = session.query(EmbeddingConfig).filter(

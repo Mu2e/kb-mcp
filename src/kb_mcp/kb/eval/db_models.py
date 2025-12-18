@@ -21,7 +21,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import relationship, Session
 
-from ..db_models import Base
+from ..db_models import Base, JSONB
 from ..database import get_db_session
 from ..database import get_db_session
 
@@ -62,10 +62,10 @@ class EvalGeneration(Base):
     # Source information - which source the documents came from
     source_id = Column(String(256), nullable=True, index=True)  # e.g., "mu2e-docdb"
     source_type = Column(String(64), nullable=False, default="text", index=True)
-    source_filters = Column(JSON, nullable=True)  # Filters applied when selecting documents
+    source_filters = Column(JSONB, nullable=True)  # Filters applied when selecting documents (JSONB for PostgreSQL, JSON for SQLite)
 
     # Metadata (can include model, specific document IDs used, etc.)
-    meta = Column(JSON, nullable=True, default=dict)
+    meta = Column(JSONB, nullable=True, default=dict)  # JSONB for PostgreSQL, JSON for SQLite
 
     # Content hash for deduplication (SHA256 of all identifying fields)
     # Allows database-level uniqueness checking even with JSON meta field
@@ -151,7 +151,7 @@ class EvalDataset(Base):
     hostname = Column(String(256), nullable=True, index=True)  # Where question was generated
 
     # Metadata
-    meta = Column(JSON, nullable=True, default=dict)
+    meta = Column(JSONB, nullable=True, default=dict)  # JSONB for PostgreSQL, JSON for SQLite
     created_time = Column(
         DateTime(timezone=True),
         nullable=False,
@@ -220,7 +220,7 @@ class EvalAudit(Base):
     score = Column(Float, nullable=True)  # Optional 0.0-1.0 confidence
 
     # Metadata
-    meta = Column(JSON, nullable=True, default=dict)
+    meta = Column(JSONB, nullable=True, default=dict)  # JSONB for PostgreSQL, JSON for SQLite
     created_time = Column(
         DateTime(timezone=True),
         nullable=False,
@@ -288,19 +288,19 @@ class EvalRun(Base):
         nullable=True,
         index=True,
     )
-    audit_filters = Column(JSON, nullable=True)  # e.g., {"verdict": "approved", "audit_type": "human_review"}
+    audit_filters = Column(JSONB, nullable=True)  # e.g., {"verdict": "approved", "audit_type": "human_review"} (JSONB for PostgreSQL, JSON for SQLite)
 
     # Search configuration
     embedding_name = Column(String(64), nullable=True, index=True)
     chunking_strategy = Column(String(128), nullable=True, index=True)
     max_results = Column(Integer, nullable=False, default=10)
-    search_filters = Column(JSON, nullable=True)  # Document filters
+    search_filters = Column(JSONB, nullable=True)  # Document filters (JSONB for PostgreSQL, JSON for SQLite)
 
     # Judge strategy
-    judge_strategy = Column(JSON, nullable=True)  # Flexible for future expansion
+    judge_strategy = Column(JSONB, nullable=True)  # Flexible for future expansion (JSONB for PostgreSQL, JSON for SQLite)
 
     # Metadata
-    meta = Column(JSON, nullable=True, default=dict)
+    meta = Column(JSONB, nullable=True, default=dict)  # JSONB for PostgreSQL, JSON for SQLite
     created_time = Column(
         DateTime(timezone=True),
         nullable=False,
@@ -390,7 +390,7 @@ class EvalResult(Base):
     best_similarity = Column(Float, nullable=True)
 
     # Metadata
-    meta = Column(JSON, nullable=True, default=dict)
+    meta = Column(JSONB, nullable=True, default=dict)  # JSONB for PostgreSQL, JSON for SQLite
     created_time = Column(
         DateTime(timezone=True),
         nullable=False,
@@ -471,7 +471,7 @@ class EvalRetrievedDocument(Base):
     # Retrieval data
     rank = Column(Integer, nullable=False, index=True)  # 1-based
     similarity = Column(Float, nullable=True)
-    chunk_ids = Column(JSON, nullable=True)  # Array of chunk IDs that contributed to this result
+    chunk_ids = Column(JSONB, nullable=True)  # Array of chunk IDs that contributed to this result (JSONB for PostgreSQL, JSON for SQLite)
 
     # Timestamp
     created_time = Column(

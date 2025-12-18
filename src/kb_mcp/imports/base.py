@@ -154,21 +154,6 @@ class Source(ABC):
         
         logger.info(f"Successfully processed {len(documents)} document(s)")
         
-        # Optionally chunk and embed all documents for this source
-        if auto_embed:
-            try:
-                logger.info(f"Starting automatic chunking and embedding for source_id: {self.source_id}")
-                from ..kb.tools import chunk_and_embed_all
-                embed_result = chunk_and_embed_all(source_id=self.source_id)
-                logger.info(
-                    f"Embedding complete: {embed_result['chunked']} chunked, "
-                    f"{embed_result['skipped']} skipped, {embed_result['errors']} errors"
-                )
-            except ImportError as e:
-                logger.warning(f"Embedding module not available, skipping auto-embed: {e}")
-            except Exception as e:
-                logger.error(f"Error during auto-embed: {e}", exc_info=True)
-        
         # Optionally generate summaries for all documents for this source
         if auto_summarize:
             try:
@@ -190,6 +175,21 @@ class Source(ABC):
             except Exception as e:
                 logger.error(f"Error during auto-summarize: {e}", exc_info=True)
         
+        # Optionally chunk and embed all documents for this source
+        if auto_embed:
+            try:
+                logger.info(f"Starting automatic chunking and embedding for source_id: {self.source_id}")
+                from ..kb.tools import chunk_and_embed_all
+                embed_result = chunk_and_embed_all(source_id=self.source_id)
+                logger.info(
+                    f"Embedding complete: {embed_result['chunked']} chunked, "
+                    f"{embed_result['skipped']} skipped, {embed_result['errors']} errors"
+                )
+            except ImportError as e:
+                logger.warning(f"Embedding module not available, skipping auto-embed: {e}")
+            except Exception as e:
+                logger.error(f"Error during auto-embed: {e}", exc_info=True)
+
         return documents
     
     def _process_items_sequential(
@@ -205,6 +205,8 @@ class Source(ABC):
         processed = 0
         errors = 0
         
+        # Commit after each document to ensure progress is saved
+        # auto_commit=True will handle final cleanup (no-op since everything is already committed)
         with get_db_session() as session:
             for i, item in enumerate(items):
                 if max_results and processed >= max_results:
@@ -218,19 +220,22 @@ class Source(ABC):
                     if doc_list:
                         documents.extend(doc_list)
                         processed += 1
+                        
+                        # Commit after each document to ensure progress is saved
+                        # This is slower but safer - if an error occurs, we don't lose all progress
+                        session.commit()
                     else:
                         logger.warning(f"Item {item_id} returned no documents")
                 except Exception as e:
                     errors += 1
                     logger.error(f"Error processing item {item_id}: {e}", exc_info=True)
+                    # Rollback on error to avoid leaving partial data
+                    session.rollback()
                     continue
                 
                 # Be polite - delay between requests
                 if self.delay > 0:
                     time.sleep(self.delay)
-            
-            # Expunge all documents from session before it closes
-            session.expunge_all()
         
         if errors > 0:
             logger.warning(f"Encountered {errors} error(s) during processing")
