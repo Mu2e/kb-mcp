@@ -18,6 +18,7 @@ from .oauth import GitHubOAuthProvider
 from . import html_templates
 from . import audit
 from . import admin
+from . import mcp as mcp_tools
 from ..config import get_server_config
 
 # Configure logging
@@ -74,118 +75,10 @@ mcp = FastMCP(
 )
 
 
-@mcp.tool()
-def generate_html(title: str, content: str) -> str:
-    """Generate simple HTML page."""
-    html = f"""<!DOCTYPE html>
-<html>
-<head><title>{title}</title></head>
-<body>
-    <h1>{title}</h1>
-    <p>{content}</p>
-</body>
-</html>"""
-    return html
-
-
-@mcp.tool()
-def kb_get_document(
-    identifier: str | None = None,
-    uuid: str | None = None,
-    source_id: str | None = None,
-    doc_id: str | None = None,
-) -> str:
-    """Get a document from the knowledge base."""
-    from ..kb import get
-    import json
-
-    try:
-        result = get(
-            identifier=identifier,
-            uuid=uuid,
-            source_id=source_id,
-            doc_id=doc_id,
-        )
-
-        if result is None:
-            return json.dumps({"error": "Document not found"}, indent=2)
-
-        if isinstance(result, list):
-            return json.dumps(
-                {
-                    "count": len(result),
-                    "documents": [
-                        {
-                            "id": doc.id,
-                            "source_id": doc.source_id,
-                            "doc_id": doc.doc_id,
-                            "uri": doc.uri,
-                            "source_type": doc.source_type,
-                            "text_preview": doc.text[:500] if doc.text else None,
-                        }
-                        for doc in result
-                    ],
-                },
-                indent=2,
-            )
-        else:
-            doc = result
-            return json.dumps(
-                {
-                    "id": doc.id,
-                    "source_id": doc.source_id,
-                    "doc_id": doc.doc_id,
-                    "uri": doc.uri,
-                    "source_type": doc.source_type,
-                    "doc_type": doc.doc_type,
-                    "text": doc.text,
-                    "meta": doc.meta,
-                    "insert_time": (
-                        (doc.insert_time.replace(tzinfo=timezone.utc) if doc.insert_time.tzinfo is None else doc.insert_time.astimezone(timezone.utc)).strftime('%Y-%m-%dT%H:%M:%SZ')
-                        if doc.insert_time
-                        else None
-                    ),
-                },
-                indent=2,
-            )
-    except Exception as e:
-        logger.error(f"Error in kb_get_document: {e}", exc_info=True)
-        return json.dumps({"error": str(e)}, indent=2)
-
-
-@mcp.resource("status://live")
-async def server_status() -> str:
-    """Get live server status with current timestamp."""
-    from datetime import datetime, timezone
-    import json
-
-    now = datetime.now()
-    active_sessions = await oauth_provider.get_active_sessions_count()
-    return json.dumps(
-        {
-            "server": "kb-mcp",
-            "timestamp": now.strftime("%Y-%m-%d %H:%M:%S"),
-            "uptime_info": "Server is running",
-            "active_sessions": active_sessions,
-            "base_url": BASE_URL,
-        },
-        indent=2,
-    )
-
-
-@mcp.resource("log://{name}")
-def read_log(name: str) -> str:
-    """Read a log file by name."""
-    return (
-        f"This is the content of the {name} log file.\n"
-        "Example log entry: [2025-01-29 12:00:00] INFO: Sample log message"
-    )
-
-
-@mcp.prompt()
-def webpage_prompt(topic: str) -> str:
-    """Generate a prompt for creating a webpage about a topic."""
-    return f"Create a simple HTML webpage about {topic} using the generate_html tool."
+# Register MCP tools, resources, and prompts
+mcp_tools.register_tools(mcp)
+mcp_tools.register_resources(mcp, oauth_provider, BASE_URL)
+mcp_tools.register_prompts(mcp)
 
 
 def main():
@@ -194,10 +87,21 @@ def main():
     import json
     from starlette.responses import HTMLResponse, RedirectResponse
     from starlette.middleware.base import BaseHTTPMiddleware
+    from starlette.middleware.cors import CORSMiddleware
     from starlette.requests import Request
     from starlette.staticfiles import StaticFiles
 
     app = mcp.streamable_http_app()
+    
+    # Add CORS middleware for browser-based MCP clients (tested with MCP Inspector)
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+        expose_headers=["mcp-session-id"],  # Important for MCP session tracking
+    )
     
     # Serve static files (CSS, JS)
     static_path = Path(__file__).parent / "static"
@@ -206,12 +110,9 @@ def main():
     # Audit and debug middleware
     class AuditMiddleware(BaseHTTPMiddleware):
         async def dispatch(self, request, call_next):
-            # Log all incoming requests (DEBUG level only)
-            if MCP_LOG_LEVEL == "DEBUG":
-                scheme = request.url.scheme.upper()  # HTTP or HTTPS
-                method = request.method
-                path = request.url.path
-                logger.debug(f"[{scheme}] {method} {path}")
+            # Debug logging for all requests
+            if MCP_LOG_LEVEL == "DEBUG" and request.url.path.startswith("/mcp"):
+                logger.debug(f"MCP: {request.method} {request.url.path}")
 
             if request.url.path == "/mcp" and request.method == "POST":
                 # Extract token and username for audit logging
@@ -221,48 +122,35 @@ def main():
                     token = auth_header[7:]
                     username = await oauth_provider.get_username_for_token(token)
 
-                # Read and parse JSON-RPC request for tool calls
-                if username and AUDIT_LOG_FILE:
-                    body = await request.body()
-                    try:
-                        rpc_request = json.loads(body)
-
-                        # Check if this is a tool call (tools/call method)
-                        if (
-                            isinstance(rpc_request, dict)
-                            and rpc_request.get("method") == "tools/call"
-                        ):
-                            params = rpc_request.get("params", {})
-                            tool_name = params.get("name", "unknown")
-                            tool_args = params.get("arguments", {})
-
-                            # Log the tool call
+                # Read and parse JSON-RPC request for tool call logging
+                body = await request.body()
+                try:
+                    rpc_request = json.loads(body)
+                    rpc_method = rpc_request.get("method", "unknown")
+                    
+                    # Log tool calls at INFO level
+                    if rpc_method == "tools/call":
+                        params = rpc_request.get("params", {})
+                        tool_name = params.get("name", "unknown")
+                        tool_args = params.get("arguments", {})
+                        logger.info(f"MCP tool call: {tool_name}")
+                        
+                        # Audit logging to file
+                        if username and AUDIT_LOG_FILE:
                             audit.log_tool_call(username, tool_name, tool_args)
+                    elif MCP_LOG_LEVEL == "DEBUG":
+                        logger.debug(f"MCP method: {rpc_method}")
+                            
+                except json.JSONDecodeError as e:
+                    logger.warning(f"MCP: Failed to parse JSON: {e}")
 
-                        # Reconstruct request with body
-                        scope = request.scope
-
-                        async def receive():
-                            return {"type": "http.request", "body": body}
-
-                        request = Request(scope, receive)
-                    except Exception as e:
-                        logger.error(f"Error parsing request for audit: {e}")
-
-                # Debug logging
-                if MCP_LOG_LEVEL == "DEBUG":
-                    logger.debug(f"Request: {request.method} {request.url.path}")
-                    logger.debug(f"Headers: {dict(request.headers)}")
-                    if auth_header:
-                        logger.debug(f"Authorization: {auth_header[:50]}...")
-                    else:
-                        logger.debug("No Authorization header found")
+                # Reconstruct request with body (since we consumed it)
+                scope = request.scope
+                async def receive():
+                    return {"type": "http.request", "body": body}
+                request = Request(scope, receive)
 
             response = await call_next(request)
-
-            if request.url.path == "/mcp" and MCP_LOG_LEVEL == "DEBUG":
-                logger.debug(f"Response status: {response.status_code}")
-
             return response
 
     app.add_middleware(AuditMiddleware)

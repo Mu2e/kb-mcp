@@ -82,6 +82,7 @@ imports = [
 [project.scripts]
 # Server module CLI commands
 kb-server = "kb_mcp.server:main"
+kb-server-stdio = "kb_mcp.server.mcp_stdio:main"
 kb-server-manage-keys = "kb_mcp.server.cli_manage_keys:main"
 
 # Knowledge Base module CLI commands

@@ -2,6 +2,13 @@
 
 The Model Context Protocol (MCP) is an open standard for connecting AI assistants to data sources and tools. Learn more at [modelcontextprotocol.io](https://modelcontextprotocol.io).
 
+## Available Tools
+
+- `kb_search` - Search the knowledge base using semantic search
+- `kb_get` - Get a specific document by identifier
+
+See [MCP Tools](../reference/mcp.md) for detailed parameter documentation.
+
 ## Server Modes
 
 This server supports two MCP modes:

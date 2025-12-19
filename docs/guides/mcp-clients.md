@@ -5,13 +5,33 @@ This page describes how to connect different MCP clients to a remote MCP server.
 
 ## Claude Desktop
 
-Claude Desktop connects to remote MCP servers through **Connectors**.
+Claude Desktop can connect via **stdio** (local) or **Connectors** (remote).
+
+### Option 1: Stdio (Local, Recommended)
+
+The simplest setup - runs locally without authentication.
+
+Edit `~/Library/Application Support/Claude/claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "kb-mcp": {
+      "command": "/path/to/your/.venv/bin/kb-server-stdio"
+    }
+  }
+}
+```
+
+See [MCP Stdio](mcp-stdio.md) for details.
+
+### Option 2: Remote Connector (OAuth)
+
+For connecting to a remote server via OAuth.
 
 **Authentication**: OAuth (GitHub)
 
 **Important**: The OAuth flow is handled by claude.ai, which means your server must be accessible on the public internet. Deploy to [Cloud Run](deploy-cloudrun.md) for production, or use ngrok for local development (see [Installation](install.md)).
-
-### Setup
 
 1. In Claude Desktop:
    - Go to **Connectors**
@@ -182,8 +202,9 @@ npx @modelcontextprotocol/inspector
 ```
 
 In the Inspector UI, select **HTTP transport** and configure:
+
 - URL: `https://your-server-url/mcp` (Cloud Run or ngrok)
-- Authentication: Use API key with Bearer token, or proxy through OAuth-enabled client
+- Authorization: Use API key with Bearer <token>, or proxy through OAuth-enabled client
 
 ## curl / HTTP Clients
 
