@@ -161,19 +161,20 @@ class BaseEmbedder(ABC):
                 from sqlalchemy import text, inspect as sqlalchemy_inspect
                 index_name = f"{embedding_table.name}_vector_idx"
                 inspector = sqlalchemy_inspect(session.bind)
-                
+
                 # Check if index already exists
                 indexes = inspector.get_indexes(embedding_table.name)
                 index_exists = any(idx['name'] == index_name for idx in indexes)
-                
+
                 if not index_exists:
                     try:
                         # Create IVFFlat index with cosine distance operator
                         # lists = 250 is a reasonable default (can be optimized later based on data size)
                         # vector_cosine_ops is the operator class for cosine distance
+                        # Quote identifiers to handle special characters like hyphens
                         session.execute(text(f"""
-                            CREATE INDEX IF NOT EXISTS {index_name}
-                            ON {embedding_table.name}
+                            CREATE INDEX IF NOT EXISTS "{index_name}"
+                            ON "{embedding_table.name}"
                             USING ivfflat (embedding vector_cosine_ops)
                             WITH (lists = 250)
                         """))

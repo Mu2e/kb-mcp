@@ -185,6 +185,7 @@ def cmd_eval_run(args):
             generation_id=args.generation_id,
             audit_filters=audit_filters or None,
             embedding_name=args.embedding_name,
+            chunking_strategy=args.chunking_strategy,
             max_results=args.max_results,
             search_filters=search_filters or None,
             judge_strategy=judge_strategy,
@@ -348,6 +349,7 @@ def setup_commands(subparsers):
     eval_run_parser.add_argument("--include-invalid", action="store_true", help="Include questions marked as invalid")
     eval_run_parser.add_argument("--audit-type", help="Filter by audit type (e.g., 'llm_judge', 'human_review')")
     eval_run_parser.add_argument("--embedding-name", help="Embedding model to use")
+    eval_run_parser.add_argument("--chunking-strategy", help="Chunking strategy to use for search (e.g., 'summary', 'tokens', 'tokens_1000_200')")
     eval_run_parser.add_argument("--max-results", type=int, default=10, help="Max search results to retrieve")
     eval_run_parser.add_argument("--search-source-id", help="Filter search to specific source")
     eval_run_parser.add_argument("--use-judge", action="store_true", help="Run LLM judge on results")

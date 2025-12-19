@@ -4,12 +4,12 @@ The evaluation module helps test and benchmark the quality of semantic search by
 
 **Evaluation workflow:**
 
-1. **Generate** synthetic questions from documents using LLM-based strategies
-2. **Audit** (optional) - review and filter questions for quality
-3. **Run** evaluation runs to test retrieval accuracy
-4. **View** results via web interface or programmatically
+1. **[Generate](#1-generate-evaluation-dataset)** synthetic questions from documents using LLM-based strategies
+2. **[Audit](#2-audit-questions-optional)** (optional) - review and filter questions for quality
+3. **[Run](#3-run-evaluation)** evaluation runs to test retrieval accuracy
+4. **[View](#4-view-results)** results via web interface or programmatically
 
-## Generate Evaluation Dataset
+## 1. Generate Evaluation Dataset
 
 ### CLI
 
@@ -45,7 +45,7 @@ print(f"Generated {result['num_questions_generated']} questions")
 print(f"Generation ID: {generation_id}")
 ```
 
-## Audit Questions (Optional)
+## 2. Audit Questions (Optional)
 
 Review and filter generated questions before running evaluations.
 
@@ -79,7 +79,7 @@ for question in questions:
     print(f"Question {question.id}: {'Valid' if audit.is_valid else 'Invalid'}")
 ```
 
-## Run Evaluation
+## 3. Run Evaluation
 
 ### CLI
 
@@ -92,6 +92,9 @@ kb eval run --generation-id <generation_id> --name "with-judge" --use-judge --ju
 
 # Filter by audit type
 kb eval run --generation-id <generation_id> --name "llm-audited" --audit-type llm_judge
+
+# Use specific chunking strategy (e.g., only summary chunks)
+kb eval run --generation-id <generation_id> --name "summary-only" --chunking-strategy summary --audit-type llm_judge --use-judge
 
 # Include invalid questions
 kb eval run --generation-id <generation_id> --name "all-questions" --include-invalid
@@ -128,7 +131,7 @@ result = eval(
 )
 ```
 
-## View Results
+## 4. View Results
 
 ### Web Interface
 

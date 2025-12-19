@@ -11,7 +11,7 @@ try:
     from ..embedding import (
         get_chunk_strategies, get_chunks, drop_chunks, get_embedding_names,
         embed_chunk, embed_chunks, chunk_and_embed, get_embeddings, get_embedding_vector,
-        drop_embedding, drop_embedding_table, chunk_document
+        drop_embedding, chunk_document
     )
     from ..embedding.db_models import Chunk, ChunkEmbeddingLog, ParsingLog
     EMBEDDING_AVAILABLE = True
@@ -345,18 +345,40 @@ def cmd_embedding_drop(args):
         sys.exit(1)
 
 
-def cmd_embedding_drop_table(args):
-    """Drop an embedding table and configuration."""
+def cmd_embedding_embed_all(args):
+    """Generate embeddings for all chunks that don't have them yet."""
     if not EMBEDDING_AVAILABLE:
         print("Error: Embedding module not available.")
         sys.exit(1)
 
     try:
-        result = drop_embedding_table(args.embedding_name)
-        print(f"Dropped embedding table '{result['table_name']}'")
-        print(f"  Removed {result['count']} embedding(s)")
+        from ..tools import embed_all
+
+        print("Generating embeddings for chunks without embeddings")
+        if args.source_id:
+            print(f"  Filtering by source_id: {args.source_id}")
+        if args.chunk_strategy:
+            print(f"  Filtering by chunk_strategy: {args.chunk_strategy}")
+        if args.embedding_name:
+            print(f"  Using embedding config: {args.embedding_name}")
+        elif args.provider or args.model:
+            print(f"  Using embedding: {args.provider or 'default'}/{args.model or 'default'}")
+
+        result = embed_all(
+            source_id=args.source_id,
+            chunk_strategy=args.chunk_strategy,
+            embedding_name=args.embedding_name,
+            provider=args.provider,
+            model=args.model,
+        )
+
+        print(f"\n  Completed:")
+        print(f"  Total chunks found: {result['total_chunks']}")
+        print(f"  Successfully embedded: {result['embedded']}")
+        if result['errors'] > 0:
+            print(f"  Errors: {result['errors']}")
     except Exception as e:
-        print(f"Error dropping embedding table: {e}")
+        print(f"Error: {e}")
         import traceback
         traceback.print_exc()
         sys.exit(1)
@@ -481,6 +503,10 @@ def setup_commands(subparsers):
     embedding_drop_parser.add_argument("--embedding-name", help="Specific embedding name (optional, drops all if not provided)")
     embedding_drop_parser.set_defaults(func=cmd_embedding_drop)
 
-    embedding_drop_table_parser = embedding_subparsers.add_parser("drop-table", help="Drop an embedding table and configuration")
-    embedding_drop_table_parser.add_argument("embedding_name", help="Embedding name (e.g., 'openai-small')")
-    embedding_drop_table_parser.set_defaults(func=cmd_embedding_drop_table)
+    embedding_embed_all_parser = embedding_subparsers.add_parser("embed-all", help="Generate embeddings for chunks that don't have them yet")
+    embedding_embed_all_parser.add_argument("--source-id", help="Filter by source identifier")
+    embedding_embed_all_parser.add_argument("--chunk-strategy", help="Filter by chunking strategy (e.g., 'tokens', 'slide', 'summary', 'image')")
+    embedding_embed_all_parser.add_argument("--embedding-name", help="Embedding config short name (e.g., 'openai-small')")
+    embedding_embed_all_parser.add_argument("--provider", help="Embedding provider (e.g., 'openai', 'sentence-transformers')")
+    embedding_embed_all_parser.add_argument("--model", help="Embedding model name (e.g., 'text-embedding-3-small')")
+    embedding_embed_all_parser.set_defaults(func=cmd_embedding_embed_all)

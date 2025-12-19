@@ -720,9 +720,10 @@ def optimize_embedding_index(embedding_name: str, session=None) -> Dict[str, Any
         if not index_exists:
             # Create index if it doesn't exist
             try:
+                # Quote identifiers to handle special characters like hyphens
                 session.execute(text(f"""
-                    CREATE INDEX {index_name}
-                    ON {embedding_table.name}
+                    CREATE INDEX "{index_name}"
+                    ON "{embedding_table.name}"
                     USING ivfflat (embedding vector_cosine_ops)
                     WITH (lists = {optimal_lists})
                 """))
@@ -742,14 +743,15 @@ def optimize_embedding_index(embedding_name: str, session=None) -> Dict[str, Any
                     "index_rebuilt": False,
                     "message": f"Failed to create index: {e}"
                 }
-        
+
         # Rebuild index with optimized parameter
         try:
             # Drop and recreate index
-            session.execute(text(f"DROP INDEX IF EXISTS {index_name}"))
+            # Quote identifiers to handle special characters like hyphens
+            session.execute(text(f'DROP INDEX IF EXISTS "{index_name}"'))
             session.execute(text(f"""
-                CREATE INDEX {index_name}
-                ON {embedding_table.name}
+                CREATE INDEX "{index_name}"
+                ON "{embedding_table.name}"
                 USING ivfflat (embedding vector_cosine_ops)
                 WITH (lists = {optimal_lists})
             """))

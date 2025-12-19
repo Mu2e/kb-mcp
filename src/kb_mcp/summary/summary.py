@@ -2,6 +2,7 @@
 
 import json
 import logging
+import re
 import time
 from typing import Dict, Optional
 
@@ -9,6 +10,21 @@ from ..llm import get_openai_client
 from ..config import get_llm_config
 
 logger = logging.getLogger(__name__)
+
+
+def _fix_json_escapes(json_str: str) -> str:
+    """Fix common JSON escaping issues, particularly unescaped backslashes in strings.
+    
+    Args:
+        json_str: JSON string that may have escaping issues
+        
+    Returns:
+        Fixed JSON string
+    """
+    # Fix unescaped backslashes that aren't part of valid JSON escape sequences
+    # Valid escapes: \\, \", \/, \b, \f, \n, \r, \t, \uXXXX
+    # This regex matches \ followed by a character that isn't a valid escape sequence
+    return re.sub(r'\\(?![\\"/bfnrtu0-9])', r'\\\\', json_str)
 
 
 def summarize(
@@ -121,8 +137,25 @@ Return ONLY a valid JSON object in this format:
         content = response.choices[0].message.content.strip()
         elapsed_time = time.time() - start_time
 
-        # Parse JSON response
-        result = json.loads(content)
+        # Try to extract JSON from markdown code blocks if present
+        json_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', content, re.DOTALL)
+        if json_match:
+            content = json_match.group(1)
+
+        # Parse JSON response - fix common escaping issues if needed
+        try:
+            result = json.loads(content)
+        except json.JSONDecodeError as parse_error:
+            # Try to fix unescaped backslashes (common LLM issue, e.g., K\*0)
+            logger.warning(f"JSON parse failed, attempting to fix escaping: {parse_error}")
+            fixed_content = _fix_json_escapes(content)
+            try:
+                result = json.loads(fixed_content)
+                logger.info("Successfully parsed JSON after fixing escape sequences")
+            except json.JSONDecodeError:
+                logger.error(f"Failed to parse JSON even after fixing: {parse_error}")
+                logger.error(f"Raw content: {content}")
+                raise parse_error
         result["time_summary"] = elapsed_time
         result["query"] = user_prompt
 

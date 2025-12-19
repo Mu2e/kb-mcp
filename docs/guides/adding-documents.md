@@ -27,8 +27,11 @@ for file in docs/*.pdf; do
   kb add "$file" --source-id archive
 done
 
-# Process all at once
-kb tools chunk-and-embed-all
+# Chunk and embed all documents that don't have chunks yet
+kb tools chunk-and-embed-all archive
+
+# Or if documents are already chunked, just embed chunks without embeddings
+kb embedding embed-all --source-id archive
 ```
 
 ## 2. Using Importers

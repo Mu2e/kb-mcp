@@ -77,11 +77,8 @@ def create_eval_run(
             meta=meta or {},
         )
         session.add(run)
-
-        # Refresh if we own the session
-        if should_close:
-            session.flush()  # Flush to get the ID
-            session.refresh(run)
+        session.flush()  # Always flush to get the ID, regardless of session ownership
+        session.refresh(run)  # Refresh to ensure ID is loaded
 
         logger.info(f"Created eval run: {run.id} (name={name})")
         return run
@@ -123,6 +120,7 @@ def evaluate_single_question(
         search_response = search(
             query=question.question,
             embedding_name=run.embedding_name,
+            chunking_strategy=run.chunking_strategy,
             max_results=run.max_results,
             filter=run.search_filters or {},
             session=session,

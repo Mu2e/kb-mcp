@@ -50,10 +50,10 @@ kb eval run --dataset-name test-dataset
   - `chunks drop` - Delete chunks for a document
 - **embedding** (alias: **emb**) - Manage embeddings
   - `embedding list` - List embedding configurations
-  - `embedding embed` - Embed chunks
+  - `embedding embed` - Embed a specific chunk
+  - `embedding embed-all` - Generate embeddings for all chunks that don't have them yet
   - `embedding get` - Get embedding by chunk ID
   - `embedding drop` - Delete embeddings for a chunk
-  - `embedding drop-table` - Delete entire embedding table
 
 ### Evaluation & Benchmarking
 
@@ -68,8 +68,10 @@ kb eval run --dataset-name test-dataset
 
 - **tools** - Utility commands
   - `tools deduplicate` - Remove duplicate documents
-  - `tools chunk-and-embed-all` - Process all documents
-  - `tools drop-table` - Drop database tables
+  - `tools chunk-and-embed-all` - Chunk and embed all documents for a source
+  - `tools summarize-all` - Generate summaries for all documents from a source
+  - `tools list-tables` - List all database tables
+  - `tools drop-table` - Drop a database table by name
 - **stats** - Show knowledge base statistics
 - **logs** - View processing logs
   - `logs search` - View search logs
@@ -92,6 +94,29 @@ kb embed papers_paper-001
 for file in docs/*.pdf; do
   kb add "$file" --source-id archive
 done
+```
+
+### Batch Processing
+
+```bash
+# Generate summaries and create summary chunks (but don't embed them)
+kb tools summarize-all archive
+
+# Chunk and embed all documents without chunks
+kb tools chunk-and-embed-all archive
+
+# Chunk and embed without prepending gist (creates separate strategy)
+kb tools chunk-and-embed-all archive --strategy tokens --no-gist
+
+# Generate embeddings for all chunks without embeddings
+# (useful when re-embedding with a different model)
+kb embedding embed-all --source-id archive
+
+# Embed only summary chunks
+kb embedding embed-all --chunk-strategy summary
+
+# Re-embed with a different model
+kb embedding embed-all --source-id archive --provider openai --model text-embedding-3-large
 ```
 
 ### Running Evaluations

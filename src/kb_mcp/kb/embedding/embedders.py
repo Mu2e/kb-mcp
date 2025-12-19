@@ -135,7 +135,7 @@ class OpenAIEmbedder(BaseEmbedder):
 
     def _generate_short_name(self) -> str:
         """Generate default short name from provider and model."""
-        return f"{self.provider}-{self.model.split('-')[-1]}"
+        return f"{self.provider}_{self.model.split('-')[-1]}"
 
 
 class SentenceTransformersEmbedder(BaseEmbedder):
@@ -223,4 +223,4 @@ class SentenceTransformersEmbedder(BaseEmbedder):
         """Generate default short name from provider and model."""
         # For sentence-transformers, use "st" prefix
         model_short = self.model.replace("all-", "").replace("-", "")
-        return f"st-{model_short}"
+        return f"st_{model_short}"

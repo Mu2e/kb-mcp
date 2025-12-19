@@ -140,21 +140,12 @@ def chunk_document(
         }]
     else:
         # Regular chunking
+        # Ensure prepending flags are in config so chunk() can derive the suffix
+        if config is None:
+            config = {}
+        config["prepend_gist"] = prepend_gist
+        config["prepend_section_path"] = prepend_section_path
         chunk_dicts = chunk(document.text, strategy=chunk_strategy, config=config)
-
-        # Update chunk_strategy names to include prepending configuration
-        # This ensures different prepending settings create separate strategy records
-        if (not prepend_section_path) or (not prepend_gist):
-            if (not prepend_section_path) and (not prepend_gist):
-                suffix = "_no_context"
-            elif not prepend_section_path:
-                suffix = "_no_section"
-            else:  # not prepend_gist
-                suffix = "_no_gist"
-            print(suffix)
-
-            for chunk_dict in chunk_dicts:
-                chunk_dict["chunk_strategy"] = chunk_dict["chunk_strategy"] + suffix
 
 
     # Determine if we need to create a session

@@ -1,61 +1,87 @@
 # kb-mcp
 
-Knowledge Base MCP server with GitHub OAuth authentication support.
-
-The server runs locally on your machine. For clients like Claude Desktop that require a public URL, we use [ngrok](https://ngrok.com) to create a secure tunnel.
+A knowledge base system designed to be **used** via MCP (Model Context Protocol) with a web interface for testing and administration, and an evaluation suite.
 
 ## Quick Start
 
+**Installation:**
+
 ```bash
+# Clone the repository
+git clone https://github.com/corrodis/kb-mcp.git
+cd kb-mcp
+
+# (Recommended) Create a virtual environment
+python3.11 -m venv .venv
+source .venv/bin/activate  
+
 # Install dependencies
 pip install -e .
-
-# Optional: Add GCP support
-# pip install -e ".[gcp]"
-
-# Optional: Add documentation tools
-# pip install -e ".[docs]"
-
-# Setup GitHub OAuth App (see docs/server/install.md)
-# Then configure environment
-cp .env.example .env
-# Edit .env with your GitHub OAuth credentials
-
-# Generate SSL certificates
-mkdir -p certs
-openssl req -x509 -newkey rsa:4096 -nodes -keyout certs/key.pem -out certs/cert.pem -days 365
-
-# Start server and tunnel
-./scripts/start.sh
-
-# Stop server and tunnel
-./scripts/stop.sh
 ```
+
+**Running the server:**
+
+- [Installation Guide](docs/guides/installation.md) - Install and configure kb-mcp
+- [MCP Server Setup](docs/guides/mcp-setup.md) - Run as stdio or remote MCP server
+
+**Using the KB:**
+
+- [Connect an MCP client](docs/guides/mcp-clients.md) - Use the KB through Claude Desktop, Cline, or other MCP clients
+- [Web Interface](docs/guides/web-interface.md) - Browser-based management and testing
 
 ## Documentation
 
-Comprehensive documentation is available in the [docs/](docs/) directory:
+Full documentation is available in the [docs/](docs/) directory. To view locally:
 
-### Quick Links
-- [Architecture Overview](docs/ARCHITECTURE.md) - System architecture and design
-- [Configuration Guide](docs/configuration.md) - Centralized configuration
-- [Module Documentation](docs/modules/README.md) - Detailed module guides
+```bash
+pip install -e ".[docs]"
+mkdocs serve
+# Open http://localhost:8000 in your browser
+```
 
-### Module Guides
-- [Server Module](docs/modules/server.md) - MCP server and web interface
-- [Knowledge Base Module](docs/modules/kb.md) - Document storage and search
-- [Parser Module](docs/modules/parser.md) - Document parsing
-- [Evaluation Utilities](docs/modules/eval_utils.md) - QA generation and judging
+### Guides
 
-### Server Documentation
-- [Installation](docs/server/install.md) - Setup and configuration
-- [Client Integration](docs/server/clients.md) - Claude Desktop, Cursor, etc.
-- [API Keys](docs/server/api-keys.md) - API authentication
-- [Docker](docs/server/docker.md) - Docker deployment
-- [Cloud Run](docs/server/deploy-cloudrun.md) - Google Cloud deployment
+- [Installation](docs/guides/installation.md) - Setup and configuration
+- [Adding Documents](docs/guides/adding-documents.md) - Import documents to your knowledge base
+- [MCP Setup](docs/guides/mcp-setup.md) - Running MCP servers (stdio and remote)
+- [MCP Clients](docs/guides/mcp-clients.md) - Connecting Claude Desktop, Cline, etc.
+- [Web Interface](docs/guides/web-interface.md) - Using the web UI
+- [CLI Usage](docs/guides/cli.md) - Command-line tools
+- [Evaluation Workflows](docs/guides/evaluation.md) - Testing retrieval quality
+- [Database Schema](docs/guides/database.md) - Understanding the data models
+- [Deployment](docs/guides/deployment.md) - Docker and Cloud Run deployment
+- [Extending kb-mcp](docs/guides/extending-kb.md) - Adding custom chunking strategies and embedding providers
+
+### API Reference
+
+- [Configuration](docs/reference/config.md) - Environment variables and settings
+- [Knowledge Base (KB)](docs/reference/kb.md) - Core KB functionality
+- [KB Server](docs/reference/server.md) - MCP and web server
+- [KB Importer](docs/reference/importer.md) - External source imports
+- [Parser](docs/reference/parser.md) - Document parsing
+- [Summary](docs/reference/summary.md) - Document summarization
+- [Eval Utils](docs/reference/eval-utils.md) - Evaluation utilities
+
+## Architecture
+
+**Knowledge Base Core** (database-dependent):
+
+- **[kb](docs/reference/kb.md)** - Document storage, chunking, embeddings, search
+- **[server](docs/reference/server.md)** - MCP and web interfaces
+- **[imports](docs/reference/importer.md)** - Import from external sources (INSPIRE-HEP, etc.)
+
+**Standalone Components** (no database dependencies):
+
+- **[parser](docs/reference/parser.md)** - Document-to-text extraction (PDF, DOCX, PPTX, Excel)
+- **[summary](docs/reference/summary.md)** - LLM-based summarization
+- **[eval_utils](docs/reference/eval-utils.md)** - Question generation and answer judging
 
 ## Requirements
 
 - Python 3.10+
-- [ngrok](https://ngrok.com) (for public tunnel)
-- screen (for background processes)
+- PostgreSQL (for production) or SQLite (for development)
+- OpenAI-compatible LLM API (for embeddings and summarization)
+
+## License
+
+MIT

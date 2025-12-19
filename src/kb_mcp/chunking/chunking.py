@@ -17,6 +17,30 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
+def get_chunk_strategy_suffix(
+    prepend_gist: bool = True,
+    prepend_section_path: bool = True,
+) -> str:
+    """
+    Get the suffix to append to chunk strategy names based on prepending configuration.
+    
+    Args:
+        prepend_gist: Whether to prepend document gist to chunks (default: True)
+        prepend_section_path: Whether to prepend section path to chunks (default: True)
+    
+    Returns:
+        Suffix string: "_no_context", "_no_section", "_no_gist", or "" (empty string)
+    """
+    if (not prepend_section_path) and (not prepend_gist):
+        return "_no_context"
+    elif not prepend_section_path:
+        return "_no_section"
+    elif not prepend_gist:
+        return "_no_gist"
+    else:
+        return ""
+
+
 def _get_encoding(model: Optional[str] = None):
     """Get tiktoken encoding for a model.
     
@@ -70,6 +94,7 @@ def _chunk_by_tokens(
     encoding: Optional[Any] = None,
     chunk_size: int = 1000,
     chunk_overlap: int = 200,
+    strategy_suffix: str = "",
     **kwargs,  # Accept other params but don't use them
 ) -> List[Dict[str, Any]]:
     """Chunk text by token count with sliding window.
@@ -79,6 +104,7 @@ def _chunk_by_tokens(
         chunk_size: Target chunk size in tokens
         chunk_overlap: Overlap between chunks in tokens
         encoding: Optional tiktoken encoding object. If None, uses default encoding.
+        strategy_suffix: Optional suffix to append to strategy name (e.g., "_no_gist")
 
     Returns:
         List of dictionaries with chunk information (without meta field)
@@ -87,8 +113,8 @@ def _chunk_by_tokens(
         encoding = _get_encoding()
     
     # Generate chunk strategy string for this specific strategy
-    # Format: tokens_chunk_size_chunk_overlap
-    chunk_strategy = f"tokens_{chunk_size}_{chunk_overlap}"
+    # Format: tokens_chunk_size_chunk_overlap[suffix]
+    chunk_strategy = f"tokens_{chunk_size}_{chunk_overlap}{strategy_suffix}"
     
     tokens = encoding.encode(text)
     chunks = []
@@ -159,6 +185,7 @@ def _chunk_by_tokens(
 def _chunk_by_slide(
     text: str,
     encoding: Optional[Any] = None,
+    strategy_suffix: str = "",
     **kwargs,  # Accept other params but don't use them for strategy string
 ) -> List[Dict[str, Any]]:
     """Chunk text using sliding window strategy.
@@ -169,6 +196,7 @@ def _chunk_by_slide(
     Args:
         text: Input text to chunk
         encoding: Optional tiktoken encoding object. If None, uses default encoding.
+        strategy_suffix: Optional suffix to append to strategy name (e.g., "_no_gist")
         **kwargs: Other parameters (ignored for now, but may be used when fully implemented)
 
     Returns:
@@ -178,7 +206,7 @@ def _chunk_by_slide(
         encoding = _get_encoding()
     
     # Generate chunk strategy string for this specific strategy
-    chunk_strategy = "slide"
+    chunk_strategy = f"slide{strategy_suffix}"
     
     # For now, use token-based chunking but with slide strategy string
     logger.info("Slide strategy not yet implemented, using token-based chunking")
@@ -205,7 +233,9 @@ def chunk(
         config: Optional dictionary with strategy-specific parameters:
             - chunk_size: Target chunk size in tokens (default: 1000)
             - chunk_overlap: Overlap between chunks in tokens (default: 200)
-            - model: Model name for token counting (default: "text-embedding-3-small")
+            - model: Model name for token counting (default: "cl100k_base")
+            - prepend_gist: Whether to prepend document gist (default: True)
+            - prepend_section_path: Whether to prepend section path (default: True)
             - Other strategy-specific parameters
 
     Returns:
@@ -223,16 +253,20 @@ def chunk(
         # Simple usage with defaults
         chunks = chunk("Some long text...")
         chunks[0]["chunk_strategy"]
-        # Returns: "default-1000-200-text_embedding_3_small"
+        # Returns: "tokens_1000_200"
         
-        # With custom config
+        # With custom config and prepending flags
         chunks = chunk(
             "Some long text...",
-            strategy="default",
-            config={"chunk_size": 500, "chunk_overlap": 100, "model": "gpt-4"}
+            strategy="tokens",
+            config={
+                "chunk_size": 500,
+                "chunk_overlap": 100,
+                "prepend_gist": False
+            }
         )
-        chunks[0]["meta"]["chunk_size"]
-        # Returns: 500
+        chunks[0]["chunk_strategy"]
+        # Returns: "tokens_500_100_no_gist"
         ```
     """
 
@@ -249,16 +283,26 @@ def chunk(
     if "chunk_overlap" not in config or config["chunk_overlap"] is None:
         config["chunk_overlap"] = 200
     
+    # Get prepending flags from config (default to True)
+    prepend_gist = config.get("prepend_gist", True)
+    prepend_section_path = config.get("prepend_section_path", True)
+    
+    # Calculate strategy suffix from prepending configuration
+    strategy_suffix = get_chunk_strategy_suffix(
+        prepend_gist=prepend_gist,
+        prepend_section_path=prepend_section_path
+    )
+    
     encoding = _get_encoding(config["model"])
 
     # Call strategy-specific function
     if strategy == "tokens":
-        chunks = _chunk_by_tokens(text, encoding, **config)
+        chunks = _chunk_by_tokens(text, encoding, strategy_suffix=strategy_suffix, **config)
     elif strategy == "slide":
-        chunks = _chunk_by_slide(text, encoding, **config)
+        chunks = _chunk_by_slide(text, encoding, strategy_suffix=strategy_suffix, **config)
     else:
         logger.warning(f"Unknown strategy '{strategy}', using 'tokens'")
-        chunks = _chunk_by_tokens(text, encoding, **config)
+        chunks = _chunk_by_tokens(text, encoding, strategy_suffix=strategy_suffix, **config)
     
     # Add meta to all chunks after getting results
 

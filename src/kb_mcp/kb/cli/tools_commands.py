@@ -110,15 +110,102 @@ def cmd_chunk_and_embed_all(args):
         print(f"Chunking and embedding all documents for source_id: {args.source_id}")
         if args.strategy:
             print(f"Using chunking strategy: {args.strategy}")
+        if args.no_gist:
+            print("Gist prepending disabled (will create _no_gist strategy)")
+        if args.no_section_path:
+            print("Section path prepending disabled (will create _no_section strategy)")
+        if args.embedding_name:
+            print(f"Using embedding: {args.embedding_name}")
+        elif args.provider or args.model:
+            print(f"Using embedding: {args.provider or 'default'}/{args.model or 'default'}")
+
+        # Build chunk_config if any prepending flags are set
+        chunk_config = None
+        if args.no_gist or args.no_section_path:
+            chunk_config = {}
+            if args.no_gist:
+                chunk_config["prepend_gist"] = False
+            if args.no_section_path:
+                chunk_config["prepend_section_path"] = False
 
         result = chunk_and_embed_all(
             source_id=args.source_id,
-            strategy=args.strategy,
+            chunk_strategy=args.strategy,
+            chunk_config=chunk_config,
+            include_images=not args.no_images,
+            embedding_name=args.embedding_name,
+            provider=args.provider,
+            model=args.model,
         )
 
         print(f"\n  Completed:")
         print(f"  Processed: {result['processed']} document(s)")
         print(f"  Chunked: {result['chunked']} document(s)")
+        print(f"  Skipped: {result['skipped']} document(s)")
+        if result['errors'] > 0:
+            print(f"  Errors: {result['errors']} document(s)")
+    except Exception as e:
+        print(f"Error: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+
+def cmd_list_tables(args):
+    """List all database tables."""
+    try:
+        from sqlalchemy import inspect
+        from ..database import get_db_session
+
+        with get_db_session() as session:
+            inspector = inspect(session.bind)
+            tables = sorted(inspector.get_table_names())
+
+            if args.json:
+                import json
+                print(json.dumps({"tables": tables}, indent=2))
+            else:
+                print(f"Database Tables ({len(tables)}):")
+                print()
+                for table in tables:
+                    print(f"  {table}")
+    except Exception as e:
+        print(f"Error listing tables: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+
+def cmd_summarize_all(args):
+    """Generate summaries for all documents from a source that don't have them yet."""
+    try:
+        from ..tools import summarize_all
+
+        print(f"Generating summaries for all documents from source_id: {args.source_id}")
+        if args.model:
+            print(f"Using model: {args.model}")
+        if not args.no_summary_chunk:
+            print("Will create summary chunks")
+        if args.embed_summary_chunk:
+            print("Will embed summary chunks")
+
+        result = summarize_all(
+            source_id=args.source_id,
+            model=args.model,
+            create_summary_chunk=not args.no_summary_chunk,
+            embed_summary_chunk=args.embed_summary_chunk,
+            embedding_name=args.embedding_name,
+            embedding_provider=args.provider,
+            embedding_model=args.embedding_model,
+        )
+
+        print(f"\n  Completed:")
+        print(f"  Processed: {result['processed']} document(s)")
+        print(f"  Summarized: {result['summarized']} document(s)")
+        if not args.no_summary_chunk:
+            print(f"  Summary chunks created: {result.get('chunked', 0)}")
+        if args.embed_summary_chunk:
+            print(f"  Summary chunks embedded: {result.get('embedded', 0)}")
         print(f"  Skipped: {result['skipped']} document(s)")
         if result['errors'] > 0:
             print(f"  Errors: {result['errors']} document(s)")
@@ -168,7 +255,7 @@ def cmd_drop_table(args):
             session.execute(text(drop_sql))
             session.commit()
 
-            print(f" Dropped table '{table_name}'")
+            print(f"✓ Dropped table '{table_name}'")
     except Exception as e:
         print(f"Error dropping table: {e}")
         sys.exit(1)
@@ -334,7 +421,71 @@ def setup_commands(subparsers):
         "--strategy",
         help="Chunking strategy (e.g., 'tokens' or 'slide'). If not specified, uses default."
     )
+    chunk_embed_all_parser.add_argument(
+        "--embedding-name",
+        help="Embedding config short name (e.g., 'openai-small')"
+    )
+    chunk_embed_all_parser.add_argument(
+        "--provider",
+        help="Embedding provider (e.g., 'openai', 'voyage')"
+    )
+    chunk_embed_all_parser.add_argument(
+        "--model",
+        help="Embedding model name (e.g., 'text-embedding-3-small')"
+    )
+    chunk_embed_all_parser.add_argument(
+        "--no-images",
+        action="store_true",
+        help="Skip processing image documents"
+    )
+    chunk_embed_all_parser.add_argument(
+        "--no-gist",
+        action="store_true",
+        help="Don't prepend document gist to chunks (creates separate strategy with _no_gist suffix)"
+    )
+    chunk_embed_all_parser.add_argument(
+        "--no-section-path",
+        action="store_true",
+        help="Don't prepend section path to chunks (creates separate strategy with _no_section suffix)"
+    )
     chunk_embed_all_parser.set_defaults(func=cmd_chunk_and_embed_all)
+
+    summarize_all_parser = tools_subparsers.add_parser(
+        "summarize-all",
+        help="Generate summaries for all documents from a source that don't have them yet"
+    )
+    summarize_all_parser.add_argument("source_id", help="Source identifier to process documents for")
+    summarize_all_parser.add_argument(
+        "--model",
+        help="Model name for summary generation (overrides SUMMARY_MODEL env var)"
+    )
+    summarize_all_parser.add_argument(
+        "--no-summary-chunk",
+        action="store_true",
+        help="Skip creating summary chunks (default: creates summary chunks)"
+    )
+    summarize_all_parser.add_argument(
+        "--embed-summary-chunk",
+        action="store_true",
+        help="Embed summary chunks after creating them (requires summary chunks to be created)"
+    )
+    summarize_all_parser.add_argument(
+        "--embedding-name",
+        help="Embedding config short name for summary chunks (e.g., 'openai-small')"
+    )
+    summarize_all_parser.add_argument(
+        "--provider",
+        help="Embedding provider for summary chunks (e.g., 'openai', 'voyage')"
+    )
+    summarize_all_parser.add_argument(
+        "--embedding-model",
+        help="Embedding model name for summary chunks (e.g., 'text-embedding-3-small')"
+    )
+    summarize_all_parser.set_defaults(func=cmd_summarize_all)
+
+    list_tables_parser = tools_subparsers.add_parser("list-tables", help="List all database tables")
+    list_tables_parser.add_argument("--json", action="store_true", help="Output as JSON")
+    list_tables_parser.set_defaults(func=cmd_list_tables)
 
     drop_table_parser = tools_subparsers.add_parser("drop-table", help="Drop a database table by name")
     drop_table_parser.add_argument("table_name", help="Name of the table to drop")

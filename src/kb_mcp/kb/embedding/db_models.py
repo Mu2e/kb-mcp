@@ -37,8 +37,8 @@ def sanitize_table_name(name: str) -> str:
     Returns:
         Sanitized table name component
     """
-    # Replace any non-alphanumeric characters (except hyphens) with hyphens
-    sanitized = re.sub(r'[^a-zA-Z0-9-]', '-', name)
+    # Replace any non-alphanumeric characters (except hyphens) with underscores
+    sanitized = re.sub(r'[^a-zA-Z0-9-]', '_', name)
     # Ensure it starts with a letter
     if sanitized and not sanitized[0].isalpha():
         sanitized = 'a' + sanitized
@@ -104,6 +104,43 @@ def create_embedding_table(short_name: str, dimension: int, metadata=None) -> Ta
     )
     
     return table
+
+
+def get_embedding_table(
+    session,
+    embedding_name: Optional[str] = None,
+    provider: Optional[str] = None,
+    model: Optional[str] = None,
+) -> Optional[Table]:
+    """Get embedding table if the config exists, otherwise return None.
+
+    Args:
+        session: Database session (required)
+        embedding_name: Short name of embedding config (e.g., "openai-small")
+        provider: Provider name (e.g., "openai") - used if embedding_name not provided
+        model: Model name - used if embedding_name not provided
+
+    Returns:
+        Table object if config exists, None otherwise
+    """
+    # Determine which embedding config we're looking for
+    if embedding_name is None:
+        # Need to get embedder to generate the config name
+        from kb_mcp.kb.embedding.utils import get_embedder
+        embedder = get_embedder(provider=provider, model=model, session=session)
+        config_name = embedder._generate_short_name()
+    else:
+        config_name = embedding_name
+
+    # Try to get existing embedding config
+    embedding_config = session.query(EmbeddingConfig).filter(
+        EmbeddingConfig.short_name == config_name
+    ).first()
+
+    if embedding_config:
+        return create_embedding_table(embedding_config.short_name, embedding_config.dimension)
+    else:
+        return None
 
 
 class EmbeddingConfig(Base):

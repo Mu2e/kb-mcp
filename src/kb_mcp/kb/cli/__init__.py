@@ -116,7 +116,7 @@ def main():
                 parser.print_help()
                 sys.exit(1)
         elif args.command == "embedding" or args.command == "emb":
-            from .embedding_commands import cmd_embedding_list, cmd_embedding_embed, cmd_embedding_get, cmd_embedding_drop, cmd_embedding_drop_table
+            from .embedding_commands import cmd_embedding_list, cmd_embedding_embed, cmd_embedding_get, cmd_embedding_drop, cmd_embedding_embed_all
             if args.embedding_command == "list":
                 cmd_embedding_list(args)
             elif args.embedding_command == "embed":
@@ -125,8 +125,8 @@ def main():
                 cmd_embedding_get(args)
             elif args.embedding_command == "drop":
                 cmd_embedding_drop(args)
-            elif args.embedding_command == "drop-table":
-                cmd_embedding_drop_table(args)
+            elif args.embedding_command == "embed-all":
+                cmd_embedding_embed_all(args)
             else:
                 parser.print_help()
                 sys.exit(1)
@@ -140,11 +140,15 @@ def main():
                 parser.print_help()
                 sys.exit(1)
         elif args.command == "tools":
-            from .tools_commands import cmd_deduplicate, cmd_chunk_and_embed_all, cmd_drop_table
+            from .tools_commands import cmd_deduplicate, cmd_chunk_and_embed_all, cmd_summarize_all, cmd_list_tables, cmd_drop_table
             if args.tools_command == "deduplicate":
                 cmd_deduplicate(args)
             elif args.tools_command == "chunk-and-embed-all":
                 cmd_chunk_and_embed_all(args)
+            elif args.tools_command == "summarize-all":
+                cmd_summarize_all(args)
+            elif args.tools_command == "list-tables":
+                cmd_list_tables(args)
             elif args.tools_command == "drop-table":
                 cmd_drop_table(args)
             else:
