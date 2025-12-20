@@ -42,14 +42,14 @@ def parse(
     Returns:
         List of dictionaries (can be converted to Documents):
         - First: Main document dict with text extracted
-          - text: Extracted text with [Image X] placeholders replaced with descriptions
-                   (if PARSE_IMAGE_LLM_DESCRIPTION is enabled)
+            - text: Extracted text with [Image X] placeholders replaced with descriptions
+                     (if PARSE_IMAGE_LLM_DESCRIPTION is enabled)
         - Rest: Image document dicts (only if PARSE_IMAGE_ADDITIONAL_DOC=true)
-          - binary: image data (resized, as bytes)
-          - text: LLM-generated description (if PARSE_IMAGE_LLM_DESCRIPTION is also enabled)
-          - doc_type: "image"
-          - source_id, doc_id: from parent document
-          - meta: includes page, image_number, etc.
+            - binary: image data (resized, as bytes)
+            - text: LLM-generated description (if PARSE_IMAGE_LLM_DESCRIPTION is also enabled)
+            - doc_type: "image"
+            - source_id, doc_id: from parent document
+            - meta: includes page, image_number, etc.
         
         Note: If PARSE_IMAGE_ADDITIONAL_DOC is False, only the main document dict is returned,
         even if images were extracted for description generation.

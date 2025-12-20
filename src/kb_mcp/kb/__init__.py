@@ -2,7 +2,7 @@
 
 from .documents import add, add_from_path, add_many, add_source, get, get_count, get_options, get_children, delete_document
 from .db_models import Document, Source
-from .database import get_db_session, init_db
+from .database import get_db_session, get_db_session_ephemeral, init_db
 from .utils import deduplicate, find_all_duplicates, get_stats, list_sources, get_metadata_keys
 from .tools import chunk_and_embed_all, image_chunk_and_embed_all, embed_all
 from .logs import get_search_logs, get_parsing_logs, get_chunking_logs, get_all_logs_for_document
@@ -43,6 +43,7 @@ __all__ = [
     "Document",
     "Source",
     "get_db_session",
+    "get_db_session_ephemeral",
     "init_db",
 ]
 

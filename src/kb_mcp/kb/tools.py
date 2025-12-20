@@ -67,7 +67,7 @@ def chunk_and_embed_all(
     """
     if not EMBEDDING_AVAILABLE:
         raise ImportError(
-            "Embedding module not available. Install with: pip install -e '.[embedding]'"
+            "Embedding module not available. Please ensure all dependencies are installed."
         )
     
     logger.info(f"Starting chunk_and_embed_all for source_id: {source_id}")
@@ -240,7 +240,7 @@ def image_chunk_and_embed_all(
     """
     if not EMBEDDING_AVAILABLE:
         raise ImportError(
-            "Embedding module not available. Install with: pip install -e '.[embedding]'"
+            "Embedding module not available. Please ensure all dependencies are installed."
         )
 
     logger.info(f"Starting image_chunk_and_embed_all for source_id: {source_id}")
@@ -363,7 +363,7 @@ def embed_all(
     """
     if not EMBEDDING_AVAILABLE:
         raise ImportError(
-            "Embedding module not available. Install with: pip install -e '.[embedding]'"
+            "Embedding module not available. Please ensure all dependencies are installed."
         )
 
     from .embedding import embed_chunks
@@ -552,7 +552,7 @@ def summarize_all(
 
     if embed_summary_chunk and not EMBEDDING_AVAILABLE:
         raise ImportError(
-            "Embedding module not available. Install with: pip install -e '.[embedding]'"
+            "Embedding module not available. Please ensure all dependencies are installed."
         )
 
     logger.info(f"Starting summarize_all for source_id: {source_id}")

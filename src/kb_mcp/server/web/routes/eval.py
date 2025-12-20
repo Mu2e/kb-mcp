@@ -58,9 +58,9 @@ def setup_eval_routes(app, session_manager: WebSessionManager, require_auth_html
 
         # Get all eval generations and runs
         from ....kb.eval.db_models import get_eval_generation, get_eval_run
-        from ....kb.database import get_db_session
+        from ....kb.database import get_db_session_ephemeral
         
-        with get_db_session() as session:
+        with get_db_session_ephemeral() as session:
             generations = get_eval_generation(limit=100, session=session) or []
             runs = get_eval_run(limit=100, session=session) or []
             
@@ -215,9 +215,9 @@ def setup_eval_routes(app, session_manager: WebSessionManager, require_auth_html
 
         # Get generation and questions
         from ....kb.eval.db_models import get_eval_generation, get_eval_questions, get_eval_run
-        from ....kb.database import get_db_session
+        from ....kb.database import get_db_session_ephemeral
         
-        with get_db_session() as session:
+        with get_db_session_ephemeral() as session:
             generation = get_eval_generation(generation_id=generation_id, session=session)
             
             if not generation:
@@ -439,9 +439,9 @@ def setup_eval_routes(app, session_manager: WebSessionManager, require_auth_html
         # Get question
         from ....kb.eval.db_models import get_eval_questions, EvalResult
         from ....kb.eval.audit import get_question_audits
-        from ....kb.database import get_db_session
+        from ....kb.database import get_db_session_ephemeral
         
-        with get_db_session() as session:
+        with get_db_session_ephemeral() as session:
             question = get_eval_questions(question_id=question_id, session=session)
             
             if not question:
@@ -734,9 +734,9 @@ def setup_eval_routes(app, session_manager: WebSessionManager, require_auth_html
         from ....kb.eval.db_models import get_eval_run
         from ....kb.eval.runner import get_run_results
         from ....kb.eval.metrics import get_summary_stats
-        from ....kb.database import get_db_session
+        from ....kb.database import get_db_session_ephemeral
         
-        with get_db_session() as session:
+        with get_db_session_ephemeral() as session:
             run = get_eval_run(run_id=run_id, session=session)
             
             if not run:
@@ -1022,9 +1022,9 @@ def setup_eval_routes(app, session_manager: WebSessionManager, require_auth_html
 
         # Get result with relationships
         from ....kb.eval.db_models import EvalResult, EvalRetrievedDocument
-        from ....kb.database import get_db_session
+        from ....kb.database import get_db_session_ephemeral
         
-        with get_db_session() as session:
+        with get_db_session_ephemeral() as session:
             result = session.query(EvalResult).options(
                 joinedload(EvalResult.run),
                 joinedload(EvalResult.question),

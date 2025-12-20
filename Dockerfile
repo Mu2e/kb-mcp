@@ -9,8 +9,8 @@ COPY pyproject.toml .
 COPY README.md .
 COPY src/ ./src/
 
-# Install dependencies (server, kb, and GCP extras for Firestore support)
-RUN pip install --no-cache-dir -e ".[server,kb,gcp]"
+# Install dependencies (includes server and KB by default, plus GCP extras for Firestore support)
+RUN pip install --no-cache-dir -e ".[gcp]"
 
 # Create data directory for API keys
 RUN mkdir -p /app/data
@@ -26,4 +26,4 @@ ENV HOST=0.0.0.0
 ENV USE_HTTPS=false
 
 # Run the server
-CMD ["kb-mcp"]
+CMD ["kb-server"]

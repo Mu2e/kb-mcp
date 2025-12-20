@@ -9,27 +9,20 @@ description = "Knowledge Base MCP server with GitHub OAuth authentication"
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
-# Minimal core dependencies (python-dotenv used by all modules)
+# Core dependencies - includes everything needed for server, KB, parsing, LLM, chunking, embedding, and imports
 dependencies = [
     "python-dotenv>=1.0.0",
-]
 
-[project.optional-dependencies]
-# Server module: Core dependencies
-# Note: Server uses KB features, so typically install with: pip install -e ".[server,kb]"
-server = [
+    # Server dependencies
     "mcp>=1.1.0",
     "uvicorn>=0.27.0",
     "httpx>=0.27.0",
-]
 
-# Knowledge Base module: Database and parser dependencies
-# Note: KB uses parsers for document processing, so parser deps are included
-kb = [
-    # Database
+    # KB dependencies (database)
     "sqlalchemy>=2.0.0",
     "psycopg2-binary>=2.9.0",
-    # Parsers (required for KB document processing)
+
+    # Parser dependencies
     "PyPDF2>=3.0.0",
     "python-docx>=1.1.0",
     "beautifulsoup4>=4.12.0",
@@ -37,46 +30,29 @@ kb = [
     "python-pptx>=0.6.0",
     "openpyxl>=3.1.0",
     "pillow>=10.0.0",
+
+    # LLM dependencies
+    "openai>=1.0.0",
+
+    # Chunking dependencies
+    "tiktoken>=0.5.0",
+    
+    # Embedding dependencies
+    "sentence-transformers>=2.2.0",
+    "pgvector>=0.2.0",  # PostgreSQL vector extension support
 ]
 
-# Server module: Google Cloud Platform integration (Firestore for session storage)
+[project.optional-dependencies]
+# Google Cloud Platform integration (Firestore for session storage)
 gcp = [
     "google-cloud-firestore>=2.14.0",
 ]
 
-# Parser module: Document parsing dependencies
-parser = [
-    "PyPDF2>=3.0.0",
-    "python-docx>=1.1.0",
-    "beautifulsoup4>=4.12.0",
-    "python-magic>=0.4.27",
-    "python-pptx>=0.6.0",
-    "openpyxl>=3.1.0",
-    "pillow>=10.0.0",
-]
-
-# Parser module: LLM-based image description generation
-llm = [
-    "openai>=1.0.0",
-]
-
-# Chunking module: Text chunking dependencies
-chunking = [
-    "tiktoken>=0.5.0",  # Token counting for chunking
-]
-
-# Embedding module: Embedding generation dependencies
-embedding = [
-    "openai>=1.0.0",  # OpenAI embeddings (shared with llm)
-    "sentence-transformers>=2.2.0",  # SentenceTransformers embeddings
-    "pgvector>=0.2.0",  # PostgreSQL vector extension support (optional, for PostgreSQL only)
-    "tiktoken>=0.5.0",  # Token counting for chunking
-]
-
-# Import module: Document import dependencies
-# Note: Import uses KB features, so typically install with: pip install -e ".[imports,kb]"
-imports = [
-    "httpx>=0.27.0",  # HTTP client for API requests
+# Documentation dependencies (for building docs with MkDocs)
+doc = [
+    "mkdocs>=1.5.0",
+    "mkdocs-material>=9.0.0",
+    "mkdocstrings[python]>=0.24.0",
 ]
 
 [project.scripts]

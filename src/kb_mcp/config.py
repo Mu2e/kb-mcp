@@ -34,14 +34,16 @@ def get_database_config() -> dict:
             * `name` (str): Database name (Env: `DB_NAME`, default: 'kb_mcp').
             * `user` (str): Database user (Env: `DB_USER`).
             * `password` (str): Database password (Env: `DB_PASSWORD`).
+            * `schema` (str): Database schema (Env: `DB_SCHEMA`, default: 'public').
             * `sqlite_path` (str): Path to SQLite DB (Env: `SQLITE_DB_PATH`, default: 'data/kb.db').
     """
     return {
-        'host': os.getenv("DB_HOST","localhost"),
+        'host': os.getenv("DB_HOST", "localhost"),
         'port': _get_int("DB_PORT", 5432),
         'name': os.getenv("DB_NAME", "kb_mcp"),
         'user': os.getenv("DB_USER"),
         'password': os.getenv("DB_PASSWORD"),
+        'schema': os.getenv("DB_SCHEMA", "public"),
         'sqlite_path': os.getenv("SQLITE_DB_PATH", "data/kb.db"),
     }
 

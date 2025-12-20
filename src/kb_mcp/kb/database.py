@@ -78,7 +78,6 @@ def create_engine_with_config() -> Engine:
     from ..config import get_database_config
 
     database_url = get_database_url()
-    db_config = get_database_config()
 
     # SQLite-specific configuration
     if database_url.startswith("sqlite"):
@@ -98,9 +97,17 @@ def create_engine_with_config() -> Engine:
         return engine
 
     # PostgreSQL configuration
-    return create_engine(
-        database_url
-    )
+    db_config = get_database_config() # for schema setting
+    engine = create_engine(database_url)
+    
+    @event.listens_for(engine, "connect")
+    def set_search_path(dbapi_conn, connection_record):
+        """Set schema search_path for PostgreSQL."""
+        cursor = dbapi_conn.cursor()
+        cursor.execute(f"SET search_path TO {db_config['schema']}")
+        cursor.close()
+    
+    return engine
 
 
 # Create engine and session factory
@@ -129,21 +136,23 @@ def get_session_factory() -> sessionmaker:
 
 
 @contextmanager
-def get_db_session(session=None, auto_commit: bool = True) -> Generator[Session, None, None]:
+def get_db_session(session=None, auto_commit: bool = True, auto_expunge: bool = True) -> Generator[Session, None, None]:
     """
     Get or create a database session (context manager).
 
     This function handles session management automatically:
     - Creates a new session if none provided
     - Auto-commits on success (for new sessions only)
-    - Auto-refreshes all objects before expunging (for new sessions)
-    - Auto-expunges all objects (for new sessions, so they can be used after session closes)
+    - Auto-refreshes all objects before expunging (for new sessions, if auto_expunge=True)
+    - Auto-expunges all objects (for new sessions, if auto_expunge=True, so they can be used after session closes)
     - Handles rollback on errors
     - Closes session when done
 
     Args:
         session: Existing session to use, or None to create new one
         auto_commit: If True, commit on success (only applies to new sessions)
+        auto_expunge: If True, refresh and expunge all objects (only applies to new sessions).
+                     Set to False for better performance when objects aren't needed after session closes.
 
     Yields:
         Database session with .is_local attribute indicating if it was created here
@@ -159,6 +168,11 @@ def get_db_session(session=None, auto_commit: bool = True) -> Generator[Session,
         with get_db_session(existing_session) as session:
             doc = session.query(Document).first()
             return doc  # Stays attached to existing_session
+
+        # Ephemeral session (no expunge, faster for read-only queries):
+        with get_db_session_ephemeral() as session:
+            docs = session.query(Document).all()
+            # Objects are not available after session closes, but query is faster
         ```
     """
     is_local = session is None
@@ -173,8 +187,8 @@ def get_db_session(session=None, auto_commit: bool = True) -> Generator[Session,
     try:
         yield session
 
-        # Auto-refresh and expunge if local session
-        if is_local:
+        # Auto-refresh and expunge if local session and auto_expunge is enabled
+        if is_local and auto_expunge:
             from sqlalchemy.orm import make_transient
             
             # Refresh all objects to load their data before expunging
@@ -196,6 +210,9 @@ def get_db_session(session=None, auto_commit: bool = True) -> Generator[Session,
 
             # Expunge all objects (make_transient already detached them, but this cleans up)
             session.expunge_all()
+        elif is_local and auto_commit:
+            # Still commit even if not expunging
+            session.commit()
 
     except Exception:
         if is_local:
@@ -204,6 +221,36 @@ def get_db_session(session=None, auto_commit: bool = True) -> Generator[Session,
     finally:
         if is_local:
             session.close()
+
+
+@contextmanager
+def get_db_session_ephemeral(session=None, auto_commit: bool = True) -> Generator[Session, None, None]:
+    """
+    Get an ephemeral database session that doesn't refresh/expunge objects.
+
+    This is faster than get_db_session() when you don't need to use objects
+    after the session closes. Use this for read-only queries where you only
+    need to extract data (e.g., building HTML, generating reports).
+
+    Args:
+        session: Existing session to use, or None to create new one
+        auto_commit: If True, commit on success (only applies to new sessions)
+
+    Yields:
+        Database session
+
+    Usage:
+        ```python
+        # Fast read-only query (objects not available after session closes):
+        with get_db_session_ephemeral() as session:
+            docs = session.query(Document).all()
+            for doc in docs:
+                print(doc.title)  # OK: access during session
+            # doc objects are NOT available after this block
+        ```
+    """
+    with get_db_session(session=session, auto_commit=auto_commit, auto_expunge=False) as s:
+        yield s
 
 
 def init_db(create_tables: bool = True) -> None:

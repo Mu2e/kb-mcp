@@ -101,7 +101,7 @@ def cmd_logs_parsing(args):
 def cmd_chunk_and_embed_all(args):
     """Chunk and embed all documents for a source_id that don't have chunks yet."""
     if not EMBEDDING_AVAILABLE:
-        print("Error: Embedding module not available. Install with: pip install -e '.[embedding]'")
+        print("Error: Embedding module not available. Please ensure all dependencies are installed.")
         sys.exit(1)
 
     try:

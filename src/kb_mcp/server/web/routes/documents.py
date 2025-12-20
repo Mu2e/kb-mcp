@@ -374,6 +374,10 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
     @app.route("/web/document/{doc_id}")
     async def document_detail(request: Request):
         """View full document details (HTML)."""
+        import time
+        timings = {}
+        t_start = time.time()
+        
         # Check authentication first
         session_data = await session_manager.get_session_data(request)
         if not session_data:
@@ -381,6 +385,7 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
         
         # Get username from authenticated session
         username = session_data.get("username")
+        timings['auth'] = time.time() - t_start
 
         doc_id = request.path_params["doc_id"]
 
@@ -388,7 +393,10 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
         from ....kb import get
 
         try:
+            t0 = time.time()
             doc = get(uuid=doc_id)
+            timings['get_document'] = time.time() - t0
+            timings['get_document_since_start'] = time.time() - t_start
             if not doc:
                 return HTMLResponse(
                     html_templates.base_template(
@@ -428,7 +436,12 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
             default_strategy = None
             try:
                 from ....kb.embedding import get_chunk_strategies
+                timings['get_chunk_strategies_since_last'] = time.time() - t0
+                t0 = time.time()
                 strategies = get_chunk_strategies(document_id=doc.id)
+                timings['get_chunk_strategies'] = time.time() - t0
+                timings['get_chunk_strategies_since_start'] = time.time() - t_start
+                
                 if strategies:
                     # Get first strategy as default
                     default_strategy = strategies[0].get("strategy", "") if isinstance(strategies[0], dict) else strategies[0].strategy
@@ -477,7 +490,11 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
             chunk_strategy_options_html_for_similar = '<option value="summary" selected>summary</option>'
             try:
                 from ....kb.embedding import get_chunk_strategies
+                timings['get_all_strategies_since_last'] = time.time() - t0
+                t0 = time.time()
                 all_strategies = get_chunk_strategies()  # Get all strategies, not just for this document
+                timings['get_all_strategies'] = time.time() - t0
+                timings['get_all_strategies_since_start'] = time.time() - t_start
                 for strategy_info in all_strategies:
                     strategy_name = strategy_info.get("strategy", "")
                     if strategy_name:
@@ -553,7 +570,11 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
             parent_display = "N/A"
             if doc.parent_id:
                 try:
+                    timings['get_parent_since_last'] = time.time() - t0
+                    t0 = time.time()
                     parent_doc = get(uuid=doc.parent_id)
+                    timings['get_parent'] = time.time() - t0
+                    timings['get_parent_since_start'] = time.time() - t_start
                     if parent_doc:
                         parent_label = parent_doc.doc_id or parent_doc.id
                         parent_display = f'<a href="/web/document/{doc.parent_id}">{parent_label}</a>'
@@ -567,7 +588,11 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
             children_html = ""
             from ....kb import get_children
             try:
+                timings['get_children_since_last'] = time.time() - t0
+                t0 = time.time()
                 children = get_children(doc.id)
+                timings['get_children'] = time.time() - t0
+                timings['get_children_since_start'] = time.time() - t_start
                 if children:
                     children_list = ""
                     for child in children:
@@ -584,6 +609,8 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
             except Exception as e:
                 logger.warning(f"Could not fetch child documents for {doc.id}: {e}")
 
+            t0 = time.time()
+            timings['build_meta_html_since_last'] = time.time() - t0
             meta_html = ""
             if doc.meta:
                 meta_html = '<div class="card"><h2>Metadata</h2><div style="max-height: 400px; overflow-y: auto; border: 1px solid #ddd; border-radius: 4px;"><table style="width: 100%;"><tr><th style="text-align: left; padding: 8px; border-bottom: 1px solid #ddd; position: sticky; top: 0; background: white;">Key</th><th style="text-align: left; padding: 8px; border-bottom: 1px solid #ddd; position: sticky; top: 0; background: white;">Value</th></tr>'
@@ -664,6 +691,8 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
                 }
                 </script>
                 '''
+            timings['build_meta_html'] = time.time() - t0
+            timings['build_meta_html_since_start'] = time.time() - t_start
 
             # Get success/error message from query params
             message_html = ""
@@ -737,19 +766,26 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
             # Get eval-related information (before building content string)
             eval_results_html = ""
             eval_questions_html = ""
+            t_before_session_exit = None
             try:
                 from ....kb.eval.db_models import EvalRetrievedDocument, EvalDataset, EvalResult
-                from ....kb.database import get_db_session
+                from ....kb.database import get_db_session_ephemeral
                 from sqlalchemy.orm import joinedload
                 
-                with get_db_session() as session:
+                with get_db_session_ephemeral() as session:
                     # Get EvalRetrievedDocument records where this document was retrieved
+                    timings['eval_retrieved_docs_since_last'] = time.time() - t0
+                    t0 = time.time()
                     retrieved_docs = session.query(EvalRetrievedDocument).options(
                         joinedload(EvalRetrievedDocument.result).joinedload(EvalResult.run),
                         joinedload(EvalRetrievedDocument.result).joinedload(EvalResult.question)
                     ).filter(EvalRetrievedDocument.document_id == doc.id).order_by(EvalRetrievedDocument.created_time.desc()).all()
+                    timings['eval_retrieved_docs'] = time.time() - t0
+                    timings['eval_retrieved_docs_count'] = len(retrieved_docs)
+                    timings['eval_retrieved_docs_since_start'] = time.time() - t_start
                     
                     if retrieved_docs:
+                        t0 = time.time()
                         retrieved_docs_list = ""
                         for retrieved_doc in retrieved_docs:
                             result = retrieved_doc.result
@@ -785,6 +821,8 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
                             </td>
                         </tr>
                         """
+                        timings['retrieved_docs_loop'] = time.time() - t0
+                        t0 = time.time()
                         
                         eval_results_html = f"""
             <div class="card" style="margin-top: 20px;">
@@ -806,13 +844,20 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
                 </table>
             </div>
             """
+                        timings['build_eval_results_html'] = time.time() - t0
                     
                     # Get EvalDataset questions where this document is the source
+                    timings['eval_questions_since_last'] = time.time() - t0
+                    t0 = time.time()
                     questions = session.query(EvalDataset).options(
                         joinedload(EvalDataset.generation)
                     ).filter(EvalDataset.source_document_id == doc.id).order_by(EvalDataset.created_time.desc()).all()
+                    timings['eval_questions'] = time.time() - t0
+                    timings['eval_questions_count'] = len(questions)
+                    timings['eval_questions_since_start'] = time.time() - t_start
                     
                     if questions:
+                        t0 = time.time()
                         questions_list = ""
                         for question in questions:
                             question_preview = question.question[:100] + "..." if len(question.question) > 100 else question.question
@@ -835,6 +880,8 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
                         </tr>
                         """
                         
+                        timings['questions_loop'] = time.time() - t0
+                        t0 = time.time()
                         eval_questions_html = f"""
             <div class="card" style="margin-top: 20px;">
                 <h2>Evaluation Questions ({len(questions)})</h2>
@@ -852,10 +899,26 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
                 </table>
             </div>
             """
+                        timings['build_eval_questions_html'] = time.time() - t0
+                
+                # Session will close here when exiting the 'with' block
+                t_before_session_exit = time.time()
+                timings['time_after_eval_html'] = t_before_session_exit - t_start
             except (ImportError, Exception) as e:
-                logger.debug(f"Could not load eval information: {e}")
+                logger.error(f"Could not load eval information: {e}")
                 # Eval module may not be available, that's okay
-
+                t_before_session_exit = time.time()
+            
+            # Session has now closed (exited the 'with' block)
+            t_after_session_exit = time.time()
+            timings['session_exit_time'] = t_after_session_exit - t_before_session_exit
+            timings['session_exit_since_start'] = t_after_session_exit - t_start
+            
+            # Measure gap between session close and content building
+            t_before_content = time.time()
+            timings['gap_before_content'] = t_before_content - t_after_session_exit
+            timings['time_until_content_start'] = t_before_content - t_start
+            t0 = time.time()
             content = f"""
             <h1>Document Details</h1>
             <p><a href="/web">← Back to Document List</a></p>
@@ -1229,6 +1292,8 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
             }}
             </script>
             """
+            timings['build_content'] = time.time() - t0
+            timings['build_content_since_start'] = time.time() - t_start
 
             # Build page title: use title, title_gen, or doc_id
             page_title = doc.doc_id or doc.id
@@ -1236,6 +1301,11 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
                 page_title = f"{doc.title} ({doc.doc_id or doc.id})"
             elif doc.title_gen:
                 page_title = f"{doc.title_gen} ({doc.doc_id or doc.id})"
+            
+            # Log timing information
+            timings['total'] = time.time() - t_start
+            timing_str = ", ".join(f"{k}: {v:.3f}s" for k, v in sorted(timings.items()))
+            logger.debug(f"document_detail timings for {doc_id}: {timing_str}")
             
             return HTMLResponse(html_templates.base_template(
                 f"Document: {page_title}",

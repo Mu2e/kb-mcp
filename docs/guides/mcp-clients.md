@@ -1,6 +1,6 @@
 # MCP Clients
 
-This page describes how to connect different MCP clients to a remote MCP server. This MCP server can be started as [remote](mcp-remote.md) or [local (stdio)](mcp-stdio.md). 
+This page describes how to connect different MCP clients to a remote MCP server. This MCP server can be started as [local (stdio)](mcp-stdio.md) or deployed remotely. 
 
 
 ## Claude Desktop
@@ -31,7 +31,7 @@ For connecting to a remote server via OAuth.
 
 **Authentication**: OAuth (GitHub)
 
-**Important**: The OAuth flow is handled by claude.ai, which means your server must be accessible on the public internet. Deploy to [Cloud Run](deploy-cloudrun.md) for production, or use ngrok for local development (see [Installation](install.md)).
+**Important**: The OAuth flow is handled by claude.ai, which means your server must be accessible on the public internet. Deploy to [Cloud Run](deployment.md) for production, or use ngrok for local development (see [Installation](installation.md)).
 
 1. In Claude Desktop:
    - Go to **Connectors**
@@ -90,7 +90,7 @@ Cursor connects to MCP servers via a local configuration file.
 
 ### Local Development
 
-1. Install mkcert and generate certificates (see [Installation](install.md#5-ssl-certificates))
+1. Install mkcert and generate certificates (see [Installation](installation.md#5-ssl-certificates))
 
    **Important**: Cursor requires trusted certificates. Self-signed certificates (e.g., from openssl) will not work. You must use mkcert to create locally-trusted certificates.
 

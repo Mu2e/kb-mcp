@@ -714,7 +714,7 @@ class Chunk(Base):
             from .embedding import embed_chunk
         except ImportError:
             raise ImportError(
-                "Embedding module not available. Install with: pip install -e '.[embedding]'"
+                "Embedding module not available. Please ensure all dependencies are installed."
             )
 
         # Use object's session if attached, otherwise None
@@ -769,7 +769,7 @@ class Chunk(Base):
             from .embedding import get_embeddings
         except ImportError:
             raise ImportError(
-                "Embedding module not available. Install with: pip install -e '.[embedding]'"
+                "Embedding module not available. Please ensure all dependencies are installed."
             )
 
         # get_embeddings creates its own session, so we just call it directly
@@ -804,7 +804,7 @@ class Chunk(Base):
             from .embedding import get_embedding_vector
         except ImportError:
             raise ImportError(
-                "Embedding module not available. Install with: pip install -e '.[embedding]'"
+                "Embedding module not available. Please ensure all dependencies are installed."
             )
 
         # get_embedding_vector creates its own session, so we just call it directly

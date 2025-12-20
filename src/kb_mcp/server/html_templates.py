@@ -106,11 +106,12 @@ def root_page(active_sessions: int, required_repo: str, username: str | None = N
     </div>
 
     <div class="card">
-        <h2>Available Tools</h2>
+        <h2>Available MCP Tools</h2>
         <ul>
-            <li><code>generate_html</code> - Generate simple HTML pages</li>
-            <li><code>kb_get_document</code> - Get documents from the knowledge base</li>
+            <li><code>kb_search</code> - Search the knowledge base using semantic search</li>
+            <li><code>kb_get</code> - Get a specific document by identifier</li>
         </ul>
+        <p><a href="https://github.com/HEP-KE/kb-mcp/blob/sld/docs/reference/mcp.md">View full tool documentation →</a></p>
     </div>
 
     <div class="card">
@@ -130,7 +131,9 @@ def root_page(active_sessions: int, required_repo: str, username: str | None = N
     </div>
 
     <p style="color: #666; margin-top: 40px;">
-        For more information about MCP, visit <a href="https://modelcontextprotocol.io">modelcontextprotocol.io</a>
+        <a href="https://github.com/HEP-KE/kb-mcp">GitHub Repository</a> · 
+        <a href="https://github.com/HEP-KE/kb-mcp/blob/sld/docs/index.md">Documentation</a> · 
+        <a href="https://modelcontextprotocol.io">Model Context Protocol</a>
     </p>
     """
     

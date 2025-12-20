@@ -73,15 +73,12 @@ SQLite is the default and requires no additional setup. The database file will b
 For production use, configure PostgreSQL connection in `.env`:
 
 ```bash
-# Option 1: Use DB_URL
-DB_URL=postgresql://user:password@localhost:5432/dbname
-
-# Option 2: Use individual components
 DB_HOST=localhost
 DB_PORT=5432
 DB_USER=user
 DB_PASSWORD=password
 DB_NAME=dbname
+DB_SCHEMA=public # defaults to public
 ```
 
 ### Test Python Import

@@ -531,7 +531,7 @@ def add_from_path(
         from kb_mcp.parser import parse
     except ImportError:
         raise ImportError(
-            "Parser module not available. Install with: pip install -e '.[parser]'"
+            "Parser module not available. Please ensure all dependencies are installed."
         )
     
     # Prepare data dict for parse()

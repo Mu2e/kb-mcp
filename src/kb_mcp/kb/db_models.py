@@ -231,7 +231,7 @@ class Document(Base):
             from .embedding import chunk_document
         except ImportError:
             raise ImportError(
-                "Embedding module not available. Install with: pip install -e '.[embedding]'"
+                "Embedding module not available. Please ensure all dependencies are installed."
             )
 
         # Use object's session if attached, otherwise None (will create new session)
@@ -263,7 +263,7 @@ class Document(Base):
             from .embedding import get_chunks
         except ImportError:
             raise ImportError(
-                "Embedding module not available. Install with: pip install -e '.[embedding]'"
+                "Embedding module not available. Please ensure all dependencies are installed."
             )
 
         # Use object's session if attached, otherwise None (will create new session)
@@ -297,7 +297,7 @@ class Document(Base):
             from .embedding import drop_chunks
         except ImportError:
             raise ImportError(
-                "Embedding module not available. Install with: pip install -e '.[embedding]'"
+                "Embedding module not available. Please ensure all dependencies are installed."
             )
 
         # Use object's session if attached, otherwise None (will create new session)
@@ -347,7 +347,7 @@ class Document(Base):
             from .embedding import chunk_and_embed
         except ImportError:
             raise ImportError(
-                "Embedding module not available. Install with: pip install -e '.[embedding]'"
+                "Embedding module not available. Please ensure all dependencies are installed."
             )
 
         # Use object's session if attached, otherwise None
