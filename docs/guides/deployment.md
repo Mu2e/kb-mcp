@@ -15,7 +15,6 @@ docker build -t kb-mcp .
 ```bash
 docker run -d -p 8443:8443 \     
   -e DISABLE_WEB_AUTH=true \
-  -e DB_HOST=ep-patient-butterfly-aenc585m-pooler.c-2.us-east-2.aws.neon.tech \
   -e DB_HOST=your_db_host \
   -e DB_USER=your_db_user \
   -e DB_PASSWORD=your_db_password \
@@ -111,6 +110,7 @@ gsutil iam ch serviceAccount:XXXXXXXXXXXXX-compute@developer.gserviceaccount.com
 gcloud services enable secretmanager.googleapis.com
 
 # Create GitHub OAuth secrets
+# Note: Get your GitHub OAuth credentials from https://github.com/settings/developers
 echo -n "YOUR_GITHUB_CLIENT_ID" | gcloud secrets create github-client-id --data-file=-
 echo -n "YOUR_GITHUB_CLIENT_SECRET" | gcloud secrets create github-client-secret --data-file=-
 
@@ -196,6 +196,7 @@ This will:
 - The default service name is `kb-mcp`. Use `--service-name` to adjust it to your service name.
 - By default, access is restricted to users with access to `HEP-KE/kb-mcp`. Use `--github-repo owner/repo` to change this, or `--github-repo ""` to allow all authenticated GitHub users.
 - The deployment uses file-based storage with Cloud Storage mount by default (`SESSION_STORE_FIRESTORE=false`). To use Firestore instead, use the `--firestore` flag.
+- **Host Header Warning**: If your MCP server connection fails and you see a warning `Invalid Host header: sld.scorrodi.dev` in Cloud Run logs. This is cuased by a new security feature introduced in mcp version 1.23 that doesn't work inside containers (where the server runs on localhost but gets reqeusts from a different URL). Avoid version 1.23 (in our pyroject.toml) since it does **not** allow to switch this feature off. 
 
 ### Custom Domain (Optional)
 
@@ -240,7 +241,7 @@ To use a custom domain instead of the auto-generated Cloud Run URL:
 
 ### Finish Setup
 
-Update your GitHub OAuth App callback URL ([at github.com](https://github.com/settings/developers)) to match your deployment URL:
+Update your GitHub OAuth App callback URL at [GitHub Developer Settings](https://github.com/settings/developers) to match your deployment URL:
 ```
 https://YOUR-SERVICE-URL/oauth/github/callback
 ```

@@ -55,6 +55,10 @@ cp .env.example .env
 Edit your `.env` file with your configuration.  See [Configuration Reference](../reference/config.md) for detailed explanations of all available environment variables.
  Key settings include:
 
+- **GitHub OAuth**: Create a GitHub OAuth App at [GitHub Developer Settings](https://github.com/settings/developers) and set:
+  - `GITHUB_CLIENT_ID`: Your OAuth app client ID
+  - `GITHUB_CLIENT_SECRET`: Your OAuth app client secret
+  - `GITHUB_REQUIRED_REPO`: (Optional) Restrict access to a specific repository (format: `owner/repo`)
 - **OPENAI_BASE_URL**: Base URL for OpenAI-compatible LLM interface
 - **OPENAI_API_KEY**: Optional API key for `OPENAI_BASE_URL`
 - **Database Configuration**: See [Database Setup](#3-database-setup) below

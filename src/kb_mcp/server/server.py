@@ -72,6 +72,7 @@ mcp = FastMCP(
         client_registration_options=ClientRegistrationOptions(enabled=True),
     ),
     auth_server_provider=oauth_provider,
+    # settings={"enable_dns_rebinding_protection": False} # add one new mcp version that supports this is avaialble, so far use <1.23.0
 )
 
 

@@ -6,7 +6,6 @@ set -e
 
 # Parse arguments
 USE_FIRESTORE=false
-PROJECT_ID=""
 CUSTOM_BASE_URL=""
 SERVICE_NAME="kb-mcp"
 GITHUB_REQUIRED_REPO="HEP-KE/kb-mcp"
