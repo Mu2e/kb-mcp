@@ -126,7 +126,7 @@ def root_page(active_sessions: int, required_repo: str, username: str | None = N
         <h2>Other Endpoints</h2>
         <ul>
             <li><a href="/status"><code>/status</code></a> - Server status (simpler version)</li>
-            <li><code>/oauth/github/callback</code> - GitHub OAuth callback (used during auth flow)</li>
+            <li><code>/oauth/callback</code> - OAuth callback (used during auth flow)</li>
         </ul>
     </div>
 

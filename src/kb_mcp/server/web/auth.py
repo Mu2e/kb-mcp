@@ -9,6 +9,7 @@ import time
 from starlette.responses import HTMLResponse, RedirectResponse
 
 from ..session_store import SessionStore
+from ..oauth_base import BaseMCPOAuthProvider
 
 logger = logging.getLogger(__name__)
 
@@ -16,7 +17,8 @@ logger = logging.getLogger(__name__)
 class WebSessionManager:
     """Manages browser sessions for web interfaces."""
 
-    def __init__(self, oauth_provider):
+    def __init__(self, oauth_provider: BaseMCPOAuthProvider | None):
+        """Initialize with a single OAuth provider (or None if auth disabled)."""
         from ...config import get_web_session_config
 
         self.oauth_provider = oauth_provider
@@ -105,39 +107,41 @@ class WebSessionManager:
         )
 
         if should_reverify:
-            github_token = session_data.get("github_token")
-            if not github_token:
-                # No GitHub token stored (old session), invalidate
+            access_token = session_data.get("access_token")
+            provider_name = session_data.get("provider", "github")  # Default to github for backward compatibility
+            
+            if not access_token:
+                # No access token stored (old session), invalidate
                 logger.warning(
-                    f"No GitHub token in session for user: {session_data.get('username')}"
+                    f"No access token in session for user: {session_data.get('username')}"
+                )
+                await self.session_store.delete("sessions", session_id)
+                return None
+
+            # Get the provider used for this session
+            if not self.oauth_provider or self.oauth_provider.provider_name != provider_name:
+                logger.warning(
+                    f"Provider {provider_name} mismatch, invalidating session"
                 )
                 await self.session_store.delete("sessions", session_id)
                 return None
 
             try:
-                # Re-verify GitHub user
-                user_data = await self.oauth_provider.get_github_user(github_token)
-                username = user_data.get("login")
+                # Re-verify user with provider
+                user_data = await self.oauth_provider.get_user_info_for_web(access_token)
+                username = user_data.get("username")
 
-                # Re-verify repository access and admin permissions
-                has_access = True
-                has_admin = False
-
-                if self.oauth_provider.required_repo:
-                    has_access = await self.oauth_provider.verify_repo_access(
-                        github_token, require_admin=False
+                # Re-verify access and admin permissions
+                has_access = await self.oauth_provider.verify_user_access(access_token)
+                if not has_access:
+                    logger.warning(
+                        f"User {username} no longer has required access"
                     )
-                    if not has_access:
-                        logger.warning(
-                            f"User {username} no longer has access to "
-                            f"{self.oauth_provider.required_repo}"
-                        )
-                        await self.session_store.delete("sessions", session_id)
-                        return None
+                    await self.session_store.delete("sessions", session_id)
+                    return None
 
-                    has_admin = await self.oauth_provider.verify_repo_access(
-                        github_token, require_admin=True
-                    )
+                # Check admin access
+                has_admin = await self.oauth_provider.verify_user_admin_access(access_token)
 
                 # Update session with re-verified data
                 session_data["username"] = username
@@ -194,11 +198,11 @@ class WebSessionManager:
         return ""
 
     async def create_oauth_login_url(
-        self, redirect_after_login: str = "/"
+        self, provider: BaseMCPOAuthProvider, redirect_after_login: str = "/"
     ) -> tuple[str, str]:
-        """Create GitHub OAuth login URL."""
+        """Create OAuth login URL for a specific provider."""
         state = secrets.token_urlsafe(32)
-        # Store redirect path in state mapping with expiration (OAuth flows timeout after 10 minutes)
+        # Store redirect path and provider in state mapping with expiration (OAuth flows timeout after 10 minutes)
         current_time = time.time()
         expires_at = current_time + 600  # 10 minutes
         await self.session_store.set(
@@ -206,17 +210,17 @@ class WebSessionManager:
             f"redirect_{state}",
             {"value": redirect_after_login, "expires_at": expires_at},
         )
-
-        github_auth_url = (
-            "https://github.com/login/oauth/authorize"
-            f"?client_id={self.oauth_provider.github_client_id}"
-            f"&redirect_uri={self.oauth_provider.base_url}/oauth/github/callback"
-            f"&state={state}"
-            f"&scope=read:user repo"
+        await self.session_store.set(
+            "sessions",
+            f"provider_{state}",
+            {"value": provider.provider_name, "expires_at": expires_at},
         )
-        return github_auth_url, state
 
-    async def handle_oauth_callback(self, code: str, state: str):
+        redirect_uri = f"{provider.base_url}{provider.callback_path}"
+        oauth_url = await provider.create_authorize_url(state, redirect_uri)
+        return oauth_url, state
+
+    async def handle_oauth_callback(self, provider: BaseMCPOAuthProvider, code: str, state: str):
         """Handle OAuth callback and create session."""
         # Verify state was valid
         state_data = await self.session_store.get("sessions", f"state_{state}")
@@ -253,40 +257,31 @@ class WebSessionManager:
             logger.warning(f"Invalid redirect path attempted: {redirect_path}")
             redirect_path = "/"
 
-        # Use oauth_provider's helper methods to get GitHub token and verify user
+        # Use provider's helper methods to exchange code and verify user
         try:
-            # Exchange code for GitHub access token
-            github_token = await self.oauth_provider.exchange_github_code(code)
+            # Exchange code for access token
+            access_token = await provider.exchange_code_for_token(code)
 
-            # Get GitHub user info
-            user_data = await self.oauth_provider.get_github_user(github_token)
-            username = user_data.get("login")
+            # Get user info (normalized for web)
+            user_data = await provider.get_user_info_for_web(access_token)
+            username = user_data.get("username")
 
-            # Check repository access and admin permissions
-            has_access = True
-            has_admin = False
+            # Check access and admin permissions
+            has_access = await provider.verify_user_access(access_token)
+            if not has_access:
+                logger.warning(f"User {username} does not have required access")
+                return HTMLResponse("Access denied", status_code=403)
 
-            if self.oauth_provider.required_repo:
-                has_access = await self.oauth_provider.verify_repo_access(
-                    github_token, require_admin=False
-                )
-                if not has_access:
-                    logger.warning(
-                        f"User {username} does not have access to "
-                        f"{self.oauth_provider.required_repo}"
-                    )
-                    return HTMLResponse("Access denied", status_code=403)
-
-                has_admin = await self.oauth_provider.verify_repo_access(
-                    github_token, require_admin=True
-                )
+            # Check admin access
+            has_admin = await provider.verify_user_admin_access(access_token)
 
             # Create session
             session_id = secrets.token_urlsafe(32)
             current_time = time.time()
             session_data = {
                 "username": username,
-                "github_token": github_token,
+                "access_token": access_token,
+                "provider": provider.provider_name,
                 "has_admin": has_admin,
                 "created_at": current_time,
                 "expires_at": current_time + self.session_timeout,
@@ -302,13 +297,13 @@ class WebSessionManager:
                 session_id,
                 max_age=self.session_timeout,
                 httponly=True,
-                secure=self.oauth_provider.base_url.startswith("https://"),
+                secure=provider.base_url.startswith("https://"),
                 samesite="lax",
             )
 
             logger.info(
-                f"Created web session for {username} (has_admin={has_admin}) "
-                f"redirect={redirect_path}"
+                f"Created web session for {username} via {provider.display_name} "
+                f"(has_admin={has_admin}) redirect={redirect_path}"
             )
             return response
 
@@ -322,8 +317,9 @@ def setup_shared_auth_routes(app, session_manager: WebSessionManager):
 
     @app.route("/login")
     async def login(request):
-        """Start web login flow."""
+        """Start web login flow - show provider selection or redirect if single provider."""
         redirect_after_login = request.query_params.get("redirect", "/")
+        provider_name = request.query_params.get("provider")
         
         # If auth is disabled, create a dev session automatically
         if not session_manager.require_auth:
@@ -331,7 +327,8 @@ def setup_shared_auth_routes(app, session_manager: WebSessionManager):
             current_time = time.time()
             session_data = {
                 "username": "dev-user",
-                "github_token": None,
+                "access_token": None,
+                "provider": "dev",
                 "has_admin": True,
                 "created_at": current_time,
                 "expires_at": current_time + session_manager.session_timeout,
@@ -351,9 +348,13 @@ def setup_shared_auth_routes(app, session_manager: WebSessionManager):
             logger.info(f"Created dev session for dev-user (auth disabled)")
             return response
         
-        # Normal OAuth flow
-        github_auth_url, state = await session_manager.create_oauth_login_url(
-            redirect_after_login=redirect_after_login
+        # If no provider configured, error
+        if not session_manager.oauth_provider:
+            return HTMLResponse("No OAuth provider configured", status_code=500)
+        
+        # Start OAuth flow with the configured provider
+        oauth_url, state = await session_manager.create_oauth_login_url(
+            session_manager.oauth_provider, redirect_after_login=redirect_after_login
         )
 
         # Store state in session storage with expiration
@@ -365,8 +366,8 @@ def setup_shared_auth_routes(app, session_manager: WebSessionManager):
             {"value": True, "expires_at": expires_at},
         )
 
-        # Redirect to GitHub OAuth
-        return RedirectResponse(url=github_auth_url, status_code=303)
+        # Redirect to OAuth provider
+        return RedirectResponse(url=oauth_url, status_code=303)
 
     @app.route("/logout")
     async def logout(request):
@@ -379,10 +380,5 @@ def setup_shared_auth_routes(app, session_manager: WebSessionManager):
         response.delete_cookie("web_session")
         return response
 
-    async def unified_github_callback(code: str, state: str):
-        """Unified callback handler for admin and web interfaces."""
-        return await session_manager.handle_oauth_callback(code, state)
-
-    return unified_github_callback
 
 

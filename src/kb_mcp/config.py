@@ -113,6 +113,22 @@ def get_github_oauth_config() -> dict:
         'required_repo': os.getenv("GITHUB_REQUIRED_REPO", ""),
     }
 
+def get_globus_oauth_config() -> dict:
+    """Globus OAuth settings.
+
+    Returns:
+        dict: Globus configuration with keys:
+
+            * `client_id` (str): OAuth Client ID (Env: `GLOBUS_CLIENT_ID`).
+            * `client_secret` (str): OAuth Client Secret (Env: `GLOBUS_CLIENT_SECRET`).
+            * `required_group` (str): Required Globus group (Env: `GLOBUS_REQUIRED_GROUP`).
+    """
+    return {
+        'client_id': os.getenv("GLOBUS_CLIENT_ID", ""),
+        'client_secret': os.getenv("GLOBUS_CLIENT_SECRET", ""),
+        'required_group': os.getenv("GLOBUS_REQUIRED_GROUP", ""),
+    }
+
 def get_web_session_config() -> dict:
     """Web session settings.
 
@@ -201,6 +217,7 @@ def get_all_config() -> dict:
         'server': get_server_config(),
         'llm': {**get_llm_config(), 'openai_api_key': '***'},
         'github': {**get_github_oauth_config(), 'client_secret': '***'},
+        'globus': {**get_globus_oauth_config(), 'client_secret': '***'},
         'web': get_web_session_config(),
         'parser': get_parser_config(),
         'embedding': get_embedding_config(),
