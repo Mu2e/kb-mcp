@@ -1,13 +1,13 @@
 # Installation
 
-For instructions on connecting an MCP client to a remote MCP server (this codebase), see the [mc client documentation](https://github.com/corrodis/mc).
+For instructions on connecting an MCP client to a remote MCP server (this codebase), see the [mc client documentation](https://github.com/HEP-KE/kb-mcp/docs).
 
 ## 0. Clone the Repository
 
 Clone this repository using:
 
 ```bash
-git clone https://github.com/corrodis/kb-mcp.git
+git clone https://github.com/HEP-KE/kb-mcp.git
 cd kb-mcp
 ```
 
@@ -36,7 +36,7 @@ pip install -e ".[gcp]"
 
 # Add documentation tools (for building docs)
 # (Optional) Build and preview the documentation locally
-pip install -e ".[docs]"
+pip install -e ".[doc]"
 cd docs
 mkdocs serve
 ```
