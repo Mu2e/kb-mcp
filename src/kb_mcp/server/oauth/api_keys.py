@@ -1,4 +1,4 @@
-"""API key management for MCP server (server package)."""
+"""API key management for MCP server."""
 
 from __future__ import annotations
 
@@ -109,5 +109,4 @@ class ApiKeyManager:
             self._save_keys(keys)
             return True
         return False
-
 

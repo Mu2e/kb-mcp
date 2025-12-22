@@ -8,7 +8,9 @@ set -e
 USE_FIRESTORE=false
 CUSTOM_BASE_URL=""
 SERVICE_NAME="kb-mcp"
-GITHUB_REQUIRED_REPO="HEP-KE/kb-mcp"
+GITHUB_REQUIRED_REPO=""
+GLOBUS_REQUIRED_GROUP=""
+OAUTH_PROVIDER=""
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -25,6 +27,16 @@ while [[ $# -gt 0 ]]; do
                 GITHUB_REQUIRED_REPO=""
             else
                 GITHUB_REQUIRED_REPO="$2"
+                OAUTH_PROVIDER="github"
+            fi
+            shift 2
+            ;;
+        --globus-group)
+            if [ "$2" = "" ] || [ "$2" = "''" ] || [ "$2" = '""' ]; then
+                GLOBUS_REQUIRED_GROUP=""
+            else
+                GLOBUS_REQUIRED_GROUP="$2"
+                OAUTH_PROVIDER="globus"
             fi
             shift 2
             ;;
@@ -41,20 +53,34 @@ done
 
 # Check required arguments
 if [ -z "$PROJECT_ID" ]; then
-    echo "Usage: ./scripts/deploy-cloudrun.sh PROJECT_ID [BASE_URL] [--service-name SERVICE_NAME] [--github-repo OWNER/REPO] [--firestore]"
-    echo "Example: ./scripts/deploy-cloudrun.sh my-gcp-project"
-    echo "Example: ./scripts/deploy-cloudrun.sh my-gcp-project https://lsd.example.com"
-    echo "Example: ./scripts/deploy-cloudrun.sh my-gcp-project https://lsd.example.com --service-name sld-kb"
-    echo "Example: ./scripts/deploy-cloudrun.sh my-gcp-project --github-repo myorg/private-repo"
-    echo "Example: ./scripts/deploy-cloudrun.sh my-gcp-project https://lsd.example.com --firestore"
+    echo "Usage: ./scripts/deploy-cloudrun.sh PROJECT_ID [BASE_URL] [--service-name SERVICE_NAME] [--github-repo OWNER/REPO | --globus-group GROUP_UUID] [--firestore]"
+    echo ""
+    echo "Examples:"
+    echo "  ./scripts/deploy-cloudrun.sh my-gcp-project"
+    echo "  ./scripts/deploy-cloudrun.sh my-gcp-project https://lsd.example.com"
+    echo "  ./scripts/deploy-cloudrun.sh my-gcp-project --github-repo myorg/private-repo"
+    echo "  ./scripts/deploy-cloudrun.sh my-gcp-project --globus-group 6207971f-dd5b-11f0-945c-0e587dcf26df"
+    echo "  ./scripts/deploy-cloudrun.sh my-gcp-project https://lsd.example.com --firestore"
     echo ""
     echo "Arguments:"
     echo "  PROJECT_ID: Your Google Cloud project ID (required)"
     echo "  BASE_URL:   Optional custom domain. If not provided, uses auto-generated Cloud Run URL."
     echo "  --service-name: Cloud Run service name (default: kb-mcp)"
-    echo "  --github-repo: Restrict access to users with access to this GitHub repo (format: owner/repo)."
-    echo "                 Default: HEP-KE/kb-mcp. Use --github-repo \"\" to allow all authenticated users."
+    echo "  --github-repo: Use GitHub OAuth and restrict access to users with access to this repo (format: owner/repo)."
+    echo "                 Use --github-repo \"\" to allow all authenticated GitHub users."
+    echo "  --globus-group: Use Globus OAuth and restrict access to users in this Globus group (UUID)."
+    echo "                  Use --globus-group \"\" to allow all authenticated Globus users."
     echo "  --firestore: Use Firestore instead of file-based storage"
+    echo ""
+    echo "Note: OAuth is optional. If neither --github-repo nor --globus-group is provided,"
+    echo "      only API key authentication will be available (no web interface)."
+    exit 1
+fi
+
+# Validate OAuth provider selection
+if [ -n "$GITHUB_REQUIRED_REPO" ] && [ -n "$GLOBUS_REQUIRED_GROUP" ]; then
+    echo "Error: Cannot specify both --github-repo and --globus-group."
+    echo "       Only one OAuth provider can be configured at a time."
     exit 1
 fi
 REGION="us-central1"
@@ -74,6 +100,23 @@ fi
 if [ -n "${CUSTOM_BASE_URL}" ]; then
     echo "Custom BASE_URL: ${CUSTOM_BASE_URL}"
 fi
+if [ "$OAUTH_PROVIDER" = "github" ]; then
+    echo "OAuth: GitHub"
+    if [ -n "$GITHUB_REQUIRED_REPO" ]; then
+        echo "  Required repo: ${GITHUB_REQUIRED_REPO}"
+    else
+        echo "  All authenticated users allowed"
+    fi
+elif [ "$OAUTH_PROVIDER" = "globus" ]; then
+    echo "OAuth: Globus"
+    if [ -n "$GLOBUS_REQUIRED_GROUP" ]; then
+        echo "  Required group: ${GLOBUS_REQUIRED_GROUP}"
+    else
+        echo "  All authenticated users allowed"
+    fi
+else
+    echo "OAuth: None (API keys only)"
+fi
 echo "================================================"
 
 # Check if gcloud is installed
@@ -85,14 +128,32 @@ fi
 
 # Check for required secrets
 echo "Checking for required secrets..."
-REQUIRED_SECRETS=("github-client-id" "github-client-secret" "db-host" "db-user" "db-password")
+REQUIRED_SECRETS=("db-host" "db-user" "db-password")
 MISSING_SECRETS=()
 
+# Check database secrets (always required)
 for secret in "${REQUIRED_SECRETS[@]}"; do
     if ! gcloud secrets describe ${secret} --project=${PROJECT_ID} &>/dev/null; then
         MISSING_SECRETS+=("${secret}")
     fi
 done
+
+# Check OAuth secrets based on provider
+if [ "$OAUTH_PROVIDER" = "github" ]; then
+    if ! gcloud secrets describe github-client-id --project=${PROJECT_ID} &>/dev/null; then
+        MISSING_SECRETS+=("github-client-id")
+    fi
+    if ! gcloud secrets describe github-client-secret --project=${PROJECT_ID} &>/dev/null; then
+        MISSING_SECRETS+=("github-client-secret")
+    fi
+elif [ "$OAUTH_PROVIDER" = "globus" ]; then
+    if ! gcloud secrets describe globus-client-id --project=${PROJECT_ID} &>/dev/null; then
+        MISSING_SECRETS+=("globus-client-id")
+    fi
+    if ! gcloud secrets describe globus-client-secret --project=${PROJECT_ID} &>/dev/null; then
+        MISSING_SECRETS+=("globus-client-secret")
+    fi
+fi
 
 if [ ${#MISSING_SECRETS[@]} -ne 0 ]; then
     echo "Error: Missing required secrets:"
@@ -123,9 +184,19 @@ ENV_VARS="USE_HTTPS=false,HOST=0.0.0.0,${SESSION_STORE},DB_PORT=5432"
 if [ -n "$GITHUB_REQUIRED_REPO" ]; then
     ENV_VARS="${ENV_VARS},GITHUB_REQUIRED_REPO=${GITHUB_REQUIRED_REPO}"
 fi
+if [ -n "$GLOBUS_REQUIRED_GROUP" ]; then
+    ENV_VARS="${ENV_VARS},GLOBUS_REQUIRED_GROUP=${GLOBUS_REQUIRED_GROUP}"
+fi
 
-# Build secrets list (database secrets are required)
-SECRETS_LIST="GITHUB_CLIENT_ID=github-client-id:latest,GITHUB_CLIENT_SECRET=github-client-secret:latest,DB_HOST=db-host:latest,DB_USER=db-user:latest,DB_PASSWORD=db-password:latest"
+# Build secrets list (database secrets are always required)
+SECRETS_LIST="DB_HOST=db-host:latest,DB_USER=db-user:latest,DB_PASSWORD=db-password:latest"
+
+# Add OAuth secrets based on provider
+if [ "$OAUTH_PROVIDER" = "github" ]; then
+    SECRETS_LIST="${SECRETS_LIST},GITHUB_CLIENT_ID=github-client-id:latest,GITHUB_CLIENT_SECRET=github-client-secret:latest"
+elif [ "$OAUTH_PROVIDER" = "globus" ]; then
+    SECRETS_LIST="${SECRETS_LIST},GLOBUS_CLIENT_ID=globus-client-id:latest,GLOBUS_CLIENT_SECRET=globus-client-secret:latest"
+fi
 
 # Check if optional database secrets exist and add them
 if gcloud secrets describe db-name --project=${PROJECT_ID} &>/dev/null; then
@@ -192,5 +263,17 @@ echo "Deployment complete!"
 echo "Service URL: ${BASE_URL}"
 echo "================================================"
 echo ""
-echo "Update your GitHub OAuth App callback URL to:"
-echo "  ${BASE_URL}/oauth/github/callback"
+if [ "$OAUTH_PROVIDER" = "github" ]; then
+    echo "Update your GitHub OAuth App callback URL to:"
+    echo "  ${BASE_URL}/oauth/callback"
+    echo ""
+    echo "GitHub Developer Settings: https://github.com/settings/developers"
+elif [ "$OAUTH_PROVIDER" = "globus" ]; then
+    echo "Update your Globus OAuth App callback URL to:"
+    echo "  ${BASE_URL}/oauth/callback"
+    echo ""
+    echo "Globus Developer Console: https://developers.globus.org/"
+else
+    echo "No OAuth configured. Only API key authentication is available."
+    echo "To enable OAuth, redeploy with --github-repo or --globus-group."
+fi

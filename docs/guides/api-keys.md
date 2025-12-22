@@ -1,6 +1,13 @@
 # API Keys
 
-API keys provide authentication as an alternative to GitHub OAuth.
+API keys provide authentication as an alternative to OAuth (GitHub or Globus). API keys are always available, even when OAuth is not configured.
+
+**Important**: 
+- When no OAuth provider is configured, API keys are the **only** way to authenticate MCP requests. Without an API key, MCP requests will fail. No web interface is avaiable.
+- Web interface requires OAuth - API keys cannot be used for web authentication.
+- Set `DISABLE_AUTH=true` to disable all authentication (development and localhost only binding). This will disable authentification for MCP and web interface.
+
+For a complete overview of authentication options, see the [Authentication Guide](authentication.md).
 
 ## Generating API Keys
 

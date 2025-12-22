@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from ..config import get_web_session_config, get_data_dir, get_api_keys_file
+from ..config import get_server_config, get_data_dir, get_api_keys_file
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +23,7 @@ class SessionStore:
             collection_name: Firestore collection name or base file name
         """
         self.collection_name = collection_name
-        self.use_firestore = get_web_session_config()['use_firestore']
+        self.use_firestore = get_server_config()['use_firestore']
 
         # File storage setup - path determined from collection name
         # Use DATA_DIR env var if set (e.g., /data for Cloud Storage mount), otherwise "data/"
@@ -233,11 +233,13 @@ class SessionStore:
         current_time = time.time()
         cleaned_count = 0
 
-        # Define keys to clean up and their related keys to also delete
+        # Define keys to clean up (no related keys needed - everything is consolidated!)
         cleanup_config = [
-            ("auth_codes", ["github_tokens"]),  # auth_code → also delete github_tokens[code_id]
-            ("access_tokens", ["github_tokens", "token_users"]),  # access_token → also delete both
-            ("sessions", []),  # sessions → no related cleanup
+            ("pending_auth", []),    # Clean up expired MCP OAuth states
+            ("auth_codes", []),      # Clean up expired authorization codes
+            ("access_tokens", []),   # Clean up expired access tokens (includes all provider data)
+            ("sessions", []),        # Clean up expired web sessions
+            ("web_oauth_states", []),# Clean up expired web OAuth states
         ]
 
         for key, related_keys in cleanup_config:

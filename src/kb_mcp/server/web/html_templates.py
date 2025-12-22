@@ -54,13 +54,19 @@ def base_template(title: str, content: str, nav_items: list[tuple[str, str]] | N
 </html>"""
 
 
-def root_page(active_sessions: int, required_repo: str, username: str | None = None) -> str:
+def root_page(active_sessions: int, required_access: str | None = None, username: str | None = None, provider_display: str | None = None) -> str:
     """Generate the root landing page."""
-    auth_status = (
-        f"Restricted to users with access to: <code>{required_repo}</code>"
-        if required_repo
-        else "Open to all authenticated GitHub users"
-    )
+    # Authentication provider info
+    if provider_display:
+        provider_info = f"<strong>Authentication Provider:</strong> {provider_display}"
+    else:
+        provider_info = "<strong>Authentication Provider:</strong> Not configured"
+    
+    # Access restriction info
+    if required_access:
+        auth_status = f"Restricted to users with access to: <code>{required_access}</code>"
+    else:
+        auth_status = "Open to all authenticated users"
 
     # User session status
     if username:
@@ -90,7 +96,8 @@ def root_page(active_sessions: int, required_repo: str, username: str | None = N
 
     <div class="card">
         <h2>About This Server</h2>
-        <p>This is a Model Context Protocol (MCP) server with GitHub OAuth authentication.</p>
+        <p>This is a Model Context Protocol (MCP) server with OAuth authentication.</p>
+        <p>{provider_info}</p>
         <p><strong>Authorization:</strong> {auth_status}</p>
         <p><strong>Active Sessions:</strong> {active_sessions}</p>
     </div>
@@ -100,7 +107,7 @@ def root_page(active_sessions: int, required_repo: str, username: str | None = N
         <div class="info-box">
             <strong>Endpoint:</strong> <a href="/mcp"><code>/mcp</code></a><br>
             <strong>Protocol:</strong> MCP over HTTP (streamable)<br>
-            <strong>Authentication:</strong> OAuth 2.0 with GitHub
+            <strong>Authentication:</strong> OAuth 2.0 or API Keys
         </div>
         <p>MCP clients (like Claude Desktop) connect to <code>/mcp</code> and handle OAuth automatically.</p>
     </div>
@@ -153,3 +160,4 @@ def status_page(active_sessions: int) -> str:
     """
     
     return base_template("MCP Server Status", content, None)
+

@@ -6,7 +6,7 @@ from starlette.responses import HTMLResponse
 from starlette.requests import Request
 
 from ..auth import WebSessionManager
-from ... import html_templates
+from .. import html_templates
 
 logger = logging.getLogger(__name__)
 

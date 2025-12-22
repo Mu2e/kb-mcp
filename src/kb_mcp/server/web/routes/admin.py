@@ -1,21 +1,24 @@
-"""Admin web interface for managing API keys (server package)."""
+"""Admin web interface for managing API keys."""
 
 import logging
 from starlette.responses import HTMLResponse, RedirectResponse
 
-from .web import WebSessionManager
-from . import html_templates
+from ..auth import WebSessionManager
+from ...oauth import ApiKeyManager
+from .. import html_templates
+from ....config import get_api_keys_file
 
 logger = logging.getLogger(__name__)
 
 
 def setup_admin_routes(app, oauth_provider, session_manager: WebSessionManager):
     """Setup admin web interface routes."""
-    api_key_manager = oauth_provider.api_key_manager
+    # Load API key manager directly (API keys are always available, even without OAuth)
+    api_key_manager = ApiKeyManager(get_api_keys_file())
 
     @app.route("/admin")
     async def admin_page(request):
-        """Admin interface (GitHub OAuth protected, requires admin permissions)."""
+        """Admin interface (OAuth protected, requires admin permissions)."""
         # Force re-verification on every admin page load for maximum security
         if not await session_manager.has_admin_access(request, force_reverify=True):
             return RedirectResponse(url="/login?redirect=/admin", status_code=303)

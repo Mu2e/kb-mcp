@@ -6,15 +6,15 @@ from pathlib import Path
 from starlette.responses import JSONResponse, Response
 from starlette.requests import Request
 
-from .web import WebSessionManager, require_auth_api
-from .web.routes.documents import document_to_dict
+from ..auth import WebSessionManager
+from .documents import require_auth_api, document_to_dict
 
 logger = logging.getLogger(__name__)
 
 
 def setup_api_routes(app, session_manager: WebSessionManager):
     """Setup API routes for knowledge base operations."""
-    from ..config import get_data_dir
+    from ....config import get_data_dir
 
     # Get upload directory (needed for serving uploaded files)
     data_dir = get_data_dir()
@@ -82,8 +82,8 @@ def setup_api_routes(app, session_manager: WebSessionManager):
 
         try:
             # Query documents from knowledge base
-            from ..kb import get, get_count, get_options
-            from ..kb.database import get_db_session
+            from ....kb import get, get_count, get_options
+            from ....kb.database import get_db_session
 
             # Get documents with filters and pagination within a session
             # This ensures all attributes are loaded before session closes
@@ -179,7 +179,7 @@ def setup_api_routes(app, session_manager: WebSessionManager):
         include_binary = request.query_params.get("include_binary", "false").lower() == "true"
 
         try:
-            from ..kb import get
+            from ....kb import get
 
             doc = get(uuid=doc_id)
             if not doc:
@@ -212,7 +212,7 @@ def setup_api_routes(app, session_manager: WebSessionManager):
         doc_type = request.query_params.get("doc_type", "")
 
         try:
-            from ..kb import get_statistics
+            from ....kb import get_statistics
             
             if get_statistics is None:
                 return JSONResponse(
@@ -249,7 +249,7 @@ def setup_api_routes(app, session_manager: WebSessionManager):
         try:
             # Try to import embedding functions
             try:
-                from ..kb.embedding import get_chunk_strategies, get_chunks
+                from ....kb.embedding import get_chunk_strategies, get_chunks
             except ImportError:
                 return JSONResponse(
                     {"error": "Embedding module not available"},
@@ -305,7 +305,7 @@ def setup_api_routes(app, session_manager: WebSessionManager):
         search = request.query_params.get("search", "")
 
         try:
-            from ..kb import get_count, get_options
+            from ....kb import get_count, get_options
 
             # Get base filter options
             base_options = get_options()
@@ -375,7 +375,7 @@ def setup_api_routes(app, session_manager: WebSessionManager):
         doc_id = request.path_params["doc_id"]
 
         try:
-            from ..kb import get
+            from ....kb import get
 
             doc = get(uuid=doc_id)
             if not doc:
@@ -488,7 +488,7 @@ def setup_api_routes(app, session_manager: WebSessionManager):
 
         try:
             # Get local directory from DATA_DIR
-            from ..config import get_data_dir
+            from ....config import get_data_dir
             data_dir = get_data_dir()
             local_dir = Path(data_dir) / "local"
             file_path = local_dir / filename
@@ -571,7 +571,7 @@ def setup_api_routes(app, session_manager: WebSessionManager):
         try:
             # Import search function
             try:
-                from ..kb.search import search
+                from ....kb.search import search
             except ImportError:
                 return JSONResponse(
                     {"error": "Search module not available"},
@@ -628,7 +628,7 @@ def setup_api_routes(app, session_manager: WebSessionManager):
             return error_response
 
         try:
-            from ..kb.utils import get_metadata_keys
+            from ....kb.utils import get_metadata_keys
             
             # Get all unique metadata keys
             keys = get_metadata_keys()
@@ -655,7 +655,7 @@ def setup_api_routes(app, session_manager: WebSessionManager):
         doc_id = request.path_params["doc_id"]
         
         try:
-            from ..kb.logs import get_all_logs_for_document
+            from ....kb.logs import get_all_logs_for_document
             
             logs = get_all_logs_for_document(doc_id)
             return JSONResponse(logs)
@@ -675,7 +675,7 @@ def setup_api_routes(app, session_manager: WebSessionManager):
             return error_response
 
         try:
-            from ..kb.logs import get_search_logs
+            from ....kb.logs import get_search_logs
             
             # Get query parameters
             limit = int(request.query_params.get("limit", "20"))
@@ -765,7 +765,7 @@ def setup_api_routes(app, session_manager: WebSessionManager):
         try:
             # Import get_similar function
             try:
-                from ..kb.search import get_similar
+                from ....kb.search import get_similar
             except ImportError:
                 return JSONResponse(
                     {"error": "Search module not available"},

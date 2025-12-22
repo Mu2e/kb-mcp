@@ -9,7 +9,7 @@ from starlette.requests import Request
 from sqlalchemy.orm import joinedload
 
 from ..auth import WebSessionManager
-from ... import html_templates
+from .. import html_templates
 
 logger = logging.getLogger(__name__)
 

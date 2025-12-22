@@ -1,4 +1,4 @@
-"""GitHub OAuth provider implementing MCP OAuth protocol (server package)."""
+"""GitHub OAuth provider implementing MCP OAuth protocol."""
 
 from __future__ import annotations
 
@@ -8,13 +8,13 @@ from typing import Any
 import httpx
 from mcp.server.auth.provider import AuthorizeError
 
-from .base_oauth import BaseMCPOAuthProvider
-from ..config import get_github_oauth_config
+from .base import BaseOAuthProvider
+from ...config import get_github_oauth_config
 
 logger = logging.getLogger(__name__)
 
 
-class GitHubOAuthProvider(BaseMCPOAuthProvider):
+class GitHubOAuthProvider(BaseOAuthProvider):
     """OAuth provider that uses GitHub for authentication."""
 
     def __init__(self):
@@ -35,10 +35,6 @@ class GitHubOAuthProvider(BaseMCPOAuthProvider):
     def provider_name(self) -> str:
         return "github"
 
-    @property
-    def token_store_key(self) -> str:
-        return "github_tokens"
-
     async def create_authorize_url(self, state: str, redirect_uri: str) -> str:
         """Create GitHub OAuth authorization URL."""
         return (
@@ -49,8 +45,11 @@ class GitHubOAuthProvider(BaseMCPOAuthProvider):
             f"&scope=read:user repo"
         )
 
-    async def exchange_code_for_token(self, code: str) -> str:
-        """Exchange GitHub authorization code for access token."""
+    async def exchange_code_for_token(self, code: str) -> dict:
+        """Exchange GitHub authorization code for access token.
+
+        Returns a dict with 'access_token' (main token).
+        """
         async with httpx.AsyncClient() as http_client:
             response = await http_client.post(
                 "https://github.com/login/oauth/access_token",
@@ -68,7 +67,7 @@ class GitHubOAuthProvider(BaseMCPOAuthProvider):
                 "access_denied", data.get("error_description", "Unknown error")
             )
 
-        return data["access_token"]
+        return {"access_token": data["access_token"]}
 
     async def get_user_info(self, access_token: str) -> dict[str, Any]:
         """Get GitHub user information from access token."""
@@ -87,12 +86,24 @@ class GitHubOAuthProvider(BaseMCPOAuthProvider):
         """Extract GitHub username."""
         return user_data.get("login", "unknown")
 
-    async def verify_user_access(self, access_token: str) -> bool:
-        """Verify GitHub repository access."""
+    async def verify_user_access(self, provider_token_data: dict) -> bool:
+        """Verify GitHub repository access.
+
+        Args:
+            provider_token_data: Dict with 'access_token'
+        """
         if not self.required_repo:
             return True  # No repo restriction
+
+        access_token = provider_token_data.get("access_token")
         return await self.verify_repo_access(access_token)
 
+    async def verify_user_admin_access(self, access_token: str) -> bool:
+        """Verify GitHub repository admin access."""
+        if not self.required_repo:
+            return False  # No repo restriction means no admin check possible
+        return await self.verify_repo_access(access_token, require_admin=True)
+
     async def verify_repo_access(
         self, github_token: str, repo: str | None = None, require_admin: bool = False
     ) -> bool:
@@ -116,42 +127,4 @@ class GitHubOAuthProvider(BaseMCPOAuthProvider):
                 return permissions.get("admin", False)
 
             return True
-
-    # Backward compatibility methods
-    async def handle_github_callback(self, code: str, state: str) -> str:
-        """Handle GitHub callback (backward compatibility)."""
-        return await self.handle_callback(code, state)
-
-    async def exchange_github_code(self, code: str, client_secret: bool = True) -> str:
-        """Exchange GitHub code (backward compatibility)."""
-        return await self.exchange_code_for_token(code)
-
-    async def get_github_user(self, github_token: str) -> dict[str, Any]:
-        """Get GitHub user (backward compatibility)."""
-        return await self.get_user_info(github_token)
-
-    async def verify_repo_access(
-        self, github_token: str, repo: str | None = None, require_admin: bool = False
-    ) -> bool:
-        """Verify user has access to a GitHub repository."""
-        repo = repo or self.required_repo
-        if not repo:
-            return True  # No repo restriction
-
-        async with httpx.AsyncClient() as client:
-            response = await client.get(
-                f"https://api.github.com/repos/{repo}",
-                headers={"Authorization": f"Bearer {github_token}"},
-            )
-            if response.status_code != 200:
-                return False
-
-            # If admin permission is required, check permissions
-            if require_admin:
-                repo_data = response.json()
-                permissions = repo_data.get("permissions", {})
-                return permissions.get("admin", False)
-
-            return True
-
 

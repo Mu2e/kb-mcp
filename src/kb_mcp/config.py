@@ -62,6 +62,7 @@ def get_server_config() -> dict:
             * `mcp_log_level` (str): App-specific log level (Env: `MCP_LOG_LEVEL`).
             * `audit_log_file` (str): Path to audit log (Env: `AUDIT_LOG_FILE`).
             * `max_upload_size` (int): Max upload bytes (Env: `MAX_UPLOAD_SIZE`, default: 100MB).
+            * `use_firestore` (bool): Use Firestore for session storage (Env: `SESSION_STORE_FIRESTORE`, default: False).
     """
     log_level = os.getenv("LOG_LEVEL", "INFO").upper()
     return {
@@ -73,6 +74,7 @@ def get_server_config() -> dict:
         'mcp_log_level': os.getenv("MCP_LOG_LEVEL", log_level).upper(),
         'audit_log_file': os.getenv("AUDIT_LOG_FILE", ""),
         'max_upload_size': _get_int("MAX_UPLOAD_SIZE", 104857600),
+        'use_firestore': _get_bool("SESSION_STORE_FIRESTORE", False),
     }
 
 # LLM
@@ -129,23 +131,53 @@ def get_globus_oauth_config() -> dict:
         'required_group': os.getenv("GLOBUS_REQUIRED_GROUP", ""),
     }
 
-def get_web_session_config() -> dict:
-    """Web session settings.
+def get_auth_config() -> dict:
+    """Authentication settings (OAuth, sessions, API keys).
 
     Returns:
-        dict: Web session configuration with keys:
+        dict: Authentication configuration with keys:
 
-            * `timeout` (int): Session timeout in seconds (Env: `WEB_SESSION_TIMEOUT`, default: 86400).
-            * `reverify_interval` (int): Re-verify interval (Env: `WEB_REVERIFY_INTERVAL`, default: 3600).
-            * `disable_auth` (bool): Security override (Env: `DISABLE_WEB_AUTH`, default: False).
-            * `use_firestore` (bool): Storage backend (Env: `SESSION_STORE_FIRESTORE`, default: False).
+            * `disable_auth` (bool): Security override (Env: `DISABLE_AUTH`, default: False).
+            * `session_timeout` (int): Web session timeout in seconds (Env: `WEB_SESSION_TIMEOUT`, default: 86400).
+            * `reverify_interval` (int): Session re-verification interval in seconds (Env: `WEB_REVERIFY_INTERVAL`, default: 3600).
+            * `use_firestore` (bool): Use Firestore for session storage (Env: `SESSION_STORE_FIRESTORE`, default: False).
+            * `authorization_code_timeout` (int): MCP authorization code expiration in seconds (Env: `OAUTH_AUTHORIZATION_CODE_TIMEOUT`, default: 600).
+            * `oauth_state_timeout` (int): Web OAuth state expiration in seconds (Env: `OAUTH_STATE_TIMEOUT`, default: 600).
+            * `access_token_timeout` (int): MCP access token expiration in seconds (Env: `OAUTH_ACCESS_TOKEN_TIMEOUT`, default: 3600).
+            * `github` (dict): GitHub OAuth configuration.
+            * `globus` (dict): Globus OAuth configuration.
+            * `oauth_provider` (str): OAuth provider name (default: None).
     """
-    return {
-        'timeout': _get_int("WEB_SESSION_TIMEOUT", 86400),
+    data = {
+        'disable_auth': _get_bool("DISABLE_AUTH", False),
+        'session_timeout': _get_int("WEB_SESSION_TIMEOUT", 86400),
         'reverify_interval': _get_int("WEB_REVERIFY_INTERVAL", 3600),
-        'disable_auth': _get_bool("DISABLE_WEB_AUTH", False),
         'use_firestore': _get_bool("SESSION_STORE_FIRESTORE", False),
+        'authorization_code_timeout': _get_int("OAUTH_AUTHORIZATION_CODE_TIMEOUT", 600),
+        'oauth_state_timeout': _get_int("OAUTH_STATE_TIMEOUT", 600),
+        'access_token_timeout': _get_int("OAUTH_ACCESS_TOKEN_TIMEOUT", 3600),
+        'github': get_github_oauth_config(),
+        'globus': get_globus_oauth_config(),
     }
+
+    globus_enabled = data['globus']['client_id'] and data['globus']['client_secret']
+    github_enabled = data['github']['client_id'] and data['github']['client_secret']
+
+    if globus_enabled and github_enabled:
+        raise ValueError(
+        "Both GitHub and Globus OAuth are configured. "
+        "Only one OAuth provider can be enabled at a time. "
+        "Please set only GITHUB_CLIENT_ID/GITHUB_CLIENT_SECRET OR GLOBUS_CLIENT_ID/GLOBUS_CLIENT_SECRET."
+    )
+
+    if globus_enabled:
+        data['oauth_provider'] = 'globus'
+    elif github_enabled:
+        data['oauth_provider'] = 'github'
+    else:
+        data['oauth_provider'] = None
+
+    return data
 
 # Processing
 def get_parser_config() -> dict:
@@ -218,7 +250,7 @@ def get_all_config() -> dict:
         'llm': {**get_llm_config(), 'openai_api_key': '***'},
         'github': {**get_github_oauth_config(), 'client_secret': '***'},
         'globus': {**get_globus_oauth_config(), 'client_secret': '***'},
-        'web': get_web_session_config(),
+        'auth': {k: v for k, v in get_auth_config().items() if k not in ['github', 'globus', 'oauth_provider']},
         'parser': get_parser_config(),
         'embedding': get_embedding_config(),
         'eval': get_eval_config(),

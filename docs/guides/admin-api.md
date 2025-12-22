@@ -2,7 +2,7 @@
 
 The admin interface provides a web-based UI for managing API keys.
 
-**Security**: Requires GitHub OAuth authentication (same credentials as MCP server access).
+**Security**: Requires OAuth authentication (Globus or Github, same credentials as MCP server access).
 
 ## Access
 
@@ -14,9 +14,9 @@ Simply navigate to the `/admin` endpoint:
 ## Authentication
 
 1. Visit `/admin` in your web browser
-2. You'll be redirected to GitHub OAuth
-3. Log in with GitHub
-4. If you have **admin permissions** on the required repository (if configured), you'll be granted access
+2. You'll be redirected to OAuth (Globus or GitHib, depending on server configuration)
+3. Log in with your OAuth provider
+4. If you have **admin permissions** on the required repository/group (if configured), you'll be granted access
 5. Your browser session will be maintained via a secure cookie
 
 ## Features
@@ -30,6 +30,8 @@ Simply navigate to the `/admin` endpoint:
 
 - Admin sessions are stored in-memory (sessions are lost on server restart)
 - Sessions use secure, HTTP-only cookies
-- GitHub OAuth is used for authentication
-- **Admin permission required**: If `GITHUB_REQUIRED_REPO` is configured, users must have admin permissions on that repository to access the admin interface
+- OAuth (GitHub or Globus) is used for authentication
+- **Admin permission required**: 
+  - GitHub: If `GITHUB_REQUIRED_REPO` is configured, users must have admin permissions on that repository
+  - Globus: Admin checks are not yet implemented (all authenticated users have access)
 - All actions are logged for audit purposes

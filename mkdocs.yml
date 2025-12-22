@@ -34,12 +34,15 @@ nav:
       - Overview: guides/mcp-setup.md
       - Clients: guides/mcp-clients.md
       - Stdio Server: guides/mcp-stdio.md
+      - API Keys: guides/api-keys.md
       - Tools Reference: reference/mcp.md
     - Web Interface: guides/web-interface.md
     - CLI Usage: guides/cli.md
     - Evaluation: guides/evaluation.md
     - Database Schema: guides/database.md
-    - Deployment: guides/deployment.md
+    - Deployment: 
+      - Deployment: guides/deployment.md
+      - Authentication: guides/authentication.md
   - API Reference:
     - Configuration: reference/config.md
     - KB/Knowledge Base: reference/kb.md

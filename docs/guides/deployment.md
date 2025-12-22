@@ -26,9 +26,10 @@ docker run -d -p 8443:8443 \
   kb-mcp
 ```
 
-**With SQLite (development only)/with github authentification:**
+**With SQLite (development only)/with OAuth authentication:**
 
 ```bash
+# GitHub OAuth
 docker run -d -p 8443:8443 \
   -e GITHUB_CLIENT_ID=your_client_id \
   -e GITHUB_CLIENT_SECRET=your_client_secret \
@@ -37,11 +38,22 @@ docker run -d -p 8443:8443 \
   -v kb-mcp-data:/app/data \
   --name kb-mcp \
   kb-mcp
+
+# Or Globus OAuth
+docker run -d -p 8443:8443 \
+  -e GLOBUS_CLIENT_ID=your_client_id \
+  -e GLOBUS_CLIENT_SECRET=your_client_secret \
+  -e GLOBUS_REQUIRED_GROUP=group-uuid \
+  -e SQLITE_DB_PATH=/app/data/kb.db \
+  -v kb-mcp-data:/app/data \
+  --name kb-mcp \
+  kb-mcp
 ```
 
 **Notes:**
 
-- GitHub OAuth environment variables only needed if using OAuth authentication. For API key only deployments, these can be omitted.
+- OAuth environment variables only needed if using OAuth authentication. For API key only deployments, these can be omitted.
+- Configure only one OAuth provider (GitHub or Globus), not both.
 - Database environment variables:
   - **Required for PostgreSQL**: `DB_HOST`, `DB_USER`, `DB_PASSWORD`
   - **Optional for PostgreSQL**: `DB_NAME` (default: `kb_mcp`), `DB_PORT` (default: `5432`), `DB_SCHEMA` (default: `public`)
@@ -109,10 +121,13 @@ gsutil iam ch serviceAccount:XXXXXXXXXXXXX-compute@developer.gserviceaccount.com
 # Enable Secret Manager API
 gcloud services enable secretmanager.googleapis.com
 
-# Create GitHub OAuth secrets
-# Note: Get your GitHub OAuth credentials from https://github.com/settings/developers
+# Create OAuth secrets (choose GitHub or Globus)
+# GitHub: Get credentials from https://github.com/settings/developers
 echo -n "YOUR_GITHUB_CLIENT_ID" | gcloud secrets create github-client-id --data-file=-
 echo -n "YOUR_GITHUB_CLIENT_SECRET" | gcloud secrets create github-client-secret --data-file=-
+# Or Globus: Get credentials from https://developers.globus.org/
+echo -n "YOUR_GLOBUS_CLIENT_ID" | gcloud secrets create globus-client-id --data-file=-
+echo -n "YOUR_GLOBUS_CLIENT_SECRET" | gcloud secrets create globus-client-secret --data-file=-
 
 # Create database secrets (required)
 echo -n "YOUR_DB_HOST" | gcloud secrets create db-host --data-file=-
@@ -127,6 +142,8 @@ echo -n "YOUR_DB_SCHEMA" | gcloud secrets create db-schema --data-file=-
 PROJECT_NUMBER=$(gcloud projects describe YOUR_PROJECT_ID --format="value(projectNumber)")
 # Required secrets
 for secret in github-client-id github-client-secret db-host db-user db-password; do
+# Or for Globus:
+# for secret in globus-client-id globus-client-secret db-host db-user db-password; do
     gcloud secrets add-iam-policy-binding ${secret} \
       --member="serviceAccount:${PROJECT_NUMBER}-compute@developer.gserviceaccount.com" \
       --role="roles/secretmanager.secretAccessor"
@@ -163,9 +180,12 @@ done
 ./scripts/deploy-cloudrun.sh YOUR_PROJECT_ID https://sld.example.com --service-name sld-kb
 ```
 
-**With GitHub repository restriction:**
+**With OAuth repository/group restriction:**
 ```bash
+# GitHub
 ./scripts/deploy-cloudrun.sh YOUR_PROJECT_ID --github-repo owner/repo
+# Or Globus
+./scripts/deploy-cloudrun.sh YOUR_PROJECT_ID --globus-group group-uuid
 ```
 
 **With Firestore:**
@@ -194,7 +214,7 @@ This will:
 **Note**: 
 
 - The default service name is `kb-mcp`. Use `--service-name` to adjust it to your service name.
-- By default, access is restricted to users with access to `HEP-KE/kb-mcp`. Use `--github-repo owner/repo` to change this, or `--github-repo ""` to allow all authenticated GitHub users.
+- By default, access is restricted to users with access to `HEP-KE/kb-mcp` (GitHub) or a configured Globus group. Use `--github-repo owner/repo` or `--globus-group group-uuid` to change this, or set to empty string to allow all authenticated users.
 - The deployment uses file-based storage with Cloud Storage mount by default (`SESSION_STORE_FIRESTORE=false`). To use Firestore instead, use the `--firestore` flag.
 - **Host Header Warning**: If your MCP server connection fails and you see a warning `Invalid Host header: sld.scorrodi.dev` in Cloud Run logs. This is cuased by a new security feature introduced in mcp version 1.23 that doesn't work inside containers (where the server runs on localhost but gets reqeusts from a different URL). Avoid version 1.23 (in our pyroject.toml) since it does **not** allow to switch this feature off. 
 
@@ -241,14 +261,14 @@ To use a custom domain instead of the auto-generated Cloud Run URL:
 
 ### Finish Setup
 
-Update your GitHub OAuth App callback URL at [GitHub Developer Settings](https://github.com/settings/developers) to match your deployment URL:
-```
-https://YOUR-SERVICE-URL/oauth/github/callback
-```
+Update your OAuth App callback URL to match your deployment URL:
+
+- **GitHub**: [GitHub Developer Settings](https://github.com/settings/developers) → `https://YOUR-SERVICE-URL/oauth/callback`
+- **Globus**: [Globus Developer Console](https://developers.globus.org/) → `https://YOUR-SERVICE-URL/oauth/callback`
 
 Or if using custom domain (in this example: `sld.scorrodi.dev`):
 ```
-https://mcp.scorrodi.dev/oauth/github/callback
+https://mcp.scorrodi.dev/oauth/callback
 ```
 
 **Note**: This single callback URL handles both MCP OAuth (for Claude Desktop, Cline) and admin web interface login. The server automatically routes based on the OAuth state parameter.

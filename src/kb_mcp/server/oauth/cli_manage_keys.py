@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-"""CLI tool for managing MCP API keys (server package)."""
+"""CLI tool for managing MCP API keys."""
 
 import sys
-from pathlib import Path
 
 from .api_keys import ApiKeyManager
-from ..config import get_data_dir, get_api_keys_file
+from ...config import get_api_keys_file
 
 
 def main():
@@ -54,7 +53,7 @@ def main():
             print("No API keys found.")
             print()
             print("Generate a key with:")
-                print("  kb-mcp-manage-keys generate <username> [description]")
+            print("  kb-mcp-manage-keys generate <username> [description]")
         else:
             print(f"Found {len(keys)} API key(s):")
             print()
@@ -88,5 +87,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-
 

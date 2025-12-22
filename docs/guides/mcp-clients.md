@@ -38,10 +38,9 @@ For connecting to a remote server via OAuth.
    - Click **Add custom connector**
    - Name: `kb-mcp`
    - URL: `https://your-server-url/mcp`
-     - Cloud Run: `https://mcp.example.com/mcp`
-     - Local (ngrok): `https://your-ngrok-url/mcp`
+     - Cloud Run: `https://sld.example.com/mcp`
    - Click **Connect**
-   - Your browser will open for GitHub OAuth authentication
+   - Your browser will open for OAuth authentication (Globus or GitHub, depending on server configuration)
    - Authorize the app
 
 **Note**: For local development with ngrok, the URL changes on each restart. Update the connector URL accordingly.
@@ -156,7 +155,7 @@ To connect Cursor to your Cloud Run deployment:
 
 Cline connects to MCP servers via VS Code settings.
 
-**Authentication**: OAuth (GitHub) or API Key
+**Authentication**: OAuth (Globus or GitHub) or API Key
 
 ### Setup
 

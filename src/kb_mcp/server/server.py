@@ -14,13 +14,11 @@ import logging
 from mcp.server.fastmcp import FastMCP
 from mcp.server.auth.settings import AuthSettings, ClientRegistrationOptions
 
-from .oauth_github import GitHubOAuthProvider
-from .oauth_globus import GlobusOAuthProvider
-from . import html_templates
+from .oauth import GitHubOAuthProvider, GlobusOAuthProvider, BaseOAuthProvider
+from .web import html_templates
 from . import audit
-from . import admin
 from . import mcp as mcp_tools
-from ..config import get_server_config, get_github_oauth_config, get_globus_oauth_config
+from ..config import get_server_config, get_github_oauth_config, get_globus_oauth_config, get_auth_config
 
 # Configure logging
 _server_config = get_server_config()
@@ -61,33 +59,28 @@ PORT = _server_config['port']
 HOST = _server_config['host']
 USE_HTTPS = _server_config['use_https']
 
-# Determine which OAuth provider to use (only one allowed for both MCP and web)
-github_config = get_github_oauth_config()
-globus_config = get_globus_oauth_config()
-github_enabled = bool(github_config['client_id'] and github_config['client_secret'])
-globus_enabled = bool(globus_config['client_id'] and globus_config['client_secret'])
+auth_config = get_auth_config()
 
-if github_enabled and globus_enabled:
-    raise ValueError(
-        "Both GitHub and Globus OAuth are configured. "
-        "Only one OAuth provider can be enabled at a time. "
-        "Please set only GITHUB_CLIENT_ID/GITHUB_CLIENT_SECRET OR GLOBUS_CLIENT_ID/GLOBUS_CLIENT_SECRET."
-    )
-
-if github_enabled:
-    # Create OAuth provider (used for both MCP and web)
-    oauth_provider = GitHubOAuthProvider()
-    logger.info("GitHub OAuth provider enabled for MCP and web authentication")
-elif globus_enabled:
-    # Create OAuth provider (used for both MCP and web)
-    oauth_provider = GlobusOAuthProvider()
-    logger.info("Globus OAuth provider enabled for MCP and web authentication")
+if auth_config['disable_auth'] != True:
+    if auth_config['oauth_provider'] is None:
+         # No OAuth but auth required - use base class in API-key-only mode
+        oauth_provider = BaseOAuthProvider(None, None)
+        logger.info("API-key-only authentication enabled (no OAuth provider configured)")
+    elif auth_config['oauth_provider'] == 'github':
+        oauth_provider = GitHubOAuthProvider()
+        logger.info("GitHub OAuth provider enabled for MCP and web authentication")
+    elif auth_config['oauth_provider'] == 'globus':
+        oauth_provider = GlobusOAuthProvider()
+        logger.info("Globus OAuth provider enabled for MCP and web authentication")
 else:
+    # Auth disabled - no provider (will create FastMCP without auth)
     oauth_provider = None
-    logger.warning("No OAuth provider configured")
+    logger.warning("Authentication disabled (DISABLE_AUTH=true)")
+
+
 
 # Create FastMCP with OAuth (only if provider is configured)
-if oauth_provider:
+if auth_config['disable_auth'] != True:
     mcp = FastMCP(
         "kb-mcp",
         auth=AuthSettings(
@@ -99,8 +92,10 @@ if oauth_provider:
         # settings={"enable_dns_rebinding_protection": False} # add one new mcp version that supports this is avaialble, so far use <1.23.0
     )
 else:
-    # Create FastMCP without OAuth if no provider configured
-    mcp = FastMCP("kb-mcp")
+    # Create FastMCP without OAuth if authentication is disabled
+    mcp = FastMCP("kb-mcp",
+        auth=None, # no auth needed if authentication is disabled
+    )
 
 
 # Register MCP tools, resources, and prompts
@@ -147,7 +142,7 @@ def main():
                 # Extract token and username for audit logging
                 auth_header = request.headers.get("authorization", "")
                 username = None
-                if auth_header.startswith("Bearer "):
+                if auth_header.startswith("Bearer ") and oauth_provider:
                     token = auth_header[7:]
                     username = await oauth_provider.get_username_for_token(token)
 
@@ -185,55 +180,65 @@ def main():
     app.add_middleware(AuditMiddleware)
 
     # Setup shared web session manager for admin and web interfaces
-    from .web import WebSessionManager, setup_shared_auth_routes
+    from .web import WebSessionManager, setup_shared_auth_routes, setup_web_routes
 
     web_session_manager = WebSessionManager(oauth_provider)
 
     # Setup unified login/logout routes
     setup_shared_auth_routes(app, web_session_manager)
 
-    # Root endpoint - landing page
-    @app.route("/")
-    async def root(request):
-        active_sessions = await oauth_provider.get_active_sessions_count() if oauth_provider else 0
-        username = await web_session_manager.get_session_username(request)
-        # Get required repo/group for display
-        required_access = None
-        if isinstance(oauth_provider, GitHubOAuthProvider):
-            required_access = oauth_provider.required_repo
-        elif isinstance(oauth_provider, GlobusOAuthProvider):
-            required_access = oauth_provider.required_group
-        return HTMLResponse(
-            html_templates.root_page(
-                active_sessions, required_access, username
-            )
-        )
-
     # Unified OAuth callback - handles both MCP and web OAuth flows
     @app.route("/oauth/callback")
     async def oauth_callback(request):
+        """Unified OAuth callback - handles both MCP and web OAuth flows."""
         code = request.query_params.get("code")
         state = request.query_params.get("state")
 
-        if not code or not state:
-            return HTMLResponse("Missing code or state", status_code=400)
-
-        if not oauth_provider:
-            return HTMLResponse("No OAuth provider configured", status_code=500)
-
         try:
-            # Check if this is MCP OAuth flow (state in pending_auth)
-            if state in oauth_provider.pending_auth:
+            if not code or not state:
+                return HTMLResponse("Missing code or state", status_code=400)
+
+            if not oauth_provider:
+                return HTMLResponse("No OAuth provider configured", status_code=500)
+
+            # Check if this is MCP OAuth flow (state in session store under pending_auth)
+            pending_data = await oauth_provider.session_store.get("pending_auth", state)
+            if pending_data:
                 # MCP OAuth flow - handle via oauth_provider
                 result = await oauth_provider.handle_callback(code, state)
                 return RedirectResponse(result)
             else:
                 # Web OAuth flow - handle via configured oauth_provider
-                if not oauth_provider:
-                    return HTMLResponse("No OAuth provider configured for web authentication", status_code=500)
                 return await web_session_manager.handle_oauth_callback(oauth_provider, code, state)
         except Exception as e:
+            logger.error(f"OAuth callback error: {e}")
             return HTMLResponse(f"OAuth Error: {str(e)}", status_code=400)
+
+    # Root endpoint - landing page
+    @app.route("/")
+    async def root(request):
+        active_sessions = await oauth_provider.get_active_sessions_count() if oauth_provider else 0
+        username = await web_session_manager.get_session_username(request)
+        # Get required repo/group and provider info for display
+        required_access = None
+        provider_display = None
+        if oauth_provider:
+            if isinstance(oauth_provider, GitHubOAuthProvider):
+                required_access = oauth_provider.required_repo
+                provider_display = "GitHub"
+            elif isinstance(oauth_provider, GlobusOAuthProvider):
+                required_access = oauth_provider.required_group
+                provider_display = "Globus"
+            else:
+                # API-key-only mode
+                provider_display = "API Key Only"
+        else:
+            provider_display = "Disabled"
+        return HTMLResponse(
+            html_templates.root_page(
+                active_sessions, required_access, username, provider_display
+            )
+        )
 
     # Status endpoint
     @app.route("/status")
@@ -241,16 +246,15 @@ def main():
         active_sessions = await oauth_provider.get_active_sessions_count() if oauth_provider else 0
         return HTMLResponse(html_templates.status_page(active_sessions))
 
-    # Setup admin routes (OAuth protected web interface for API key management)
-    admin.setup_admin_routes(app, oauth_provider, web_session_manager)
-
     # Setup web routes (OAuth protected web interface for interactive tools)
-    from .web import setup_web_routes
+    # This now includes admin and API routes
     setup_web_routes(app, oauth_provider, web_session_manager)
 
-    # Setup API routes (OAuth protected API endpoints)
-    from . import api
-    api.setup_api_routes(app, web_session_manager)
+
+    if auth_config['disable_auth'] == True and USE_HTTPS:
+        logger.warning("Authentication is disabled but HTTPS is enabled. Is this intended?")
+        logger.warning("HTTPS is only needed if authentication is enabled.")
+        logger.warning("To disable HTTPS, set USE_HTTPS=false in .env")
 
     if USE_HTTPS:
         uvicorn.run(
@@ -272,5 +276,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-

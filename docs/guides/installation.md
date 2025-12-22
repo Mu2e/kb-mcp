@@ -52,13 +52,14 @@ cp .env.example .env
 
 ### Configure Environment Variables
 
-Edit your `.env` file with your configuration.  See [Configuration Reference](../reference/config.md) for detailed explanations of all available environment variables.
- Key settings include:
+Edit your `.env` file with your configuration. See [Configuration Reference](../reference/config.md) for detailed explanations of all available environment variables.
 
-- **GitHub OAuth**: Create a GitHub OAuth App at [GitHub Developer Settings](https://github.com/settings/developers) and set:
-  - `GITHUB_CLIENT_ID`: Your OAuth app client ID
-  - `GITHUB_CLIENT_SECRET`: Your OAuth app client secret
-  - `GITHUB_REQUIRED_REPO`: (Optional) Restrict access to a specific repository (format: `owner/repo`)
+**Key settings include:**
+
+- **Authentication**: See the [Authentication Guide](authentication.md) for complete setup instructions
+  - **OAuth** (GitHub or Globus): Required for web interface, optional for MCP clients. See [Authentication](authentication.md) for details.
+  - **API Keys**: Always available for MCP clients. See [API Keys](api-keys.md) for details. 
+  - **DISABLE_AUTH**: Development mode only (or localhost binding)
 - **OPENAI_BASE_URL**: Base URL for OpenAI-compatible LLM interface
 - **OPENAI_API_KEY**: Optional API key for `OPENAI_BASE_URL`
 - **Database Configuration**: See [Database Setup](#3-database-setup) below
@@ -133,6 +134,8 @@ See the [Adding Documents Guide](adding-documents.md) for instructions on how to
 
 ### Explore Documentation
    
+   - [Authentication Guide](authentication.md) - OAuth, API keys, and security
+   - [API Keys Guide](api-keys.md) - Managing API keys
    - [Configuration Guide](../reference/config.md) - All configuration options
    - [Knowledge Base Guide](../reference/kb.md) - Using the KB module
    - [Server Guide](../reference/server.md) - Running the MCP server
