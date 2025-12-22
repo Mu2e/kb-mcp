@@ -57,12 +57,12 @@ doc = [
 
 [project.scripts]
 # Server module CLI commands
-kb-server = "kb_mcp.server:main"
+kb-server = "kb_mcp.server.server:main"
 kb-server-stdio = "kb_mcp.server.mcp_stdio:main"
 kb-server-manage-keys = "kb_mcp.server.oauth.cli_manage_keys:main"
 
 # Knowledge Base module CLI commands
-kb = "kb_mcp.kb.cli:main"
+kb = "kb_mcp.kb.cli.__main__:main"
 
 # Import module CLI commands
 kb-import = "kb_mcp.imports.cli:main"

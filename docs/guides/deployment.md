@@ -75,6 +75,79 @@ docker rm kb-mcp
 ```
 
 
+## NERSC Deployment
+
+Deploy kb-mcp server on NERSC systems using `podman-hpc` containers. This deployment method uses containerized services.
+
+### Build Container Image
+
+Build the container image using `podman-hpc`:
+
+```bash
+./scripts/deploy-nersc-build.sh
+```
+
+**Options:**
+- `--tag <tag>`: Specify a custom image tag (default: uses "latest" or git has if its set to "")
+
+The script will:
+1. Build the container image using `podman-hpc build`
+2. Migrate the image to NERSC storage using `podman-hpc migrate`
+
+### Run Container
+
+Deploy and run the container (binding to 0.0.0.0 and hence HTTPS enabled). Currently run from the REPO root dir.
+
+```bash
+./scripts/deploy-nersc-run.sh
+```
+
+**Options:**
+- `--env-file <path>`: Path to environment file (default: `.env` in current directory)
+- `--tag <tag>`: Image tag to run (default: uses git commit hash or "latest")
+- `--github-repo <owner/repo>`: Require GitHub OAuth users to have access to this repository
+- `--globus-group <group-uuid>`: Require Globus OAuth users to be in this group
+- `--no-https`: Disable HTTPS (use HTTP instead)
+- `--local`: Bind to localhost (127.0.0.1) and disable authentication (for development with SSH port forwarding)
+
+**Requirements:**
+- The `.env` file must exist and contain database credentials (see [NERSC Setup](nersc.md#database-setup))
+- If using OAuth (and not using `--local`), the corresponding OAuth credentials must be in the `.env` file
+
+The script will:
+1. Validate environment file and required secrets (OAuth validation skipped in `--local` mode)
+2. Generate self-signed certificates (if HTTPS enabled)
+3. Create persistent data directory on CFS
+4. Start the container with proper volume mounts and environment variables
+5. Display SSH port forwarding instructions for accessing from your local machine
+
+**Local Development Mode:**
+
+For local development with SSH port forwarding, use the `--local` flag:
+
+```bash
+./scripts/deploy-nersc-run.sh --local
+```
+
+This will:
+- Bind the server to `127.0.0.1` (localhost only) instead of `0.0.0.0`
+- Disable authentication (`DISABLE_AUTH=true`)
+- Skip OAuth credentials validation
+- Allow access via SSH port forwarding without authentication
+
+**Access from Local Machine:**
+
+After deployment, the script will output SSH port forwarding instructions. Use:
+
+```bash
+ssh -J <user-name>@perlmutter.nersc.gov -L 8443:localhost:8443 <user-name>@<login-node-name>.chn.perlmutter.nersc.gov
+```
+
+Then access the web interface at `https://localhost:8443` (or `http://localhost:8443` if `--no-https` was used).
+
+**Note:** The container binds to `0.0.0.0` to allow access from other nodes, but you'll need SSH port forwarding to access it from outside NERSC. For development, see [NERSC Setup](nersc.md) for per-user development mode using `nersc_setup.sh`.
+
+
 ## Google Cloud Run Deployment
 
 Deploy kb-mcp server to Google Cloud Run.

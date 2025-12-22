@@ -31,7 +31,7 @@ Host perlmutter*.nersc.gov saul*.nersc.gov dtn*.nersc.gov *.perlmutter.nersc.gov
 ```
 
 ## Quick Setup Script
-These are instructions on how to use it in per-user develop mode. Later we might want to add a docker that could just be run?
+These are instructions on how to use it in per-user develop mode. For containerized deployment on NERSC, see [NERSC Deployment](deployment.md#nersc-deployment).
 
 The `nersc_setup.sh` script automates the setup of kb-mcp on NERSC systems:
 
@@ -96,3 +96,33 @@ The script:
 The database is accessible from other NERSC nodes, allowing compute nodes to connect to the database running on a login node. **The database is persistent but only avaiable as long as the login node session is alive**.
 
 **Note:** Currently, the database data is stored in `$SCRATCH`, which is temporary. Consider backing up important data or migrating to CFS for persistence.
+
+### Files and Folders
+
+`kb-mcp` uses the following files and folders (by default):
+
+- **Repository clone:**  
+  - `$SCRATCH/kb-mcp` : Main source code and scripts.
+- **Persistent data directory:**  
+  - `/global/cfs/cdirs/<PROJECT_ID>/<username>/kb-mcp-data`  
+    Linked to `data/` inside the repo clone for long-term storage, even if `$SCRATCH` is purged.
+- **Database data directory:**  
+  - `$SCRATCH/kb-mcp-db/pgdata`  
+    Stores the PostgreSQL data files (persistent as long as your `$SCRATCH` is available).
+- **Common secrets / environment file:**  
+  - `/global/cfs/cdirs/<PROJECT_ID>/secrets/kb-mcp.env`  
+    Shared location for secrets (database credentials, OAuth keys, etc).  
+    The database setup script (`nersc_setup_db.sh`) will update this file automatically with current database connection info if it (re)starts, so all users see the current database endpoint.
+- **User-specific environment override (optional):**  
+  - `~/.kb-mcp.env`  
+    If present, overrides or augments settings from the shared environment, allowing customization for your account (e.g., different credentials, custom endpoints).
+- **`.env` file in the repo clone:**  
+  - `$SCRATCH/kb-mcp/.env`  
+    This is a symlink set up by `nersc_setup.sh` to either your `~/.kb-mcp.env` *or* the shared CFS `kb-mcp.env`. This is the file read by the application at startup.
+
+**Note:**  
+- Database credentials and most secrets are managed via the shared `.env` in the secrets folder.  
+- If you run the database setup (`nersc_setup_db.sh`), it will update the credentials in the shared `.env` so other users (or compute nodes) will have access to the latest settings.
+- You can always override by creating or editing your own `~/.kb-mcp.env`. This will take precedence for your user.
+
+
