@@ -138,4 +138,13 @@ fi
 source "$SCRATCH_REPO/scripts/nersc_setup_db.sh"
 
 echo "Environment activated. You are in $SCRATCH_REPO"
+
+CURRENT_HOST=$(hostname -f)
+echo "----------------------------------------------------------------"
 echo "Type 'kb --help' for an overview of the command line tools."
+echo "----------------------------------------------------------------"
+echo "If you start the server (kb-server), access it at:"
+echo "  https://localhost:8443 in your browser"
+echo "  with port forwarding from your local machine to here:"
+echo "  ssh -J $USER@perlmutter.nersc.gov -L 8443:localhost:8443 $CURRENT_HOST"
+echo "----------------------------------------------------------------"

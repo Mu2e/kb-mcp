@@ -75,7 +75,7 @@ if auth_config['disable_auth'] != True:
 else:
     # Auth disabled - no provider (will create FastMCP without auth)
     oauth_provider = None
-    logger.warning("Authentication disabled (DISABLE_AUTH=true)")
+    # logger.warning("Authentication disabled (DISABLE_AUTH=true)") # warning will be shown from web/auth.py
 
 
 

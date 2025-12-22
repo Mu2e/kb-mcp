@@ -42,14 +42,14 @@ class WebSessionManager:
                 "AUTHENTICATION DISABLED - For development/binding to localhost only! "
                 "Remove DISABLE_AUTH or set DISABLE_AUTH=false for production."
             )
-        logger.info(
-            f"Web session timeout: {self.session_timeout} seconds "
-            f"({self.session_timeout / 3600:.1f} hours)"
-        )
-        logger.info(
-            f"Web re-verification interval: {self.reverify_interval} seconds "
-            f"({self.reverify_interval / 3600:.1f} hours)"
-        )
+        #logger.info(
+        #    f"Web session timeout: {self.session_timeout} seconds "
+        #    f"({self.session_timeout / 3600:.1f} hours)"
+        #)
+        #logger.info(
+        #    f"Web re-verification interval: {self.reverify_interval} seconds "
+        #    f"({self.reverify_interval / 3600:.1f} hours)"
+        #)
 
     async def get_session_data(self, request, force_reverify=False):
         """Get full session data from browser session cookie with re-verification."""

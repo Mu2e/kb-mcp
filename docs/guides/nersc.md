@@ -23,7 +23,7 @@ sshproxy -u <user-name>
 3. Add the following to your `.ssh/config`:
 
 ```
-Host perlmutter*.nersc.gov saul*.nersc.gov dtn*.nersc.gov
+Host perlmutter*.nersc.gov saul*.nersc.gov dtn*.nersc.gov *.perlmutter.nersc.gov
     User <user-name>
     IdentityFile ~/.ssh/nersc
     IdentitiesOnly yes
@@ -35,9 +35,12 @@ These are instructions on how to use it in per-user develop mode. Later we might
 
 The `nersc_setup.sh` script automates the setup of kb-mcp on NERSC systems:
 
+0. **Add SSH key to GitHub**  
+Make sure you added your SSH key to your GitHub account. If you need help, see the [GitHub guide on adding SSH keys](https://docs.github.com/en/authentication/connecting-to-github-with-ssh/adding-a-new-ssh-key-to-your-github-account).
+
 1. **Download the script:**
    ```bash
-   curl -O https://raw.githubusercontent.com/HEP-KE/kb-mcp/sld/scripts/nersc_setup.sh
+   (t=$(mktemp -d) && git clone --depth 1 --branch sld git@github.com:HEP-KE/kb-mcp.git "$t" && cp "$t/scripts/nersc_setup.sh" . && rm -rf "$t")
    ```
 
 2. **Source the script** (it must be sourced, not executed):
@@ -59,6 +62,16 @@ The script will:
 - Automatically start the database (see Database Setup below)
 
 **Note:** The script must be sourced (not executed) because it sets up your environment variables.
+
+### Accessing the Web Server
+
+After setup, you can start the web (and mcp) server with `kb-server` and access it from your local machine using SSH port forwarding:
+
+```bash
+ssh -J <user-name>@perlmutter.nersc.gov -L 8443:localhost:8443 <user-name>@<login-node-name>.chn.perlmutter.nersc.gov
+```
+
+Then access the web interface at `https://localhost:8443` in your browser.
 
 ## Database Setup
 

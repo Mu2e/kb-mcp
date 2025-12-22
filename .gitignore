@@ -1,7 +1,7 @@
 certs/
 .env
 logs/
-data/
+data
 TODO.md
 
 # Python
@@ -10,7 +10,7 @@ __pycache__/
 *.egg-info/
 dist/
 build/
-.venv/
+.venv
 
 # IDE
 .vscode/
