@@ -134,5 +134,8 @@ if [[ -n "$PS1" ]]; then
     PS1=${PS1// (nersc-python)/}
 fi
 
+# --- Start the database ---
+source "$SCRATCH_REPO/scripts/nersc_setup_db.sh"
+
 echo "Environment activated. You are in $SCRATCH_REPO"
 echo "Type 'kb --help' for an overview of the command line tools."

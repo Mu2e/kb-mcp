@@ -11,7 +11,7 @@ A knowledge base system designed to be **used** via MCP (Model Context Protocol)
 
 **Running the server:**
 
-- [NERSC Setup](guides/nersc-basics.md) - Quick setup on NERSC systems using `setup_nersc.sh`
+- [NERSC Setup](guides/nersc.md) - Quick setup on NERSC systems using `nersc_setup.sh`
 - [Installation](guides/installation.md) - Install and configure kb-mcp
 - [MCP Server Setup](guides/mcp-setup.md) - Run as stdio or remote MCP server
 
