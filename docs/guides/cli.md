@@ -11,8 +11,8 @@ pip install -e ".[kb]"
 ## Quick Examples
 
 ```bash
-# Add a document
-kb add document.pdf --source-id mu2e-docdb --doc-id doc123
+# Ingest a document
+kb ingest document.pdf --source-id mu2e-docdb --doc-id doc123
 
 # Search documents
 kb search "quantum mechanics"
@@ -31,7 +31,7 @@ kb eval run --dataset-name test-dataset
 
 ### Document Operations
 
-- **add** - Add documents from files (PDF, DOCX, etc.)
+- **ingest** - Ingest documents from files (PDF, DOCX, etc.)
 - **get** - Retrieve document by ID
 - **embed** - Chunk and embed a specific document
 - **drop** - Delete a document
@@ -80,19 +80,19 @@ kb eval run --dataset-name test-dataset
 
 ## Common Workflows
 
-### Adding Documents
+### Ingesting Documents
 
 ```bash
-# Add single document
-kb add document.pdf --source-id papers --doc-id paper-001
+# Ingest single document
+kb ingest document.pdf --source-id papers --doc-id paper-001
 
-# Add and automatically embed
-kb add document.pdf --source-id papers --doc-id paper-001
+# Ingest and automatically embed
+kb ingest document.pdf --source-id papers --doc-id paper-001
 kb embed papers_paper-001
 
-# Add from directory
+# Ingest from directory
 for file in docs/*.pdf; do
-  kb add "$file" --source-id archive
+  kb ingest "$file" --source-id archive
 done
 ```
 

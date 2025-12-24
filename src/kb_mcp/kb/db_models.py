@@ -11,6 +11,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Index,
+    Integer,
     LargeBinary,
     String,
     Text,
@@ -18,8 +19,7 @@ from sqlalchemy import (
     TypeDecorator,
 )
 from sqlalchemy.dialects import postgresql
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import relationship
+from sqlalchemy.orm import relationship, declarative_base
 from sqlalchemy.inspection import inspect as sqlalchemy_inspect
 
 Base = declarative_base()
@@ -39,6 +39,114 @@ class JSONB(TypeDecorator):
             return dialect.type_descriptor(postgresql.JSONB)
         else:
             return dialect.type_descriptor(JSON)
+
+
+class Parser(Base):
+    """Table 'parsers' for tracking parser frameworks.
+
+    This table tracks which parser framework was used to process documents.
+    Implementation details (e.g., pypdf vs pdfplumber) are stored in document.meta
+    for debugging purposes.
+
+    Attributes:
+        name (str): Parser framework name (e.g., "kb-mcp", "docling", "adaParse", "manual").
+                   This is the primary key.
+        description (str): Description of the parser framework.
+        meta (dict): Additional metadata (URL, capabilities, etc.).
+        created_time (datetime): Timestamp when the parser was registered.
+    """
+    __tablename__ = "parsers"
+
+    # Use name as primary key for simplicity
+    name = Column(String(128), primary_key=True)
+    description = Column(Text, nullable=True)
+    meta = Column(JSONB, nullable=True, default=dict)
+    created_time = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=func.now(),
+        server_default=func.now(),
+    )
+
+    # Relationships
+    documents = relationship("Document", back_populates="parser")
+
+    def __repr__(self) -> str:
+        return f"<Parser(name={self.name})>"
+
+
+class RawDocument(Base):
+    """Table 'documents_raw' for managing raw document files.
+
+    This table tracks the original files before processing. It does not store
+    the actual file binary data - only references to where files are stored.
+
+    Attributes:
+        id (str): Primary key (UUID stored as string).
+        source_id (str): Foreign key to the sources table.
+        doc_id (str): Human-readable document identifier within the source.
+        file_path (str): Local filesystem path where file is stored (e.g., "/data/files/doc.pdf").
+        hostname (str): Hostname where the file_path is valid (e.g., "compute-node-01").
+        uri (str): Original source URI where the document was obtained (typically a URL).
+        source_type (str): MIME type of the file (e.g., "application/pdf").
+        file_size (int): File size in bytes.
+        content_hash (str): Hash of file content for deduplication.
+        meta (dict): Additional metadata (JSON).
+        created_time (datetime): Timestamp when the raw document was created.
+        updated_time (datetime): Timestamp when the raw document was last updated.
+    """
+    __tablename__ = "documents_raw"
+
+    id = Column(
+        String(36),
+        primary_key=True,
+        default=lambda: str(uuid.uuid4()),
+        index=True,
+    )
+    source_id = Column(
+        String(256),
+        ForeignKey("sources.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    doc_id = Column(String(512), nullable=True, index=True)
+    file_path = Column(String(2048), nullable=True)
+    hostname = Column(String(256), nullable=True, index=True)
+    uri = Column(String(2048), nullable=True, index=True)
+    source_type = Column(String(128), nullable=False, index=True)
+    file_size = Column(Integer, nullable=True)
+    content_hash = Column(String(64), nullable=False, index=True)
+    meta = Column(JSONB, nullable=True, default=dict)
+
+    created_time = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=func.now(),
+        server_default=func.now(),
+    )
+    updated_time = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=func.now(),
+        onupdate=func.now(),
+        server_default=func.now(),
+    )
+
+    # Relationships
+    source_ref = relationship("Source", back_populates="raw_documents")
+    documents = relationship("Document", back_populates="raw_document")
+
+    # Indexes
+    __table_args__ = (
+        Index("idx_documents_raw_content_hash", "content_hash"),
+        Index("idx_documents_raw_source_doc_id", "source_id", "doc_id"),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<RawDocument(id={self.id}, source_id={self.source_id}, "
+            f"doc_id={self.doc_id}, uri={self.uri})>"
+        )
 
 
 class Source(Base):
@@ -82,32 +190,41 @@ class Source(Base):
 
     # Relationships
     documents = relationship("Document", back_populates="source_ref")
+    raw_documents = relationship("RawDocument", back_populates="source_ref")
 
     def __repr__(self) -> str:
         return f"<Source(id={self.id}, name={self.name})>"
 
 
 class Document(Base):
-    """Document table 'documents' for storing knowledge base documents.
+    """Document table 'documents' for storing LLM-ready knowledge base documents.
+
+    This table stores processed documents that are ready to be used by LLMs. The original
+    raw files are tracked in the documents_raw table. Documents can be created by parsing
+    raw files or generated programmatically.
 
     Attributes:
         id (str): Primary key (UUID stored as string). Works with both PostgreSQL and SQLite.
         source_id (str): Foreign key to the sources table.
+        raw_document_id (str): Foreign key to documents_raw table (optional - not all documents come from raw files).
+        parser_id (str): Foreign key to parsers table (optional - tracks which parser was used).
         doc_id (str): Human-readable document identifier within the source (e.g., "page-42"). Not necessarily unique within the source.
         uri (str): URI where the raw document can be accessed (optional).
         source_type (str): MIME type of the source (e.g., "application/pdf", "text/html").
         doc_type (str): Document category (e.g., "text", "image", "mixed").
-        text (str): Extracted text content.
-        binary (bytes): Actual binary data (optional). This no used for main documents, its used for external images.
+        text (str): Extracted text content that can be sent to LLMs.
+        binary (bytes): Binary data for images/diagrams extracted from documents that can be sent to multimodal LLMs.
+                       Not used for storing original document files (those go in documents_raw table via file_path).
         meta (dict): Flexible JSON field for additional metadata (authors, keywords, etc.).
         creating_time (datetime): Timestamp when the document was created.
         update_time (datetime): Timestamp when the document was last updated.
         insert_time (datetime): Timestamp when the document was inserted into the KB.
-        parent_id (str): Parent document reference for hierarchical documents (optional). This is used for images estracted from main document. Its not used for main documents..
+        parent_id (str): Parent document reference for hierarchical documents (optional).
+                        Used for extracted images to reference the text document they came from.
         title (str): Extracted title of the document (optional).
-        title_gen (str): Generated title.
-        summary (str): Generated detailed summary for retrieval and display.
-        gist (str): Generated high-level concepts/themes for embedding context.
+        title_gen (str): LLM-generated title.
+        summary (str): LLM-generated detailed summary for retrieval and display.
+        gist (str): LLM-generated high-level concepts/themes for embedding context.
         content_hash (str): Hash of the document content for deduplication.
     """
 
@@ -126,6 +243,23 @@ class Document(Base):
         String(256),
         ForeignKey("sources.id", ondelete="RESTRICT"),
         nullable=False,
+        index=True,
+    )
+
+    # Foreign key to documents_raw table (optional - not all documents come from raw files)
+    raw_document_id = Column(
+        String(36),
+        ForeignKey("documents_raw.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
+    # Foreign key to parsers table (optional - tracks which parser framework was used)
+    # References parsers.name (e.g., "kb-mcp", "docling", "manual")
+    parser_id = Column(
+        String(128),
+        ForeignKey("parsers.name", ondelete="SET NULL"),
+        nullable=True,
         index=True,
     )
 
@@ -188,6 +322,8 @@ class Document(Base):
     content_hash = Column(String(64), nullable=True, index=True)
     # Relationships
     source_ref = relationship("Source", back_populates="documents")
+    raw_document = relationship("RawDocument", back_populates="documents")
+    parser = relationship("Parser", back_populates="documents")
     parent = relationship("Document", remote_side=[id], backref="children")
 
     # Indexes for common queries
@@ -198,6 +334,8 @@ class Document(Base):
         Index("idx_documents_insert_time", "insert_time"),
         Index("idx_documents_content_hash", "content_hash"),
         Index("idx_documents_source_doc_id", "source_id", "doc_id"),
+        # Index for deduplication by identity (source_id, doc_id, parser_id)
+        Index("idx_documents_source_doc_parser", "source_id", "doc_id", "parser_id"),
     )
 
     def __repr__(self) -> str:
@@ -227,12 +365,7 @@ class Document(Base):
             chunks = doc.chunk(chunk_strategy="tokens", config={"chunk_size": 500})
             ```
         """
-        try:
-            from .embedding import chunk_document
-        except ImportError:
-            raise ImportError(
-                "Embedding module not available. Please ensure all dependencies are installed."
-            )
+        from .embedding import chunk_document
 
         # Use object's session if attached, otherwise None (will create new session)
         obj_state = sqlalchemy_inspect(self)
@@ -259,14 +392,9 @@ class Document(Base):
             chunks = doc.get_chunks(chunk_strategy="tokens_1000_200")
             ```
         """
-        try:
-            from .embedding import get_chunks
-        except ImportError:
-            raise ImportError(
-                "Embedding module not available. Please ensure all dependencies are installed."
-            )
+        from .embedding import get_chunks
 
-        # Use object's session if attached, otherwise None (will create new session)
+# Use object's session if attached, otherwise None (will create new session)
         obj_state = sqlalchemy_inspect(self)
         session = obj_state.session if obj_state.session is not None else None
 
@@ -293,14 +421,9 @@ class Document(Base):
             print(f"Deleted {count} chunks")
             ```
         """
-        try:
-            from .embedding import drop_chunks
-        except ImportError:
-            raise ImportError(
-                "Embedding module not available. Please ensure all dependencies are installed."
-            )
+        from .embedding import drop_chunks
 
-        # Use object's session if attached, otherwise None (will create new session)
+# Use object's session if attached, otherwise None (will create new session)
         obj_state = sqlalchemy_inspect(self)
         session = obj_state.session if obj_state.session is not None else None
 
@@ -343,14 +466,9 @@ class Document(Base):
             chunks = doc.chunk_and_embed(embedding_name="openai-small")
             ```
         """
-        try:
-            from .embedding import chunk_and_embed
-        except ImportError:
-            raise ImportError(
-                "Embedding module not available. Please ensure all dependencies are installed."
-            )
+        from .embedding import chunk_and_embed
 
-        # Use object's session if attached, otherwise None
+# Use object's session if attached, otherwise None
         obj_state = sqlalchemy_inspect(self)
         session = obj_state.session if obj_state.session is not None else None
 
@@ -398,15 +516,10 @@ class Document(Base):
         import os
         import socket
 
-        try:
-            from ..summary import summarize
-            from .embedding.db_models import SummaryLog
-        except ImportError:
-            raise ImportError(
-                "Summary module not available. Install required dependencies."
-            )
+        from ..summary import summarize
+        from .embedding.db_models import SummaryLog
 
-        # Skip summary generation for image documents
+# Skip summary generation for image documents
         # Image documents already have descriptions in their text field
         if self.doc_type == "image":
             logger.info(f"Skipping summary generation for image document {self.id}")
@@ -578,6 +691,44 @@ class Document(Base):
         return result
 
     @classmethod
+    def from_raw_exists(
+        cls,
+        raw_document_id: str,
+        parser_id: Optional[str] = None,
+        session = None,
+    ) -> bool:
+        """Check if a Document exists for a given RawDocument.
+
+        Args:
+            raw_document_id: ID of the RawDocument to check
+            parser_id: Optional parser ID to filter by. If None, checks for any parser.
+            session: Optional database session. If not provided, creates a new one.
+
+        Returns:
+            True if a Document exists, False otherwise
+
+        Example:
+            ```python
+            from kb_mcp.kb import Document
+
+            # Check if any document exists for this raw document
+            exists = Document.from_raw_exists(raw_doc.id)
+
+            # Check if document parsed with specific parser exists
+            exists = Document.from_raw_exists(raw_doc.id, parser_id="kb-mcp")
+            ```
+        """
+        from .database import get_db_session
+
+        with get_db_session(session) as db_session:
+            query = db_session.query(cls).filter(cls.raw_document_id == raw_document_id)
+
+            if parser_id is not None:
+                query = query.filter(cls.parser_id == parser_id)
+
+            return query.first() is not None
+
+    @classmethod
     def from_file(
         cls,
         file_path: str | Path,
@@ -635,15 +786,10 @@ class Document(Base):
         
         # Auto-detect MIME type if not provided
         if "source_type" not in doc_data:
-            try:
-                from kb_mcp.parser import detect_mime_type
-                mime_type = detect_mime_type(file_path)
-            except ImportError:
-                # Fallback to mimetypes if parser not available
-                import mimetypes
-                mime_type, _ = mimetypes.guess_type(str(file_path))
-                if not mime_type:
-                    mime_type = "application/octet-stream"
+            from kb_mcp.parser import detect_mime_type
+            mime_type = detect_mime_type(file_path)
+            if not mime_type:
+                mime_type = "application/octet-stream"
             doc_data["source_type"] = mime_type
         
         # Default doc_id to filename without extension if not provided

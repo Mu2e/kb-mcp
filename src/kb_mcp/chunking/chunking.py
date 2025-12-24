@@ -8,11 +8,7 @@ https://github.com/corrodis/mu2eDocChat/blob/main/mu2e/chunking.py
 import logging
 from typing import Dict, List, Optional, Any
 
-try:
-    import tiktoken
-except ImportError:
-    tiktoken = None
-    logging.warning("tiktoken not available. Install with: pip install tiktoken")
+import tiktoken
 
 logger = logging.getLogger(__name__)
 
@@ -49,15 +45,7 @@ def _get_encoding(model: Optional[str] = None):
     
     Returns:
         tiktoken encoding object
-    
-    Raises:
-        ImportError: If tiktoken is not installed
     """
-    if tiktoken is None:
-        raise ImportError(
-            "tiktoken is required for chunking. Install with: pip install tiktoken"
-        )
-
     if model is None or model == "cl100k_base":
         # Use default encoding
         return tiktoken.get_encoding("cl100k_base")

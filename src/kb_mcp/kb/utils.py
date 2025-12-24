@@ -9,14 +9,7 @@ from .documents import get
 
 logger = logging.getLogger(__name__)
 
-# Import embedding functions (may not be available)
-try:
-    from .embedding import chunk_and_embed, get_chunks
-    EMBEDDING_AVAILABLE = True
-except ImportError:
-    EMBEDDING_AVAILABLE = False
-    chunk_and_embed = None
-    get_chunks = None
+from .embedding import chunk_and_embed, get_chunks
 
 
 def get_stats() -> Dict[str, Any]:

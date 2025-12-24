@@ -2,23 +2,21 @@
 
 Functions for adding, retrieving, and managing documents.
 
-## Add Documents
+## High-Level Ingestion
 
-::: kb_mcp.kb.add
+::: kb_mcp.kb.ingest
 
-::: kb_mcp.kb.add_from_path
+The main entry point for adding documents with full processing (parse → summarize → chunk/embed).
 
-::: kb_mcp.kb.add_many
+::: kb_mcp.kb.add_document
+
+Lower-level function for parsing and adding documents without automatic summarization or embedding.
 
 ## Retrieve Documents
 
 ::: kb_mcp.kb.get
 
 ::: kb_mcp.kb.get_count
-
-::: kb_mcp.kb.get_options
-
-::: kb_mcp.kb.get_children
 
 ## Delete Documents
 

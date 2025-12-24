@@ -5,11 +5,8 @@ Configuration management for kb-mcp.
 import os
 from typing import Optional
 
-try:
-    from dotenv import load_dotenv
-    load_dotenv()
-except ImportError:
-    pass
+from dotenv import load_dotenv
+load_dotenv()
 
 # --- Helpers ---
 
@@ -186,12 +183,14 @@ def get_parser_config() -> dict:
     Returns:
         dict: Parser configuration with keys:
 
+            * `parser` (str): Parser framework to use (Env: `KB_PARSER`, default: 'kb-mcp').
             * `image_additional_doc` (bool): Create separate docs for images (Env: `PARSE_IMAGE_ADDITIONAL_DOC`).
             * `image_llm_description` (bool): Use LLM for image descriptions (Env: `PARSE_IMAGE_LLM_DESCRIPTION`).
             * `image_description_model` (str): Model for descriptions (Env: `PARSE_IMAGE_DESCRIPTION_MODEL`).
             * `image_description_num_workers` (int): Parallel worker count (Env: `PARSE_IMAGE_DESCRIPTION_NUMWORKERS`, default: 6).
     """
     return {
+        'parser': os.getenv("KB_PARSER", "kb-mcp"),
         'image_additional_doc': _get_bool("PARSE_IMAGE_ADDITIONAL_DOC", False),
         'image_llm_description': _get_bool("PARSE_IMAGE_LLM_DESCRIPTION", False),
         'image_description_model': os.getenv("PARSE_IMAGE_DESCRIPTION_MODEL", get_default_llm_model()),

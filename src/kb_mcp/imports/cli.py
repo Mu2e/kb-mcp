@@ -88,7 +88,7 @@ def main():
     inspire_parser.add_argument(
         "--output-dir",
         type=Path,
-        help="Directory to save downloaded PDFs (default: data/local/inspire-hep)",
+        help="Directory to save downloaded PDFs (default: data/sources/inspire-hep)",
     )
     inspire_parser.add_argument(
         "--source-id",

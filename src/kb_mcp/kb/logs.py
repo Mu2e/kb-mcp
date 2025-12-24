@@ -31,14 +31,7 @@ def _to_utc_iso(dt: Optional[datetime]) -> Optional[str]:
     return iso_str + 'Z'
 
 
-try:
-    from .embedding.db_models import ParsingLog, ChunkEmbeddingLog, SummaryLog
-    EMBEDDING_LOGS_AVAILABLE = True
-except ImportError:
-    EMBEDDING_LOGS_AVAILABLE = False
-    ParsingLog = None
-    ChunkEmbeddingLog = None
-    SummaryLog = None
+from .embedding.db_models import ParsingLog, ChunkEmbeddingLog, SummaryLog
 
 
 def get_search_logs(
@@ -149,9 +142,6 @@ def get_parsing_logs(
     Returns:
         List of parsing log dictionaries
     """
-    if not EMBEDDING_LOGS_AVAILABLE or ParsingLog is None:
-        return []
-
     with get_db_session(session) as session:
         return _get_parsing_logs_impl(session, document_id, limit)
 
@@ -217,9 +207,6 @@ def get_chunking_logs(
     Returns:
         List of chunking log dictionaries
     """
-    if not EMBEDDING_LOGS_AVAILABLE or ChunkEmbeddingLog is None:
-        return []
-
     with get_db_session(session) as session:
         return _get_chunking_logs_impl(session, document_id, limit)
 
@@ -271,9 +258,6 @@ def get_summary_logs(
     Returns:
         List of summary log dictionaries
     """
-    if not EMBEDDING_LOGS_AVAILABLE or SummaryLog is None:
-        return []
-
     with get_db_session(session) as session:
         return _get_summary_logs_impl(session, document_id, limit)
 

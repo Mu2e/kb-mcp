@@ -105,152 +105,158 @@ if oauth_provider:
 mcp_tools.register_prompts(mcp)
 
 
+# Setup shared web session manager for admin and web interfaces
+from .web import WebSessionManager, setup_shared_auth_routes, setup_web_routes
+
+web_session_manager = WebSessionManager(oauth_provider)
+
+# Root/Status responders need access to oauth_provider and web_session_manager
+async def root_responder(request):
+    from .web import html_templates
+    active_sessions = await oauth_provider.get_active_sessions_count() if oauth_provider else 0
+    username = await web_session_manager.get_session_username(request)
+    # Get required repo/group and provider info for display
+    required_access = None
+    provider_display = None
+    if oauth_provider:
+        if isinstance(oauth_provider, GitHubOAuthProvider):
+            required_access = oauth_provider.required_repo
+            provider_display = "GitHub"
+        elif isinstance(oauth_provider, GlobusOAuthProvider):
+            required_access = oauth_provider.required_group
+            provider_display = "Globus"
+        else:
+            # API-key-only mode
+            provider_display = "API Key Only"
+    else:
+        provider_display = "Disabled"
+    from starlette.responses import HTMLResponse
+    return HTMLResponse(
+        html_templates.root_page(
+            active_sessions, required_access, username, provider_display
+        )
+    )
+
+async def status_responder(request):
+    from .web import html_templates
+    active_sessions = await oauth_provider.get_active_sessions_count() if oauth_provider else 0
+    from starlette.responses import HTMLResponse
+    return HTMLResponse(html_templates.status_page(active_sessions))
+
+async def oauth_callback_responder(request):
+    """Unified OAuth callback - handles both MCP and web OAuth flows."""
+    from starlette.responses import HTMLResponse, RedirectResponse
+    code = request.query_params.get("code")
+    state = request.query_params.get("state")
+
+    try:
+        if not code or not state:
+            return HTMLResponse("Missing code or state", status_code=400)
+
+        if not oauth_provider:
+            return HTMLResponse("No OAuth provider configured", status_code=500)
+
+        # Check if this is MCP OAuth flow (state in session store under pending_auth)
+        pending_data = await oauth_provider.session_store.get("pending_auth", state)
+        if pending_data:
+            # MCP OAuth flow - handle via oauth_provider
+            result = await oauth_provider.handle_callback(code, state)
+            return RedirectResponse(result)
+        else:
+            # Web OAuth flow - handle via configured oauth_provider
+            return await web_session_manager.handle_oauth_callback(oauth_provider, code, state)
+    except Exception as e:
+        logger.error(f"OAuth callback error: {e}")
+        return HTMLResponse(f"OAuth Error: {str(e)}", status_code=400)
+
+# Audit and debug middleware
+from starlette.middleware.base import BaseHTTPMiddleware
+class AuditMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request, call_next):
+        import json
+        from starlette.requests import Request
+        # Debug logging for all requests
+        if MCP_LOG_LEVEL == "DEBUG" and request.url.path.startswith("/mcp"):
+            logger.debug(f"MCP: {request.method} {request.url.path}")
+
+        if request.url.path == "/mcp" and request.method == "POST":
+            # Extract token and username for audit logging
+            auth_header = request.headers.get("authorization", "")
+            username = None
+            if auth_header.startswith("Bearer ") and oauth_provider:
+                token = auth_header[7:]
+                username = await oauth_provider.get_username_for_token(token)
+
+            # Read and parse JSON-RPC request for tool call logging
+            body = await request.body()
+            try:
+                rpc_request = json.loads(body)
+                rpc_method = rpc_request.get("method", "unknown")
+                
+                # Log tool calls at INFO level
+                if rpc_method == "tools/call":
+                    params = rpc_request.get("params", {})
+                    tool_name = params.get("name", "unknown")
+                    tool_args = params.get("arguments", {})
+                    logger.info(f"MCP tool call: {tool_name}")
+                    
+                    # Audit logging to file
+                    if username and AUDIT_LOG_FILE:
+                        audit.log_tool_call(username, tool_name, tool_args)
+                elif MCP_LOG_LEVEL == "DEBUG":
+                    logger.debug(f"MCP method: {rpc_method}")
+                        
+            except json.JSONDecodeError as e:
+                logger.warning(f"MCP: Failed to parse JSON: {e}")
+
+            # Reconstruct request with body (since we consumed it)
+            scope = request.scope
+            async def receive():
+                return {"type": "http.request", "body": body}
+            request = Request(scope, receive)
+
+        return await call_next(request)
+
+# Create and configure the web application
+from starlette.middleware.cors import CORSMiddleware
+from starlette.staticfiles import StaticFiles
+
+app = mcp.streamable_http_app()
+
+# Add CORS middleware for browser-based MCP clients (tested with MCP Inspector)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+    expose_headers=["mcp-session-id"],  # Important for MCP session tracking
+)
+
+# Serve static files (CSS, JS)
+static_path = Path(__file__).parent / "static"
+app.mount("/static", StaticFiles(directory=str(static_path)), name="static")
+
+# Add audit middleware
+app.add_middleware(AuditMiddleware)
+
+# Setup unified login/logout routes
+setup_shared_auth_routes(app, web_session_manager)
+
+# Register routes
+app.add_route("/oauth/callback", oauth_callback_responder)
+app.add_route("/", root_responder)
+app.add_route("/status", status_responder)
+
+# Setup web routes (OAuth protected web interface for interactive tools)
+# This now includes admin and API routes
+setup_web_routes(app, oauth_provider, web_session_manager)
+
+
 def main():
     """Run the server."""
     import uvicorn
-    import json
-    from starlette.responses import HTMLResponse, RedirectResponse
-    from starlette.middleware.base import BaseHTTPMiddleware
-    from starlette.middleware.cors import CORSMiddleware
-    from starlette.requests import Request
-    from starlette.staticfiles import StaticFiles
-
-    app = mcp.streamable_http_app()
     
-    # Add CORS middleware for browser-based MCP clients (tested with MCP Inspector)
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["*"],
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-        expose_headers=["mcp-session-id"],  # Important for MCP session tracking
-    )
-    
-    # Serve static files (CSS, JS)
-    static_path = Path(__file__).parent / "static"
-    app.mount("/static", StaticFiles(directory=str(static_path)), name="static")
-
-    # Audit and debug middleware
-    class AuditMiddleware(BaseHTTPMiddleware):
-        async def dispatch(self, request, call_next):
-            # Debug logging for all requests
-            if MCP_LOG_LEVEL == "DEBUG" and request.url.path.startswith("/mcp"):
-                logger.debug(f"MCP: {request.method} {request.url.path}")
-
-            if request.url.path == "/mcp" and request.method == "POST":
-                # Extract token and username for audit logging
-                auth_header = request.headers.get("authorization", "")
-                username = None
-                if auth_header.startswith("Bearer ") and oauth_provider:
-                    token = auth_header[7:]
-                    username = await oauth_provider.get_username_for_token(token)
-
-                # Read and parse JSON-RPC request for tool call logging
-                body = await request.body()
-                try:
-                    rpc_request = json.loads(body)
-                    rpc_method = rpc_request.get("method", "unknown")
-                    
-                    # Log tool calls at INFO level
-                    if rpc_method == "tools/call":
-                        params = rpc_request.get("params", {})
-                        tool_name = params.get("name", "unknown")
-                        tool_args = params.get("arguments", {})
-                        logger.info(f"MCP tool call: {tool_name}")
-                        
-                        # Audit logging to file
-                        if username and AUDIT_LOG_FILE:
-                            audit.log_tool_call(username, tool_name, tool_args)
-                    elif MCP_LOG_LEVEL == "DEBUG":
-                        logger.debug(f"MCP method: {rpc_method}")
-                            
-                except json.JSONDecodeError as e:
-                    logger.warning(f"MCP: Failed to parse JSON: {e}")
-
-                # Reconstruct request with body (since we consumed it)
-                scope = request.scope
-                async def receive():
-                    return {"type": "http.request", "body": body}
-                request = Request(scope, receive)
-
-            response = await call_next(request)
-            return response
-
-    app.add_middleware(AuditMiddleware)
-
-    # Setup shared web session manager for admin and web interfaces
-    from .web import WebSessionManager, setup_shared_auth_routes, setup_web_routes
-
-    web_session_manager = WebSessionManager(oauth_provider)
-
-    # Setup unified login/logout routes
-    setup_shared_auth_routes(app, web_session_manager)
-
-    # Unified OAuth callback - handles both MCP and web OAuth flows
-    @app.route("/oauth/callback")
-    async def oauth_callback(request):
-        """Unified OAuth callback - handles both MCP and web OAuth flows."""
-        code = request.query_params.get("code")
-        state = request.query_params.get("state")
-
-        try:
-            if not code or not state:
-                return HTMLResponse("Missing code or state", status_code=400)
-
-            if not oauth_provider:
-                return HTMLResponse("No OAuth provider configured", status_code=500)
-
-            # Check if this is MCP OAuth flow (state in session store under pending_auth)
-            pending_data = await oauth_provider.session_store.get("pending_auth", state)
-            if pending_data:
-                # MCP OAuth flow - handle via oauth_provider
-                result = await oauth_provider.handle_callback(code, state)
-                return RedirectResponse(result)
-            else:
-                # Web OAuth flow - handle via configured oauth_provider
-                return await web_session_manager.handle_oauth_callback(oauth_provider, code, state)
-        except Exception as e:
-            logger.error(f"OAuth callback error: {e}")
-            return HTMLResponse(f"OAuth Error: {str(e)}", status_code=400)
-
-    # Root endpoint - landing page
-    @app.route("/")
-    async def root(request):
-        active_sessions = await oauth_provider.get_active_sessions_count() if oauth_provider else 0
-        username = await web_session_manager.get_session_username(request)
-        # Get required repo/group and provider info for display
-        required_access = None
-        provider_display = None
-        if oauth_provider:
-            if isinstance(oauth_provider, GitHubOAuthProvider):
-                required_access = oauth_provider.required_repo
-                provider_display = "GitHub"
-            elif isinstance(oauth_provider, GlobusOAuthProvider):
-                required_access = oauth_provider.required_group
-                provider_display = "Globus"
-            else:
-                # API-key-only mode
-                provider_display = "API Key Only"
-        else:
-            provider_display = "Disabled"
-        return HTMLResponse(
-            html_templates.root_page(
-                active_sessions, required_access, username, provider_display
-            )
-        )
-
-    # Status endpoint
-    @app.route("/status")
-    async def status(request):
-        active_sessions = await oauth_provider.get_active_sessions_count() if oauth_provider else 0
-        return HTMLResponse(html_templates.status_page(active_sessions))
-
-    # Setup web routes (OAuth protected web interface for interactive tools)
-    # This now includes admin and API routes
-    setup_web_routes(app, oauth_provider, web_session_manager)
-
-
     if auth_config['disable_auth'] == True and USE_HTTPS:
         logger.warning("Authentication is disabled but HTTPS is enabled. Is this intended?")
         logger.warning("HTTPS is only needed if authentication is enabled.")

@@ -7,6 +7,8 @@ from ..database import get_db_session
 from ..database import get_db_session
 from sqlalchemy import select, delete, func, inspect as sqlalchemy_inspect
 
+logger = logging.getLogger(__name__)
+
 
 # Helper functions
 def _get_embedding_table(sess, embedding_name: Optional[str] = None, embedder=None):
@@ -273,6 +275,7 @@ def chunk_and_embed(
         embed_time = 0.0
         num_embeddings = 0
         if chunks:
+            logger.info(f"Starting embedding for {len(chunks)} chunk(s)")
             embed_start = time.time()
             embed_chunks(
                 chunks,
@@ -284,6 +287,7 @@ def chunk_and_embed(
                 **kwargs
             )
             embed_time = time.time() - embed_start
+            logger.info(f"Completed embedding in {embed_time:.2f} seconds")
 
             # Count embeddings created (one per chunk if embedding succeeded)
             # Since embed_chunks succeeded, we assume one embedding per chunk

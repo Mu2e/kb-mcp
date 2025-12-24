@@ -28,14 +28,9 @@ class OpenAIEmbedder(BaseEmbedder):
             base_url: Custom base URL for OpenAI-compatible API (optional)
             **kwargs: Additional parameters passed to API
         """
-        try:
-            from openai import OpenAI
-        except ImportError:
-            raise ImportError(
-                "openai package is required. Install with: pip install openai"
-            )
-
+        from openai import OpenAI
         from ...config import get_llm_config
+
         llm_config = get_llm_config()
 
         self.provider = "openai"
@@ -155,13 +150,7 @@ class SentenceTransformersEmbedder(BaseEmbedder):
             device: Device to use ("cpu", "cuda", etc.). If None, auto-detects.
             **kwargs: Additional model parameters
         """
-        try:
-            from sentence_transformers import SentenceTransformer
-        except ImportError:
-            raise ImportError(
-                "sentence-transformers package is required. "
-                "Install with: pip install sentence-transformers"
-            )
+        from sentence_transformers import SentenceTransformer
 
         self.provider = "sentence-transformers"
         self.model = model_name

@@ -3,6 +3,8 @@
 import logging
 from pathlib import Path
 
+from pptx import Presentation
+
 from .parser_base import BaseParser
 from .text_utils import slides_format_as_markdown
 

@@ -1,7 +1,8 @@
 """Tools for batch operations on the knowledge base."""
 
 import logging
-from typing import Dict, Any, Optional
+from pathlib import Path
+from typing import Dict, Any, Optional, Union
 
 from .database import get_db_session
 from .db_models import Document
@@ -10,12 +11,345 @@ from ..chunking.chunking import get_chunk_strategy_suffix
 
 logger = logging.getLogger(__name__)
 
-# Check if embedding module is available
-try:
-    from .embedding import chunk_and_embed  # noqa: F401
-    EMBEDDING_AVAILABLE = True
-except ImportError:
-    EMBEDDING_AVAILABLE = False
+
+def ingest(
+    file_path: Union[str, Path],
+    *,
+    source_id: str,
+    doc_id: str,
+    parser_name: Optional[str] = None,
+    extract_images: Optional[bool] = None,
+    describe_images: Optional[bool] = None,
+    dedup_level: Optional[int] = None,
+    force_reparse: bool = False,
+    copy_to_kb: bool = False,
+    uri: Optional[str] = None,
+    meta: Optional[Dict] = None,
+    generate_summary: bool = True,
+    chunk_and_embed: bool = True,
+    create_summary_chunks: bool = True,
+    chunk_strategy: Optional[str] = None,
+    chunk_config: Optional[Dict[str, Any]] = None,
+    embedding_name: Optional[str] = None,
+    embedding_provider: Optional[str] = None,
+    embedding_model: Optional[str] = None,
+    session: Optional[Any] = None,
+) -> Dict[str, Any]:
+    """High-level function to ingest a document with full processing workflow.
+
+    This is the top-level wrapper that executes the complete document ingestion pipeline:
+    1. Add document (parse file and create Document records)
+    2. Generate summaries (default: True)
+    3. Chunk and embed (default: True)
+
+    For lower-level control, use add_document() directly.
+
+    Args:
+        file_path: Path to the document file
+        source_id: Source identifier
+        doc_id: Document ID within the source
+        parser_name: Parser to use (default: "kb-mcp")
+        extract_images: If True, create separate Document objects for extracted images
+        describe_images: If True, generate LLM descriptions for images
+        dedup_level: Deduplication level (0-4). See add_document() for details.
+        force_reparse: If True, re-parse even if document already exists
+        copy_to_kb: If True, copy file to data/sources/{source_id}/ directory
+        uri: Optional URI for the document
+        meta: Optional metadata dictionary
+        generate_summary: If True, generate title, gist, and summary for documents (default: True)
+        chunk_and_embed: If True, chunk and embed the documents (default: True)
+        create_summary_chunks: If True, create summary chunks when summary is generated (default: True)
+        chunk_strategy: Chunking strategy ("tokens", "slide"). Default from config.
+        chunk_config: Optional chunking configuration dict
+        embedding_name: Optional embedding name (e.g., "openai-small")
+        embedding_provider: Optional embedding provider (e.g., "openai")
+        embedding_model: Optional embedding model (e.g., "text-embedding-3-small")
+        session: Optional database session
+
+    Returns:
+        Dictionary with:
+        - document_ids: List of created Document IDs
+        - num_documents: Number of documents created
+        - parsed: Whether documents were parsed
+        - num_summaries: Number of summaries generated (if generate_summary=True)
+        - num_chunks: Total number of chunks created (if chunk_and_embed=True)
+        - num_text_chunks: Number of text document chunks (if chunk_and_embed=True)
+        - num_summary_chunks: Number of summary chunks (if chunk_and_embed=True and generate_summary=True)
+        - num_image_chunks: Number of image chunks (if chunk_and_embed=True)
+
+    Example:
+        ```python
+        from kb_mcp.kb.tools import ingest
+
+        # Full workflow with defaults (parse + summarize + chunk/embed)
+        result = ingest(
+            "paper.pdf",
+            source_id="arxiv",
+            doc_id="2301.12345",
+        )
+        print(f"Created {result['num_documents']} documents with {result['num_chunks']} chunks")
+
+        # Just parse and add (no summary, no embedding)
+        result = ingest(
+            "paper.pdf",
+            source_id="arxiv",
+            doc_id="2301.12345",
+            generate_summary=False,
+            chunk_and_embed=False,
+        )
+
+        # Parse + summarize only (no embedding)
+        result = ingest(
+            "paper.pdf",
+            source_id="arxiv",
+            doc_id="2301.12345",
+            chunk_and_embed=False,
+        )
+
+        # Disable summary chunks
+        result = ingest(
+            "paper.pdf",
+            source_id="arxiv",
+            doc_id="2301.12345",
+            create_summary_chunks=False,
+        )
+        ```
+    """
+    from .documents import add_document, get
+
+    # Step 1: Add document (parse and create Document records)
+    with get_db_session(session) as session:
+        add_result = add_document(
+            file_path,
+            source_id=source_id,
+            doc_id=doc_id,
+            parser_name=parser_name,
+            extract_images=extract_images,
+            describe_images=describe_images,
+            dedup_level=dedup_level,
+            force_reparse=force_reparse,
+            copy_to_kb=copy_to_kb,
+            uri=uri,
+            meta=meta,
+            session=session,
+        )
+
+        # Initialize result dictionary by merging add_result with additional fields
+        result = add_result | {
+            "num_summaries": 0,
+            "num_chunks": 0,
+            "num_text_chunks": 0,
+            "num_summary_chunks": 0,
+            "num_image_chunks": 0,
+        }
+
+        # If file was skipped (already processed), return early
+        if add_result.get("skipped", False):
+            return result
+
+        # If no documents were created, return early
+        if not add_result["document_ids"]:
+            return result
+
+        # Retrieve documents for further processing
+        docs = get(uid=add_result["document_ids"], session=session)
+        if docs is None:
+            return result
+
+        # Ensure docs is a list
+        if not isinstance(docs, list):
+            docs = [docs]
+
+        # Separate text and image documents
+        text_documents = [doc for doc in docs if doc.doc_type != "image"]
+        image_documents = [doc for doc in docs if doc.doc_type == "image"]
+
+        # Step 2: Generate summaries (if requested)
+        if generate_summary and text_documents:
+            for doc in text_documents:
+                try:
+                    doc.generate_summary(
+                        include_title=True,
+                        include_gist=True,
+                        include_summary=True,
+                    )
+                    result["num_summaries"] += 1
+                    logger.info(f"Generated summary for document {doc.id}")
+                except Exception as e:
+                    logger.warning(f"Could not generate summary for document {doc.id}: {e}")
+
+        # Step 3: Chunk and embed (if requested)
+        if chunk_and_embed:
+            # Chunk and embed text documents
+            for doc in text_documents:
+                try:
+                    chunks = doc.chunk_and_embed(
+                        chunk_strategy=chunk_strategy,
+                        chunk_config=chunk_config,
+                        embedding_name=embedding_name,
+                        provider=embedding_provider,
+                        model=embedding_model,
+                    )
+                    if chunks:
+                        result["num_text_chunks"] += len(chunks)
+                        result["num_chunks"] += len(chunks)
+                        logger.info(f"Chunked and embedded document {doc.id} ({len(chunks)} chunks)")
+
+                    # Also create summary chunks if summary was generated and enabled
+                    if generate_summary and create_summary_chunks and doc.summary:
+                        summary_chunks = doc.chunk_and_embed(
+                            chunk_strategy="summary",
+                            embedding_name=embedding_name,
+                            provider=embedding_provider,
+                            model=embedding_model,
+                        )
+                        if summary_chunks:
+                            result["num_summary_chunks"] += len(summary_chunks)
+                            result["num_chunks"] += len(summary_chunks)
+                            logger.info(f"Created and embedded summary chunk for document {doc.id}")
+                except Exception as e:
+                    logger.error(f"Error chunking/embedding document {doc.id}: {e}", exc_info=True)
+
+            # Chunk and embed image documents
+            for doc in image_documents:
+                try:
+                    chunks = doc.chunk_and_embed(
+                        chunk_strategy="image",
+                        embedding_name=embedding_name,
+                        provider=embedding_provider,
+                        model=embedding_model,
+                    )
+                    if chunks:
+                        result["num_image_chunks"] += len(chunks)
+                        result["num_chunks"] += len(chunks)
+                        logger.info(f"Chunked and embedded image document {doc.id}")
+                except Exception as e:
+                    logger.error(f"Error chunking/embedding image document {doc.id}: {e}", exc_info=True)
+
+        session.commit()
+
+    return result
+
+
+def parse_all(
+    source_id: Optional[str] = None,
+    parser_name: str = "kb-mcp",
+    extract_images: Optional[bool] = None,
+    describe_images: Optional[bool] = None,
+    force_reparse: bool = False,
+) -> Dict[str, Any]:
+    """Parse all raw documents that don't have corresponding processed documents yet.
+
+    Uses a LEFT JOIN to efficiently find RawDocuments without corresponding Documents
+    for the specified parser.
+
+    Args:
+        source_id: Optional source identifier to filter by. If None, processes all sources.
+        parser_name: Parser to use (default: "kb-mcp")
+        extract_images: If True, create separate Document objects for extracted images.
+                       If None, reads from PARSE_IMAGE_ADDITIONAL_DOC env var.
+        describe_images: If True, generate LLM descriptions for images using vision model.
+                        If None, reads from PARSE_IMAGE_LLM_DESCRIPTION env var.
+        force_reparse: If True, re-parse even if documents already exist for this parser.
+
+    Returns:
+        Dictionary with:
+        - total_raw: Total number of RawDocuments found
+        - parsed: Number of documents successfully parsed
+        - skipped: Number of documents skipped (file not found)
+        - errors: Number of errors encountered
+        - document_ids: List of created Document IDs
+    """
+    from pathlib import Path
+    from sqlalchemy import and_
+    from .db_models import RawDocument
+    from .documents import add_document
+
+    with get_db_session() as session:
+        # Query for RawDocuments that don't have Documents with the specified parser
+        # Use LEFT JOIN to find raw docs without corresponding documents
+        query = session.query(RawDocument).outerjoin(
+            Document,
+            and_(
+                Document.raw_document_id == RawDocument.id,
+                Document.parser_id == parser_name
+            )
+        ).filter(Document.id.is_(None))  # Only raw docs without documents
+
+        if source_id:
+            query = query.filter(RawDocument.source_id == source_id)
+
+        raw_docs = query.all()
+        total_raw = len(raw_docs)
+
+        if total_raw == 0:
+            logger.info(f"No unparsed raw documents found{' for source_id: ' + source_id if source_id else ''}")
+            return {
+                "total_raw": 0,
+                "parsed": 0,
+                "skipped": 0,
+                "errors": 0,
+                "document_ids": [],
+            }
+
+        logger.info(f"Found {total_raw} unparsed raw document(s) to process")
+
+        parsed = 0
+        skipped = 0
+        errors = 0
+        document_ids = []
+
+        for raw_doc in raw_docs:
+            try:
+                # Check if file_path exists
+                if not raw_doc.file_path:
+                    logger.warning(f"Raw document {raw_doc.id} has no file_path, skipping")
+                    skipped += 1
+                    continue
+
+                file_path = Path(raw_doc.file_path)
+
+                # Check if file exists
+                if not file_path.exists():
+                    logger.warning(f"Skipping raw_doc {raw_doc.id}: file not found at {raw_doc.file_path}")
+                    skipped += 1
+                    continue
+
+                logger.info(f"Parsing raw document {raw_doc.id}: {raw_doc.file_path}")
+
+                # Use add_document (files already in KB, don't copy)
+                result = add_document(
+                    file_path,
+                    source_id=raw_doc.source_id,
+                    doc_id=raw_doc.doc_id,
+                    parser_name=parser_name,
+                    extract_images=extract_images,
+                    describe_images=describe_images,
+                    force_reparse=force_reparse,
+                    copy_to_kb=False,  # Files already in KB storage
+                    session=session,
+                )
+
+                document_ids.extend(result["document_ids"])
+                parsed += 1
+                logger.info(f"Successfully parsed {result['num_documents']} document(s) from {raw_doc.file_path}")
+
+            except Exception as e:
+                errors += 1
+                logger.error(f"Error parsing raw document {raw_doc.id}: {e}", exc_info=True)
+                continue
+
+    logger.info(
+        f"Parse complete: {parsed} parsed, {skipped} skipped, {errors} errors"
+    )
+
+    return {
+        "total_raw": total_raw,
+        "parsed": parsed,
+        "skipped": skipped,
+        "errors": errors,
+        "document_ids": document_ids,
+    }
 
 
 def chunk_and_embed_all(
@@ -65,10 +399,6 @@ def chunk_and_embed_all(
         print(f"Processed {result['image_processed']} images, chunked {result['image_chunked']}")
         ```
     """
-    if not EMBEDDING_AVAILABLE:
-        raise ImportError(
-            "Embedding module not available. Please ensure all dependencies are installed."
-        )
     
     logger.info(f"Starting chunk_and_embed_all for source_id: {source_id}")
     
@@ -238,11 +568,6 @@ def image_chunk_and_embed_all(
         print(f"Processed {result['processed']} images, chunked {result['chunked']}")
         ```
     """
-    if not EMBEDDING_AVAILABLE:
-        raise ImportError(
-            "Embedding module not available. Please ensure all dependencies are installed."
-        )
-
     logger.info(f"Starting image_chunk_and_embed_all for source_id: {source_id}")
 
     with get_db_session(session) as session:
@@ -361,11 +686,6 @@ def embed_all(
         print(f"Embedded {result['embedded']} of {result['total_chunks']} chunks")
         ```
     """
-    if not EMBEDDING_AVAILABLE:
-        raise ImportError(
-            "Embedding module not available. Please ensure all dependencies are installed."
-        )
-
     from .embedding import embed_chunks
 
     logger.info(
@@ -549,11 +869,6 @@ def summarize_all(
         ```
     """
     # Summary module availability is checked by doc.generate_summary()
-
-    if embed_summary_chunk and not EMBEDDING_AVAILABLE:
-        raise ImportError(
-            "Embedding module not available. Please ensure all dependencies are installed."
-        )
 
     logger.info(f"Starting summarize_all for source_id: {source_id}")
 

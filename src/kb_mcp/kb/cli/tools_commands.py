@@ -4,15 +4,10 @@ import json
 import sys
 
 from .. import get, get_stats, deduplicate, delete_document
+from ..documents import delete_raw_document, get_raw_document
 from ..utils import find_all_duplicates
 from ..database import get_db_session
-
-# Import embedding functions (may not be available if dependencies not installed)
-try:
-    from ..embedding import chunk_and_embed
-    EMBEDDING_AVAILABLE = True
-except ImportError:
-    EMBEDDING_AVAILABLE = False
+from ..embedding import chunk_and_embed
 
 
 def cmd_stats(args):
@@ -98,12 +93,44 @@ def cmd_logs_parsing(args):
             print(f"    Text Length: {log['text_length'] or 0} characters")
 
 
-def cmd_chunk_and_embed_all(args):
-    """Chunk and embed all documents for a source_id that don't have chunks yet."""
-    if not EMBEDDING_AVAILABLE:
-        print("Error: Embedding module not available. Please ensure all dependencies are installed.")
+def cmd_parse_all(args):
+    """Parse all raw documents for a source_id that don't have processed documents yet."""
+    try:
+        from ..tools import parse_all
+
+        print(f"Parsing all raw documents for source_id: {args.source_id}")
+        if args.parser_name:
+            print(f"Using parser: {args.parser_name}")
+        if args.extract_images:
+            print("Extracting images as separate documents")
+        if args.describe_images:
+            print("Generating LLM descriptions for images")
+        if args.force_reparse:
+            print("Force re-parsing enabled")
+
+        result = parse_all(
+            source_id=args.source_id,
+            parser_name=args.parser_name,
+            extract_images=args.extract_images,
+            describe_images=args.describe_images,
+            force_reparse=args.force_reparse,
+        )
+
+        print(f"\n  Completed:")
+        print(f"  Total raw documents: {result['total_raw']}")
+        print(f"  Parsed: {result['parsed']} document(s)")
+        print(f"  Skipped: {result['skipped']} document(s) (file not found)")
+        if result['errors'] > 0:
+            print(f"  Errors: {result['errors']} document(s)")
+    except Exception as e:
+        print(f"Error: {e}")
+        import traceback
+        traceback.print_exc()
         sys.exit(1)
 
+
+def cmd_chunk_and_embed_all(args):
+    """Chunk and embed all documents for a source_id that don't have chunks yet."""
     try:
         from ..tools import chunk_and_embed_all
 
@@ -358,6 +385,80 @@ def cmd_drop(args):
         sys.exit(1)
 
 
+def cmd_get_raw(args):
+    """Get a raw document by document ID."""
+    try:
+        raw_doc = get_raw_document(args.document_id)
+        
+        if not raw_doc:
+            print(f"No raw document found for document {args.document_id}")
+            print("  (Document may not exist, or may not have an associated raw document)")
+            sys.exit(1)
+        
+        print(f"Raw Document: {raw_doc.id}")
+        print(f"  Source ID: {raw_doc.source_id}")
+        if raw_doc.doc_id:
+            print(f"  Doc ID: {raw_doc.doc_id}")
+        if raw_doc.file_path:
+            print(f"  File Path: {raw_doc.file_path}")
+        if raw_doc.hostname:
+            print(f"  Hostname: {raw_doc.hostname}")
+        if raw_doc.uri:
+            print(f"  URI: {raw_doc.uri}")
+        print(f"  Source Type: {raw_doc.source_type}")
+        if raw_doc.file_size:
+            print(f"  File Size: {raw_doc.file_size} bytes")
+        if raw_doc.content_hash:
+            print(f"  Content Hash: {raw_doc.content_hash}")
+        if raw_doc.created_time:
+            print(f"  Created: {raw_doc.created_time}")
+        if raw_doc.updated_time:
+            print(f"  Updated: {raw_doc.updated_time}")
+        if raw_doc.meta:
+            print(f"  Meta: {json.dumps(raw_doc.meta, indent=2)}")
+            
+    except Exception as e:
+        print(f"Error getting raw document: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+
+def cmd_drop_raw(args):
+    """Delete a raw document."""
+    try:
+        # Get confirmation unless --yes is specified
+        if not args.yes:
+            message = f"Delete raw document {args.raw_document_id}?"
+            if args.delete_linked:
+                message += " (This will also delete all linked documents and their chunks/embeddings)"
+            message += " [y/N]: "
+            confirmation = input(message)
+            if confirmation.lower() not in ['y', 'yes']:
+                print("Cancelled.")
+                return
+
+        result = delete_raw_document(args.raw_document_id, delete_linked_documents=args.delete_linked)
+
+        print(f" Deleted raw document {args.raw_document_id}")
+        if args.delete_linked:
+            if result.get("deleted_documents", 0) > 0:
+                print(f"  (Also deleted {result['deleted_documents']} linked document(s) and their chunks/embeddings)")
+            elif result.get("document_count", 0) == 0:
+                print(f"  (No linked documents found)")
+        else:
+            if result.get("document_count", 0) > 0:
+                print(f"  (Set raw_document_id to NULL in {result['document_count']} related document(s))")
+    except ValueError as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+    except Exception as e:
+        print(f"Error deleting raw document: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+
 def setup_commands(subparsers):
     """Set up tools and utility commands."""
     # Drop command (top-level, for documents)
@@ -411,6 +512,32 @@ def setup_commands(subparsers):
         help="Apply deduplication (required to make changes)"
     )
     dedup_parser.set_defaults(func=cmd_deduplicate)
+
+    parse_all_parser = tools_subparsers.add_parser(
+        "parse-all",
+        help="Parse all raw documents for a source_id that don't have processed documents yet"
+    )
+    parse_all_parser.add_argument("source_id", help="Source identifier to process raw documents for")
+    parse_all_parser.add_argument(
+        "--parser-name",
+        help="Parser to use (default: uses KB_PARSER env var or 'kb-mcp')"
+    )
+    parse_all_parser.add_argument(
+        "--extract-images",
+        action="store_true",
+        help="Create separate Document objects for extracted images"
+    )
+    parse_all_parser.add_argument(
+        "--describe-images",
+        action="store_true",
+        help="Generate LLM descriptions for images using vision model"
+    )
+    parse_all_parser.add_argument(
+        "--force-reparse",
+        action="store_true",
+        help="Re-parse even if documents already exist for this parser"
+    )
+    parse_all_parser.set_defaults(func=cmd_parse_all)
 
     chunk_embed_all_parser = tools_subparsers.add_parser(
         "chunk-and-embed-all",
@@ -491,6 +618,20 @@ def setup_commands(subparsers):
     drop_table_parser.add_argument("table_name", help="Name of the table to drop")
     drop_table_parser.add_argument("--yes", action="store_true", help="Skip confirmation prompt")
     drop_table_parser.set_defaults(func=cmd_drop_table)
+
+    get_raw_parser = tools_subparsers.add_parser("get-raw", help="Get a raw document by document ID")
+    get_raw_parser.add_argument("document_id", help="Document ID (UUID)")
+    get_raw_parser.set_defaults(func=cmd_get_raw)
+
+    drop_raw_parser = tools_subparsers.add_parser("drop-raw", help="Delete a raw document by ID")
+    drop_raw_parser.add_argument("raw_document_id", help="Raw document ID (UUID)")
+    drop_raw_parser.add_argument("--yes", action="store_true", help="Skip confirmation prompt")
+    drop_raw_parser.add_argument(
+        "--delete-linked",
+        action="store_true",
+        help="Also delete all documents linked to this raw document (and their chunks/embeddings)"
+    )
+    drop_raw_parser.set_defaults(func=cmd_drop_raw)
 
     # Stats command
     stats_parser = subparsers.add_parser("stats", help="Show knowledge base statistics")

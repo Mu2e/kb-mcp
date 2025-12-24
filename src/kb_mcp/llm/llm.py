@@ -18,15 +18,9 @@ def get_openai_client():
         OpenAI client instance
 
     Raises:
-        ImportError: If openai package is not installed
         ValueError: If OPENAI_API_KEY is not set
     """
-    try:
-        from openai import OpenAI
-    except ImportError:
-        raise ImportError(
-            "openai package not installed. Install with: pip install openai"
-        )
+    from openai import OpenAI
 
     llm_config = get_llm_config()
     api_key = llm_config['openai_api_key']

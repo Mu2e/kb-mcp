@@ -72,8 +72,8 @@ The pipeline will automatically try to use mu2eDocChat parsers first, and fall b
 # Add a source
 kb source add mu2e-docdb --name "Mu2e DocDB" --base-uri "https://mu2e-docdb.fnal.gov"
 
-# Add a document
-kb add document.pdf --source-id mu2e-docdb --doc-id 1234
+# Ingest a document
+kb ingest document.pdf --source-id mu2e-docdb --doc-id 1234
 
 # Get a document
 kb get mu2e-docdb_1234

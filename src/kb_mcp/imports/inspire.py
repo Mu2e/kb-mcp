@@ -19,26 +19,18 @@ if _IS_MAIN:
     if str(project_root) not in sys.path:
         sys.path.insert(0, str(project_root))
 
-try:
-    import httpx
-except ImportError:
-    raise ImportError(
-        "httpx is required for INSPIRE-HEP source. Install with: pip install httpx"
-    )
+import httpx
+from dotenv import load_dotenv
 
-try:
-    from dotenv import load_dotenv
-    load_dotenv()
-except ImportError:
-    pass
+load_dotenv()
 
 # Use absolute imports when running as script, relative when imported as module
 if _IS_MAIN:
     from kb_mcp.imports.base import Source
-    from kb_mcp.kb import add_from_path
+    from kb_mcp.kb import add_document
 else:
     from .base import Source
-    from ..kb import add_from_path
+    from ..kb import add_document
 
 
 logger = logging.getLogger(__name__)
@@ -221,54 +213,66 @@ class InspireSource(Source):
         item: Dict[str, Any],
         output_dir: Path,
         session: Any,
-    ) -> Optional[List[Any]]:
+    ) -> Dict[str, Any]:
         """Process a single INSPIRE-HEP record.
-        
+
         Args:
             item: Hit dictionary from API (contains 'id' and 'metadata')
             output_dir: Directory to save downloaded PDFs
             session: Database session for adding documents
-            
+
         Returns:
-            List of Document objects added, or None if processing failed
+            Dictionary with processing results including document_ids, num_documents, parsed, and error fields
         """
         record_data = item.get("metadata", {})
         if not record_data:
-            logger.warning(f"Skipping item {item.get('id', 'unknown')}: no metadata")
-            return None
-        
+            return {
+                "document_ids": [],
+                "num_documents": 0,
+                "parsed": False,
+                "error": f"No metadata found for item {item.get('id', 'unknown')}"
+            }
+
         record_id = str(item.get("id", ""))
-        
+
         # Skip records without documents
         if not record_data.get('documents') or len(record_data.get('documents', [])) == 0:
-            logger.warning(f"Skipping record {record_id}: no documents available")
-            return None
-        
+            return {
+                "document_ids": [],
+                "num_documents": 0,
+                "parsed": False,
+                "error": f"No documents available for record {record_id}"
+            }
+
         # Extract metadata
         metadata = self._extract_metadata_from_api(record_data)
         pdf_url = record_data['documents'][0]['url']
         uri = f"https://inspirehep.net/literature/{record_id}"
-        
+
         # Download PDF
         pdf_path = self._download_pdf(pdf_url, output_dir, record_id)
         if not pdf_path:
-            logger.warning(f"Failed to download PDF for record {record_id}")
-            return None
-        
-        # Add to knowledge base
-        doc_list = add_from_path(
+            return {
+                "document_ids": [],
+                "num_documents": 0,
+                "parsed": False,
+                "error": f"Failed to download PDF for record {record_id}"
+            }
+
+        # Add to knowledge base (files already in correct location, no need to copy)
+        result = add_document(
             pdf_path,
-            data={
-                "source_id": self.source_id,
-                "doc_id": record_id,
-                "uri": uri,
-                "source_type": "application/pdf",
-                "meta": metadata,
-            },
+            source_id=self.source_id,
+            doc_id=record_id,
+            uri=uri,
+            meta=metadata,
+            copy_to_kb=False,  # Files already in data/sources/inspire-hep/
             session=session
         )
-        
-        return doc_list
+
+        # Add error field (None = success)
+        result["error"] = None
+        return result
 
 
 # Main entry point moved to imports/cli.py
@@ -299,7 +303,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--output-dir",
         type=Path,
-        help="Directory to save downloaded PDFs (default: data/local/inspire-hep)",
+        help="Directory to save downloaded PDFs (default: data/sources/inspire-hep)",
     )
     parser.add_argument(
         "--source-id",

@@ -3,30 +3,20 @@
 import sys
 
 from ..database import get_db_session
-
-# Import eval functions (may not be available if dependencies not installed)
-try:
-    from ..eval import (
-        generate_questions_from_documents,
-        generate_questions_from_source,
-        add_audit,
-        audit_question,
-        get_unaudited_questions,
-        eval as run_eval,
-        get_summary_stats,
-    )
-    from ..eval.db_models import get_eval_generation, get_eval_questions, get_eval_run
-    EVAL_AVAILABLE = True
-except ImportError:
-    EVAL_AVAILABLE = False
+from ..eval import (
+    generate_questions_from_documents,
+    generate_questions_from_source,
+    add_audit,
+    audit_question,
+    get_unaudited_questions,
+    eval as run_eval,
+    get_summary_stats,
+)
+from ..eval.db_models import get_eval_generation, get_eval_questions, get_eval_run
 
 
 def cmd_eval_generate(args):
     """Generate evaluation questions from documents."""
-    if not EVAL_AVAILABLE:
-        print("Error: Eval module not available.")
-        sys.exit(1)
-
     try:
         if args.source_id:
             # Use generate_questions_from_source when source_id is provided
@@ -62,10 +52,6 @@ def cmd_eval_generate(args):
 
 def cmd_eval_audit(args):
     """Audit evaluation questions."""
-    if not EVAL_AVAILABLE:
-        print("Error: Eval module not available.")
-        sys.exit(1)
-
     try:
         # Get unaudited questions (convert 0 to None for unlimited)
         limit = None if args.limit == 0 else args.limit
@@ -154,10 +140,6 @@ def cmd_eval_audit(args):
 
 def cmd_eval_run(args):
     """Run an evaluation."""
-    if not EVAL_AVAILABLE:
-        print("Error: Eval module not available.")
-        sys.exit(1)
-
     try:
         # Build audit filters
         audit_filters = {}
@@ -211,10 +193,6 @@ def cmd_eval_run(args):
 
 def cmd_eval_stats(args):
     """Show evaluation statistics."""
-    if not EVAL_AVAILABLE:
-        print("Error: Eval module not available.")
-        sys.exit(1)
-
     try:
         stats = get_summary_stats(
             run_id=args.run_id,
@@ -242,10 +220,6 @@ def cmd_eval_stats(args):
 
 def cmd_eval_list(args):
     """List evaluation generations, runs, or questions."""
-    if not EVAL_AVAILABLE:
-        print("Error: Eval module not available.")
-        sys.exit(1)
-
     try:
         if args.list_type == "generations":
             with get_db_session() as session:

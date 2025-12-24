@@ -181,7 +181,7 @@ def setup_api_routes(app, session_manager: WebSessionManager):
         try:
             from ....kb import get
 
-            doc = get(uuid=doc_id)
+            doc = get(uid=doc_id)
             if not doc:
                 return JSONResponse(
                     {"error": "Document not found"},
@@ -213,13 +213,7 @@ def setup_api_routes(app, session_manager: WebSessionManager):
 
         try:
             from ....kb import get_statistics
-            
-            if get_statistics is None:
-                return JSONResponse(
-                    {"error": "Statistics module not available"},
-                    status_code=503
-                )
-            
+
             # Get statistics with filters
             stats = get_statistics(
                 source_id=source_id if source_id else None,
@@ -247,14 +241,7 @@ def setup_api_routes(app, session_manager: WebSessionManager):
         strategy = request.query_params.get("strategy", None)
 
         try:
-            # Try to import embedding functions
-            try:
-                from ....kb.embedding import get_chunk_strategies, get_chunks
-            except ImportError:
-                return JSONResponse(
-                    {"error": "Embedding module not available"},
-                    status_code=503
-                )
+            from ....kb.embedding import get_chunk_strategies, get_chunks
 
             # Get chunk strategies for this document
             strategies = get_chunk_strategies(document_id=doc_id)
@@ -377,7 +364,7 @@ def setup_api_routes(app, session_manager: WebSessionManager):
         try:
             from ....kb import get
 
-            doc = get(uuid=doc_id)
+            doc = get(uid=doc_id)
             if not doc:
                 return Response(
                     content=b"Image not found",
@@ -470,7 +457,7 @@ def setup_api_routes(app, session_manager: WebSessionManager):
 
     @app.route("/files/local/{filename}")
     async def serve_local_file(request: Request):
-        """Serve local files from data/local directory."""
+        """Serve local files from data/sources directory."""
         # Check authentication first
         session_data, error_response = await require_auth_api(request, session_manager)
         if error_response:
@@ -487,11 +474,11 @@ def setup_api_routes(app, session_manager: WebSessionManager):
             )
 
         try:
-            # Get local directory from DATA_DIR
+            # Get sources directory from DATA_DIR
             from ....config import get_data_dir
             data_dir = get_data_dir()
-            local_dir = Path(data_dir) / "local"
-            file_path = local_dir / filename
+            sources_dir = Path(data_dir) / "sources"
+            file_path = sources_dir / filename
             
             if not file_path.exists():
                 return Response(
@@ -570,14 +557,8 @@ def setup_api_routes(app, session_manager: WebSessionManager):
 
         try:
             # Import search function
-            try:
-                from ....kb.search import search
-            except ImportError:
-                return JSONResponse(
-                    {"error": "Search module not available"},
-                    status_code=503
-                )
-            
+            from ....kb.search import search
+
             # Perform search
             result = search(
                 query=query,
@@ -764,14 +745,8 @@ def setup_api_routes(app, session_manager: WebSessionManager):
 
         try:
             # Import get_similar function
-            try:
-                from ....kb.search import get_similar
-            except ImportError:
-                return JSONResponse(
-                    {"error": "Search module not available"},
-                    status_code=503
-                )
-            
+            from ....kb.search import get_similar
+
             # Perform similarity search
             result = get_similar(
                 chunk_id=chunk_id,

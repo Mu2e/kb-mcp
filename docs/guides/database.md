@@ -2,10 +2,37 @@
 
 This KB is built around a SQL database schema. It is intended for `postgresql` but `sqlite` can be used for development work.
 
-The core table is [Document](#kb_mcp.kb.db_models.Document) that holds all documents of the KB, with [Source](#kb_mcp.kb.db_models.Source) holding information about the document's origin. For the semantic search we store document chunks in [Chunk](#kb_mcp.kb.embedding.db_models.Chunk) with embeddings stored in `embeddings_NAME`. 
+## Document Pipeline
+
+The document processing pipeline follows this flow:
+
+1. **Raw Documents** ([RawDocument](#kb_mcp.kb.db_models.RawDocument)): Original files (PDFs, Word docs, etc.) tracked by file path/URI without storing binary data
+2. **Parsers** ([Parser](#kb_mcp.kb.db_models.Parser)): Tracks which parser and version was used to process documents
+3. **Documents** ([Document](#kb_mcp.kb.db_models.Document)): LLM-ready processed content (text + extracted images)
+4. **Chunks** ([Chunk](#kb_mcp.kb.embedding.db_models.Chunk)): Document chunks for semantic search with embeddings
+
+All documents are associated with a [Source](#kb_mcp.kb.db_models.Source) that holds information about the document's origin. Embeddings are stored in dynamically created `embeddings_NAME` tables.
 
 Details of document parsing, chunking, and embedding are logged in [logs_XX](#logging) tables. The kb evaluation ([details](evaluation.md)) schema uses [eval_XXX](#evaluation) tables.
 
+
+## Raw Documents and Parsers
+
+::: kb_mcp.kb.db_models.RawDocument
+    options:
+      show_root_heading: true
+      show_root_full_path: false
+      heading_level: 3
+      show_bases: false
+      members: []
+
+::: kb_mcp.kb.db_models.Parser
+    options:
+      show_root_heading: true
+      show_root_full_path: false
+      heading_level: 3
+      show_bases: false
+      members: []
 
 ## Documents and Sources
 

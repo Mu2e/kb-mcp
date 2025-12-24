@@ -15,53 +15,62 @@ logger = logging.getLogger(__name__)
 _db_initialized = False
 
 # Deduplication levels
-DEDUP_LEVEL_INSERT = 0  # Insert duplicates, no warnings
-DEDUP_LEVEL_WARN = 1  # Insert with warnings
-DEDUP_LEVEL_OVERWRITE_HASH = 2  # Overwrite if same hash
-DEDUP_LEVEL_OVERWRITE_HASH_WARN = 3  # Same as 2 but with warnings for existing source_id, doc_id (default)
-DEDUP_LEVEL_OVERWRITE_ALL = 4  # Overwrite same hash and same source_id, doc_id
+DEDUP_NONE = 0           # Always insert (no checking)
+DEDUP_IDENTITY = 1       # Check (source_id, doc_id, parser_id), update if exists (DEFAULT)
+DEDUP_HASH = 2           # Check content_hash, skip/update if exists
+DEDUP_IDENTITY_HASH = 3  # Check identity first, then hash (most strict)
+
+# Legacy aliases for backward compatibility
+DEDUP_LEVEL_INSERT = 0
+DEDUP_LEVEL_WARN = 1
+DEDUP_LEVEL_OVERWRITE_HASH = 2
+DEDUP_LEVEL_OVERWRITE_HASH_WARN = 3
 
 
 def _get_default_dedup_level() -> int:
     """Get default deduplication level from environment variable.
 
     Returns:
-        Deduplication level (0-4), default is 2
+        Deduplication level (0-3), default is 1 (DEDUP_IDENTITY)
     """
-    # KB deduplication level is no longer in config - default to 3
+    # KB deduplication level is no longer in config - default to DEDUP_IDENTITY
     # This can be added to config if needed
-    return 3
+    return DEDUP_IDENTITY
 
 
 def _find_duplicates(
     document: Document,
     session: Any,
 ) -> Tuple[Optional[Document], Optional[Document]]:
-    """Find duplicate documents by source_id+doc_id and by content_hash.
-    
+    """Find duplicate documents by identity and by content_hash.
+
     Args:
         document: Document to check for duplicates
         session: Database session
-    
+
     Returns:
-        Tuple of (existing_by_id, existing_by_hash):
-        - existing_by_id: Document with same source_id and doc_id, or None
+        Tuple of (existing_by_identity, existing_by_hash):
+        - existing_by_identity: Document with same (source_id, doc_id, parser_id), or None
         - existing_by_hash: Document with same content_hash, or None
     """
-    existing_by_id = None
+    existing_by_identity = None
     existing_by_hash = None
-    
-    # Check for existing document with same source_id and doc_id
+
+    # Check for existing document with same identity (source_id, doc_id, parser_id)
     if document.source_id and document.doc_id:
-        existing_by_id = (
-            session.query(Document)
-            .filter(
-                Document.source_id == document.source_id,
-                Document.doc_id == document.doc_id,
-            )
-            .first()
+        query = session.query(Document).filter(
+            Document.source_id == document.source_id,
+            Document.doc_id == document.doc_id,
         )
-    
+        # Include parser_id in identity check (allows same doc parsed with different frameworks)
+        if document.parser_id:
+            query = query.filter(Document.parser_id == document.parser_id)
+        else:
+            # If parser_id is None, match documents with NULL parser_id
+            query = query.filter(Document.parser_id.is_(None))
+
+        existing_by_identity = query.first()
+
     # Check for existing document with same content_hash
     if document.content_hash:
         existing_by_hash = (
@@ -69,8 +78,8 @@ def _find_duplicates(
             .filter(Document.content_hash == document.content_hash)
             .first()
         )
-    
-    return existing_by_id, existing_by_hash
+
+    return existing_by_identity, existing_by_hash
 
 
 def _update_document(existing: Document, new: Document, session: Any, update_hash: bool = False, commit: bool = True) -> Document:
@@ -111,86 +120,69 @@ def _update_document(existing: Document, new: Document, session: Any, update_has
 
 def _handle_duplicate(
     document: Document,
-    existing_by_id: Optional[Document],
+    existing_by_identity: Optional[Document],
     existing_by_hash: Optional[Document],
     dedup_level: int,
     session: Any,
     commit: bool = True,
 ) -> Optional[Document]:
     """Handle duplicate document based on deduplication level.
-    
+
     Args:
         document: New document to add
-        existing_by_id: Existing document with same source_id+doc_id, or None
+        existing_by_identity: Existing document with same (source_id, doc_id, parser_id), or None
         existing_by_hash: Existing document with same content_hash, or None
-        dedup_level: Deduplication level (0-4)
+        dedup_level: Deduplication level (0-3)
         session: Database session
-    
+        commit: If True, commit the session. If False, caller is responsible for committing.
+
     Returns:
         Document object (existing or new), or None if should insert new
     """
-    # Level 0: Insert duplicates, no warnings
-    if dedup_level == DEDUP_LEVEL_INSERT:
+    # Level 0 (DEDUP_NONE): Always insert, no checking
+    if dedup_level == DEDUP_NONE:
         return None
-    
-    # Level 1: Insert with warnings
-    if dedup_level == DEDUP_LEVEL_WARN:
-        if existing_by_id:
-            logger.warning(
-                f"Duplicate source_id+doc_id: {document.source_id}/{document.doc_id} "
-                f"(existing: {existing_by_id.id})"
-            )
-        if existing_by_hash and existing_by_hash.id != (existing_by_id.id if existing_by_id else None):
-            logger.warning(
-                f"Duplicate content_hash: {document.content_hash} "
-                f"(existing: {existing_by_hash.id})"
-            )
-        return None
-    
-    # Level 2: Overwrite if same hash
-    if dedup_level == DEDUP_LEVEL_OVERWRITE_HASH:
-        if existing_by_hash:
-            updated = _update_document(existing_by_hash, document, session, update_hash=False, commit=commit)
-            logger.warning(
-                f"Replaced document {updated.id} (same content_hash: {document.content_hash[:16] if document.content_hash else 'N/A'}...)"
+
+    # Level 1 (DEDUP_IDENTITY): Check identity, update if exists
+    if dedup_level == DEDUP_IDENTITY:
+        if existing_by_identity:
+            updated = _update_document(existing_by_identity, document, session, update_hash=True, commit=commit)
+            logger.info(
+                f"Updated document {updated.id} "
+                f"(same identity: {document.source_id}/{document.doc_id}/{document.parser_id})"
             )
             return updated
         return None
-    
-    # Level 3: Same as 2 but with warnings for existing source_id, doc_id
-    if dedup_level == DEDUP_LEVEL_OVERWRITE_HASH_WARN:
-        if existing_by_id and (not existing_by_hash or existing_by_id.id != existing_by_hash.id):
-            logger.warning(
-                f"Existing source_id+doc_id: {document.source_id}/{document.doc_id} "
-                f"(existing: {existing_by_id.id}), but different content_hash"
-            )
+
+    # Level 2 (DEDUP_HASH): Check hash, update if exists
+    if dedup_level == DEDUP_HASH:
         if existing_by_hash:
             updated = _update_document(existing_by_hash, document, session, update_hash=False, commit=commit)
-            logger.warning(
-                f"Replaced document {updated.id} (same content_hash: {document.content_hash[:16] if document.content_hash else 'N/A'}...)"
+            logger.info(
+                f"Updated document {updated.id} (same content_hash: {document.content_hash[:16] if document.content_hash else 'N/A'}...)"
             )
             return updated
         return None
-    
-    # Level 4: Overwrite same hash and same source_id, doc_id
-    if dedup_level == DEDUP_LEVEL_OVERWRITE_ALL:
-        if existing_by_id:
-            updated = _update_document(existing_by_id, document, session, update_hash=True, commit=commit)
-            logger.warning(
-                f"Replaced document {updated.id} "
-                f"(same source_id+doc_id: {document.source_id}/{document.doc_id})"
+
+    # Level 3 (DEDUP_IDENTITY_HASH): Check identity first, then hash
+    if dedup_level == DEDUP_IDENTITY_HASH:
+        if existing_by_identity:
+            updated = _update_document(existing_by_identity, document, session, update_hash=True, commit=commit)
+            logger.info(
+                f"Updated document {updated.id} "
+                f"(same identity: {document.source_id}/{document.doc_id}/{document.parser_id})"
             )
             return updated
         if existing_by_hash:
             updated = _update_document(existing_by_hash, document, session, update_hash=False, commit=commit)
-            logger.warning(
-                f"Replaced document {updated.id} (same content_hash: {document.content_hash[:16] if document.content_hash else 'N/A'}...)"
+            logger.info(
+                f"Updated document {updated.id} (same content_hash: {document.content_hash[:16] if document.content_hash else 'N/A'}...)"
             )
             return updated
         return None
-    
+
     # Unknown level - default to insert
-    logger.warning(f"Unknown deduplication level {dedup_level}, proceeding with insert")
+    logger.warning(f"Unknown deduplication level: {dedup_level}, defaulting to insert")
     return None
 
 
@@ -244,29 +236,29 @@ def _compute_hash(document: Document) -> None:
     document.content_hash = hashlib.sha256(content).hexdigest()
 
 
-def add(
+def add_parsed(
     data: Union[Document, Dict[str, Any]],
     *,
     dedup_level: Optional[int] = None,
     session: Optional[Any] = None,
 ) -> Document:
-    """Add a new document to the database.
+    """Add a pre-built document to the database (low-level helper).
 
     Usage:
         ```python
         # Add from dict (recommended)
-        doc = add({
+        doc = add_parsed({
             "source_id": "mu2e-docdb",
             "source_type": "application/pdf",
             "text": "Content...",
         })
-        
+
         # Add Document object
         doc_obj = Document.from_dict({...})
-        doc = add(doc_obj)
+        doc = add_parsed(doc_obj)
         
         # With custom deduplication level
-        doc = add(data, dedup_level=4)
+        doc = add_parsed(data, dedup_level=4)
         ```
 
     Args:
@@ -359,32 +351,25 @@ def add(
     return document
 
 
-def add_many(
+def add_parsed_many(
     documents: List[Document],
     *,
     dedup_level: Optional[int] = None,
     session: Optional[Any] = None,
 ) -> List[Document]:
-    """Add multiple documents to the database.
-    
-    Usage:
-        ```python
-        from kb_mcp.kb import add_many
-        
-        docs = add_many([doc1, doc2, doc3])
-        
-        # With custom deduplication level
-        docs = add_many([doc1, doc2, doc3], dedup_level=4)
-        ```
+    """Add multiple pre-built documents to the database (low-level helper).
+
+    This function handles parent-child relationships: if a document has
+    meta["parent_doc_id"], it will link to the parent's ID. Parents must
+    appear before children in the list.
 
     Args:
         documents: List of Document objects
-        dedup_level: Deduplication level (0-4). If None, uses KB_DEDUPLICATION_LEVEL env var or default 2.
-                     - 0: Insert duplicates, no warnings
-                     - 1: Insert with warnings
-                     - 2: Overwrite if same hash (default)
-                     - 3: Same as 2 but with warnings for existing source_id, doc_id
-                     - 4: Overwrite same hash and same source_id, doc_id
+        dedup_level: Deduplication level (0-3). If None, uses KB_DEDUPLICATION_LEVEL env var or default 1.
+                     - 0 (DEDUP_NONE): Always insert
+                     - 1 (DEDUP_IDENTITY): Check (source_id, doc_id, parser_id) (DEFAULT)
+                     - 2 (DEDUP_HASH): Check content_hash
+                     - 3 (DEDUP_IDENTITY_HASH): Check both
         session: Optional database session. If provided, uses this session instead of creating a new one.
                 When a session is provided, the caller is responsible for committing the transaction.
 
@@ -399,227 +384,332 @@ def add_many(
 
     if not documents:
         raise ValueError("Cannot add empty list of documents")
-    
-    # Add each document
+
+    # Add each document sequentially
     result = []
-    # id mapping for parent-child relationships
-    ids = {} # doc_id -> id
+    # Track doc_id -> database ID mapping for parent-child relationships
+    ids = {}  # {doc_id: database_id}
     for doc in documents:
+        # If this document references a parent via meta["parent_doc_id"],
+        # link it to the parent's database ID (parent must have been added already)
         if "parent_doc_id" in doc.meta:
             parent_id = ids.get(doc.meta["parent_doc_id"])
             if parent_id:
                 doc.parent_id = parent_id
-        added_doc = add(doc, dedup_level=dedup_level, session=session)
+        added_doc = add_parsed(doc, dedup_level=dedup_level, session=session)
+        # Store this document's ID for potential child documents
         ids[added_doc.doc_id] = added_doc.id
         result.append(added_doc)
 
     return result
 
 
-def add_from_path(
+def add_document(
     file_path: Union[str, Path],
     *,
-    data: Optional[Dict[str, Any]] = None,
-    source_id: Optional[str] = None,
-    doc_id: Optional[str] = None,
-    parse_image_additional_doc: Optional[bool] = None,
-    parse_image_llm_description: Optional[bool] = None,
+    source_id: str,
+    doc_id: str,
+    parser_name: Optional[str] = None,
+    extract_images: Optional[bool] = None,
+    describe_images: Optional[bool] = None,
     dedup_level: Optional[int] = None,
+    force_reparse: bool = False,
+    copy_to_kb: bool = False,
+    skip_parse: bool = False,
+    uri: Optional[str] = None,
+    meta: Optional[Dict] = None,
     session: Optional[Any] = None,
-) -> List[Document]:
-    """Parse a file and add extracted document(s) to the knowledge base.
-    
-    This function parses a document file, extracts text and optionally images,
-    then adds all resulting documents to the knowledge base.
-    
-    Usage:
-        ```python
-        from kb_mcp.kb import add_from_path
-        
-        # Using data dict (recommended for complex cases)
-        docs = add_from_path(
-            "document.pdf",
-            data={
-                "source_id": "mu2e-docdb",
-                "doc_id": "1234",
-                "meta": {"author": "John Doe"}
-            }
-        )
-        
-        # Using individual parameters (simpler for basic cases)
-        docs = add_from_path(
-            "document.pdf",
-            source_id="mu2e-docdb"
-        )
-        
-        # With explicit doc_id
-        docs = add_from_path(
-            "document.pdf",
-            source_id="mu2e-docdb",
-            doc_id="1234"
-        )
-        
-        # With image extraction
-        docs = add_from_path(
-            "document.pdf",
-            data={"source_id": "mu2e-docdb", "doc_id": "1234"},
-            parse_image_additional_doc=True,
-            parse_image_llm_description=True
-        )
-        ```
-    
+) -> Dict[str, Any]:
+    """Add a document to the knowledge base from a file.
+
+    This function provides control over file storage and parsing:
+    - Optionally copy files to KB storage (data/sources/{source_id}/)
+    - Optionally only create RawDocument without parsing (skip_parse=True)
+
+
     Args:
-        file_path: Path to the document file to parse
-        data: Optional dictionary with document fields (same as Document.from_dict).
-              If provided, must include source_id. Can include doc_id, meta, source_type, etc.
-              If not provided, source_id must be passed as a separate parameter.
-        source_id: Source identifier. Required if data is not provided.
-                   If both data and source_id are provided, source_id overrides data['source_id'].
-        doc_id: Document ID within the source. If not provided:
-                - Uses data['doc_id'] if data is provided
-                - Otherwise uses filename stem
-        parse_image_additional_doc: If True, create separate Document objects for images.
-                                    If None, reads from PARSE_IMAGE_ADDITIONAL_DOC env var.
-        parse_image_llm_description: If True, generate LLM descriptions for images.
-                                     If None, reads from PARSE_IMAGE_LLM_DESCRIPTION env var.
-        dedup_level: Deduplication level (0-4). If None, uses KB_DEDUPLICATION_LEVEL env var or default 2.
-                     - 0: Insert duplicates, no warnings
-                     - 1: Insert with warnings
-                     - 2: Overwrite if same hash (default)
-                     - 3: Same as 2 but with warnings for existing source_id, doc_id
-                     - 4: Overwrite same hash and same source_id, doc_id
+        file_path: Path to the document file to ingest
+        source_id: Source identifier (required)
+        doc_id: Document ID within the source (required)
+        parser_name: Parser to use (e.g., "kb-mcp", "docling"). If None, uses KB_PARSER env var or "kb-mcp".
+        extract_images: If True, create separate Document objects for extracted images.
+                       If None, reads from PARSE_IMAGE_ADDITIONAL_DOC env var.
+        describe_images: If True, generate LLM descriptions for images using vision model.
+                        If None, reads from PARSE_IMAGE_LLM_DESCRIPTION env var.
+        dedup_level: Deduplication level (0-3). If None, uses KB_DEDUPLICATION_LEVEL env var or default 1.
+                     - 0 (DEDUP_NONE): Always insert
+                     - 1 (DEDUP_IDENTITY): Check (source_id, doc_id, parser_id) (DEFAULT)
+                     - 2 (DEDUP_HASH): Check content_hash
+                     - 3 (DEDUP_IDENTITY_HASH): Check both
+        force_reparse: If True, re-parse and update even if document already exists (default: False).
+        copy_to_kb: If True, copy file to data/sources/{source_id}/{source_id}-{doc_id}.{ext}.
+                    The file_path in RawDocument will be updated to the new location.
+        skip_parse: If True, only create RawDocument without parsing. Returns early with basic stats.
+        uri: Optional URI for the document (e.g., external URL). If not provided and copy_to_kb is False,
+             uses file:// URI. If copy_to_kb is True, uses the new file path.
+        meta: Optional metadata dictionary to attach to the RawDocument
         session: Optional database session. If provided, uses this session instead of creating a new one.
-    
+
     Returns:
-        List of created Document objects:
-        - First: Main document with extracted text
-        - Rest: Image documents (if parse_image_additional_doc=True)
-    
+        Dictionary with statistics:
+        - raw_document_id: ID of the RawDocument (UUID string)
+        - copied: bool (was file copied to KB storage?)
+        - copied_path: str (path where file was copied, if copied=True)
+        - parsed: bool (was file parsed?)
+        - document_ids: list of Document IDs (if parsed, otherwise empty list)
+        - num_documents: int (number of documents created, if parsed)
+        - skipped: bool (already exists and not force_reparse?)
+        - timing: dict (parsing timing info, if parsed)
+
     Raises:
         FileNotFoundError: If the file doesn't exist
-        ValueError: If source_id is not provided (neither in data nor as parameter)
+        ValueError: If source_id or doc_id is not provided
         NotImplementedError: If the document type is not supported
-    
+
     Example:
         ```python
-        from kb_mcp.kb import add_from_path
-        
-        # Using data dict with metadata
-        documents = add_from_path(
-            "/path/to/document.pdf",
-            data={
-                "source_id": "local",
-                "doc_id": "my-doc-123",
-                "meta": {"category": "research", "year": 2024}
-            }
+        # Simple document addition without file copying
+        result = add_document(
+            "/path/to/doc.pdf",
+            source_id="arxiv",
+            doc_id="2301.12345"
         )
-        
-        # Main document is documents[0]
-        # If images were extracted, they're in documents[1:]
+        print(result["num_documents"])
+
+        # Add with file copying to KB storage
+        result = add_document(
+            "/tmp/download.pdf",
+            source_id="arxiv",
+            doc_id="2301.12345",
+            copy_to_kb=True
+        )
+        print(result["copied_path"])  # data/sources/arxiv/arxiv-2301.12345.pdf
+
+        # Create RawDocument only, skip parsing
+        result = add_document(
+            "/path/to/large.pdf",
+            source_id="arxiv",
+            doc_id="2301.12345",
+            skip_parse=True
+        )
+        print(result["parsed"])  # False
         ```
     """
     # Ensure database is initialized (lazy loading)
     _ensure_db_initialized()
-    
+
+    # Validate required parameters
+    if not source_id:
+        raise ValueError("source_id is required")
+    if not doc_id:
+        raise ValueError("doc_id is required")
+
     file_path = Path(file_path)
-    
+
     if not file_path.exists():
         raise FileNotFoundError(f"File not found: {file_path}")
-    
-    # Import parse function (lazy import to avoid circular dependencies)
-    try:
-        from kb_mcp.parser import parse
-    except ImportError:
-        raise ImportError(
-            "Parser module not available. Please ensure all dependencies are installed."
-        )
-    
-    # Prepare data dict for parse()
-    # Start with provided data dict or empty dict
-    parse_data = dict(data) if data else {}
-    
-    # Override with individual parameters if provided
-    if source_id is not None:
-        parse_data["source_id"] = source_id
-    if doc_id is not None:
-        parse_data["doc_id"] = doc_id
-    
-    if "source_id" not in parse_data:
-        parse_data["source_id"] = "local"
-    
-    # Set doc_id if not provided
-    if "doc_id" not in parse_data:
-        parse_data["doc_id"] = file_path.stem
-    
-    # Parse the file - returns List[dict]
-    import time
+
+    # Initialize result dictionary
+    result = {
+        "raw_document_id": None,
+        "copied": False,
+        "copied_path": None,
+        "parsed": False,
+        "document_ids": [],
+        "num_documents": 0,
+        "skipped": False,
+        "timing": None,
+    }
+
+    # Handle file copying if requested
+    actual_file_path = file_path
+    if copy_to_kb:
+        from ...config import get_data_dir
+
+        # Create destination directory: data/sources/{source_id}/
+        data_dir = Path(get_data_dir())
+        dest_dir = data_dir / "sources" / source_id
+        dest_dir.mkdir(parents=True, exist_ok=True)
+
+        # Create standardized filename: {source_id}-{doc_id}.{ext}
+        file_ext = file_path.suffix
+        dest_filename = f"{source_id}-{doc_id}{file_ext}"
+        dest_path = dest_dir / dest_filename
+
+        # Copy file
+        import shutil
+        shutil.copy2(file_path, dest_path)
+        logger.info(f"Copied file to KB storage: {dest_path}")
+
+        actual_file_path = dest_path
+        result["copied"] = True
+        result["copied_path"] = str(dest_path)
+
+    # Calculate file hash and metadata
+    import hashlib
     import socket
-    
+    from ...parser.utils import detect_mime_type
+
+    with open(actual_file_path, "rb") as f:
+        file_content = f.read()
+        content_hash = hashlib.sha256(file_content).hexdigest()
+
+    file_stat = actual_file_path.stat()
+    file_size = file_stat.st_size
+    source_type = detect_mime_type(actual_file_path)
+
+    # Prepare URI
+    if uri is None:
+        uri = f"file://{actual_file_path.absolute()}"
+
+    # Prepare metadata
+    raw_meta = dict(meta) if meta else {}
+    raw_meta["filename"] = actual_file_path.name
+
+    # Get parser name from parameter or config
+    if parser_name is None:
+        from ...config import get_parser_config
+        parser_name = get_parser_config()['parser']
+
+    # Try to insert RawDocument - returns ID if inserted, None if already exists
+    with get_db_session(session) as db_session:
+        raw_doc_id = insert_raw_document(
+            source_id=source_id,
+            doc_id=doc_id,
+            file_path=str(actual_file_path.absolute()),
+            hostname=socket.gethostname(),
+            uri=uri,
+            source_type=source_type,
+            file_size=file_size,
+            content_hash=content_hash,
+            meta=raw_meta,
+            session=db_session,
+        )
+
+        result["raw_document_id"] = raw_doc_id
+
+        # If raw_doc_id is None, file already exists (same content_hash)
+        if raw_doc_id is None and not force_reparse:
+            # Get the existing RawDocument to retrieve its ID
+            from ..db_models import RawDocument
+            existing_raw = db_session.query(RawDocument).filter(
+                RawDocument.content_hash == content_hash
+            ).first()
+
+            if existing_raw:
+                result["raw_document_id"] = existing_raw.id
+                result["skipped"] = True
+
+                logger.info(
+                    f"File already processed (hash: {content_hash[:16]}...), "
+                    f"skipping (use force_reparse=True to re-parse)"
+                )
+
+                # Return early - file already processed, no need to re-parse
+                return result
+
+        # If skip_parse is True, return early (only created RawDocument)
+        if skip_parse:
+            logger.info(
+                f"Created RawDocument for {actual_file_path.name} "
+                f"(source_id={source_id}, doc_id={doc_id}), skipping parse"
+            )
+            return result
+
+        # Get or create parser record
+        parser = get_or_create_parser(
+            name=parser_name,
+            description=f"Parser: {parser_name}",
+            session=db_session,
+        )
+
+        # Commit to ensure raw_doc and parser have IDs
+        db_session.commit()
+
+    # If we get here, we need to parse the file
+    # Import parse function (lazy import to avoid circular dependencies)
+    from kb_mcp.parser import parse
+
+    # Prepare data for parsing
+    parse_data = {
+        "source_id": source_id,
+        "doc_id": doc_id,
+    }
+    if meta:
+        parse_data["meta"] = meta
+
+    # Parse the file - returns List[dict]
     doc_dicts = parse(
-        file_path,
+        actual_file_path,
         data=parse_data,
-        parse_image_additional_doc=parse_image_additional_doc,
-        parse_image_llm_description=parse_image_llm_description,
+        extract_images=extract_images,
+        describe_images=describe_images,
     )
-    
+
     if not doc_dicts:
-        raise ValueError(f"No documents extracted from {file_path}")
-    
+        raise ValueError(f"No documents extracted from {actual_file_path}")
+
     # Extract timing information from first document's meta (if available)
     timing_info = None
     if doc_dicts and isinstance(doc_dicts[0].get("meta"), dict):
         timing_info = doc_dicts[0]["meta"].pop("_parsing_timing", None)
-    
+
+    result["timing"] = timing_info
+
     # Convert dicts to Document objects
     documents = [Document.from_dict(doc_dict) for doc_dict in doc_dicts]
-    
-    # Add all documents to the database
-    result = add_many(documents, dedup_level=dedup_level, session=session)
-    
+
+    # Set raw_document_id and parser_id on all documents
+    for doc in documents:
+        doc.raw_document_id = raw_doc_id
+        doc.parser_id = parser.name
+
+    # Add all documents to the database (handles deduplication via dedup_level)
+    added_docs = add_parsed_many(documents, dedup_level=dedup_level, session=session)
+
+    # Update result with parsing information
+    result["parsed"] = True
+    result["document_ids"] = [doc.id for doc in added_docs] if added_docs else []
+    result["num_documents"] = len(added_docs) if added_docs else 0
+
     # Log parsing operation (one entry per file parse, linked to first document)
-    if result and session:
-        try:
-            from .embedding.db_models import ParsingLog
-            
-            # Calculate total text length across all extracted documents
-            total_text_length = sum(len(doc.text) if doc.text else 0 for doc in result)
-            
-            # Create one log entry for the file parse operation
-            # Link to first document if available
-            first_doc = result[0] if result else None
-            
-            # Use timing info from parse() if available, otherwise use 0
-            if timing_info:
-                text_extraction_time = timing_info.get("text_extraction_time_seconds", 0.0)
-                image_description_time = timing_info.get("image_description_time_seconds")
-                total_time = timing_info.get("total_time_seconds", text_extraction_time + (image_description_time or 0.0))
-            else:
-                # Fallback if timing info not available
-                text_extraction_time = 0.0
-                image_description_time = None
-                total_time = 0.0
-            
-            log_entry = ParsingLog(
-                document_id=first_doc.id if first_doc else None,
-                text_extraction_time_seconds=round(text_extraction_time, 3),
-                image_description_time_seconds=round(image_description_time, 3) if image_description_time is not None else None,
-                total_time_seconds=round(total_time, 3),
-                num_documents=len(result),
-                text_length=total_text_length,
-                hostname=socket.gethostname(),
-            )
-            session.add(log_entry)
-        except ImportError:
-            # ParsingLog might not be available if embedding module not installed
-            pass
-    
-    final_source_id = parse_data["source_id"]
-    final_doc_id = parse_data["doc_id"]
+    if added_docs and session:
+        from ..embedding.db_models import ParsingLog
+
+        # Calculate total text length across all extracted documents
+        total_text_length = sum(len(doc.text) if doc.text else 0 for doc in added_docs)
+
+        # Create one log entry for the file parse operation
+        # Link to first document if available
+        first_doc = added_docs[0] if added_docs else None
+
+        # Use timing info from parse() if available, otherwise use 0
+        if timing_info:
+            text_extraction_time = timing_info.get("text_extraction_time_seconds", 0.0)
+            image_description_time = timing_info.get("image_description_time_seconds")
+            total_time = timing_info.get("total_time_seconds", text_extraction_time + (image_description_time or 0.0))
+        else:
+            # Fallback if timing info not available
+            text_extraction_time = 0.0
+            image_description_time = None
+            total_time = 0.0
+
+        log_entry = ParsingLog(
+            document_id=first_doc.id if first_doc else None,
+            text_extraction_time_seconds=round(text_extraction_time, 3),
+            image_description_time_seconds=round(image_description_time, 3) if image_description_time is not None else None,
+            total_time_seconds=round(total_time, 3),
+            num_documents=len(added_docs),
+            text_length=total_text_length,
+            hostname=socket.gethostname(),
+        )
+        session.add(log_entry)
+
     logger.info(
-        f"Added {len(result)} document(s) from {file_path.name} "
-        f"(source_id={final_source_id}, doc_id={final_doc_id})"
+        f"Ingested {result['num_documents']} document(s) from {actual_file_path.name} "
+        f"(source_id={source_id}, doc_id={doc_id})"
     )
-    
+
     return result
 
 
@@ -765,48 +855,44 @@ def _get(
         
         # Apply Elasticsearch-style filters using the filter helper functions
         if es_filter:
-            try:
-                from .search.filters import get_filters_fallback
-                from sqlalchemy.orm import aliased
-                from sqlalchemy import and_
-                
-                # Create an alias for Document to use with filter functions
-                doc_alias = aliased(Document)
-                
-                # Get dialect name
-                dialect_name = session.bind.dialect.name if session.bind else None
-                
-                # Extract source_id and doc_type from filter_dict if not already set
-                filter_source_id = source_id if source_id else (filter_dict.get("source_id") if filter_dict else None)
-                filter_doc_type = filter_dict.get("doc_type") if filter_dict else None
-                
-                # Extract metadata filters (all keys except known filter keys)
-                items_to_iterate = filter_dict.items() if filter_dict else {}
-                metadata_kwargs = {k: v for k, v in items_to_iterate 
-                                  if k not in ["source_id", "doc_id", "doc_type", "source_type", "text_contains", "filter"]}
-                
-                # Build filters using the same helper as search
-                # Note: get_filters_fallback expects an alias, but we can pass Document directly
-                # and it will work since we're building conditions on the same model
-                filter_conditions = get_filters_fallback(
-                    Document,  # Pass Document class directly
-                    source_id=filter_source_id,
-                    doc_type=filter_doc_type,
-                    filter=es_filter,
-                    dialect_name=dialect_name,
-                    **metadata_kwargs
-                )
-                
-                # Apply all filter conditions
-                if filter_conditions:
-                    # Combine with existing query filters
-                    if len(filter_conditions) == 1:
-                        query = query.filter(filter_conditions[0])
-                    else:
-                        query = query.filter(and_(*filter_conditions))
-            except ImportError:
-                # If search module not available, skip Elasticsearch-style filters
-                logger.warning("Search module not available, skipping Elasticsearch-style filters")
+            from ..search.filters import get_filters_fallback
+            from sqlalchemy.orm import aliased
+            from sqlalchemy import and_
+
+            # Create an alias for Document to use with filter functions
+            doc_alias = aliased(Document)
+
+            # Get dialect name
+            dialect_name = session.bind.dialect.name if session.bind else None
+
+            # Extract source_id and doc_type from filter_dict if not already set
+            filter_source_id = source_id if source_id else (filter_dict.get("source_id") if filter_dict else None)
+            filter_doc_type = filter_dict.get("doc_type") if filter_dict else None
+
+            # Extract metadata filters (all keys except known filter keys)
+            items_to_iterate = filter_dict.items() if filter_dict else {}
+            metadata_kwargs = {k: v for k, v in items_to_iterate
+                              if k not in ["source_id", "doc_id", "doc_type", "source_type", "text_contains", "filter"]}
+
+            # Build filters using the same helper as search
+            # Note: get_filters_fallback expects an alias, but we can pass Document directly
+            # and it will work since we're building conditions on the same model
+            filter_conditions = get_filters_fallback(
+                Document,  # Pass Document class directly
+                source_id=filter_source_id,
+                doc_type=filter_doc_type,
+                filter=es_filter,
+                dialect_name=dialect_name,
+                **metadata_kwargs
+            )
+
+            # Apply all filter conditions
+            if filter_conditions:
+                # Combine with existing query filters
+                if len(filter_conditions) == 1:
+                    query = query.filter(filter_conditions[0])
+                else:
+                    query = query.filter(and_(*filter_conditions))
 
         # If count_only, return count early
         if count_only:
@@ -856,7 +942,7 @@ def _get(
 def get(
     identifier: str | None = None,
     *,
-    uuid: str | None = None,
+    uid: str | List[str] | None = None,
     source_id: str | None = None,
     doc_id: str | None = None,
     doc_type: str | None = None,
@@ -871,33 +957,36 @@ def get(
         ```python
         # UUID (positional, auto-detected)
         doc = get("550e8400-e29b-41d4-a716-446655440000")
-        
+
         # UUID (explicit keyword, guaranteed)
-        doc = get(uuid="550e8400-e29b-41d4-a716-446655440000")
-        
+        doc = get(uid="550e8400-e29b-41d4-a716-446655440000")
+
+        # Batch UUID retrieval (returns list)
+        docs = get(uid=["550e8400-...", "660f9511-...", "770g0622-..."])
+
         # Parse identifier: "source_id_doc_id" (split on "_")
         doc = get("mu2e-docdb_1234-doc1")
         # → source_id="mu2e-docdb", doc_id="1234-doc1"
-        
+
         # Parse identifier: just doc_id (no "_", not UUID)
         doc = get("1234-doc1")
         # → doc_id="1234-doc1"
-        
+
         # Explicit doc_id
         doc = get(doc_id="1234-doc1")
-        
+
         # Explicit source_id and doc_id
         doc = get(source_id="mu2e-docdb", doc_id="1234-doc1")
-        
+
         # Get all documents from a source
         docs = get(source_id="mu2e-docdb")
-        
+
         # Get all documents (empty query)
         docs = get()
-        
+
         # Use filter_dict for advanced filtering
         docs = get(filter_dict={"source_id": "mu2e-docdb", "doc_type": "text"})
-        
+
         # With limit and offset for pagination
         docs = get(source_id="mu2e-docdb", limit=10, offset=20)
         ```
@@ -907,7 +996,9 @@ def get(
                     - UUID (36 chars with dashes) → used as document UUID
                     - "source_id_doc_id" format → parsed (split on "_")
                     - Otherwise → treated as doc_id
-        uuid: Explicit UUID lookup (guaranteed, overrides identifier)
+        uid: Explicit UUID lookup. Can be:
+             - Single UUID string → returns single Document
+             - List of UUID strings → returns list of Documents (batch retrieval)
         source_id: Source identifier to filter by
         doc_id: Document ID within source to filter by
         filter_dict: Dictionary with filter criteria. Supported keys:
@@ -923,12 +1014,26 @@ def get(
 
     Returns:
         - Single Document if one match found
-        - list[Document] if multiple matches found
+        - list[Document] if multiple matches found (or if list of UUIDs provided)
         - None if no matches found
     """
+    # Handle batch UUID retrieval
+    if isinstance(uid, list):
+        # Batch retrieval by list of UUIDs
+        with get_db_session(session) as session:
+            query = session.query(Document).filter(Document.id.in_(uid))
+            docs = query.all()
+
+            # If no session was provided, detach the documents
+            if session is None:
+                for doc in docs:
+                    session.expunge(doc)
+
+            return docs if docs else None
+
     result = _get(
         identifier=identifier,
-        uuid=uuid,
+        uuid=uid if isinstance(uid, str) else None,
         source_id=source_id,
         doc_id=doc_id,
         doc_type=doc_type,
@@ -1069,6 +1174,7 @@ def add_source(
             meta=meta or {},
         )
         source = session.merge(source)
+        session.flush()  # Ensure the merge is persisted before refresh
         # Refresh to ensure all attributes are loaded
         session.refresh(source)
 
@@ -1076,6 +1182,196 @@ def add_source(
     return source
 
 
+def get_or_create_parser(
+    name: str,
+    description: str | None = None,
+    meta: Dict[str, Any] | None = None,
+    session: Optional[Any] = None,
+) -> "Parser":
+    """Get or create a parser by name.
+
+    Args:
+        name: Parser framework name (e.g., "kb-mcp", "docling", "adaParse", "manual")
+        description: Description of the parser framework
+        meta: Additional metadata (URL, capabilities, etc.)
+        session: Optional database session. If provided, uses this session instead of creating a new one.
+                When a session is provided, the caller is responsible for committing the transaction.
+
+    Returns:
+        Parser object (created or retrieved)
+    """
+    from ..db_models import Parser
+
+    _ensure_db_initialized()
+
+    with get_db_session(session) as session:
+        # Query first to see if parser exists
+        parser = session.query(Parser).filter(Parser.name == name).first()
+        
+        if parser:
+            # Update existing parser if fields are provided
+            if description is not None:
+                parser.description = description
+            if meta is not None:
+                parser.meta = meta or {}
+        else:
+            # Create new parser
+            parser = Parser(
+                name=name,
+                description=description,
+                meta=meta or {},
+            )
+            session.add(parser)
+            session.flush()  # Flush to get the ID
+        
+        # Refresh to ensure all attributes are loaded
+        session.refresh(parser)
+
+    logger.info(f"Added/updated parser: {name}")
+    return parser
+
+
+def get_or_create_raw_document(
+    source_id: str,
+    doc_id: str,
+    file_path: str | None = None,
+    hostname: str | None = None,
+    uri: str | None = None,
+    source_type: str | None = None,
+    file_size: int | None = None,
+    content_hash: str | None = None,
+    meta: Dict[str, Any] | None = None,
+    session: Optional[Any] = None,
+) -> "RawDocument":
+    """Get or create a raw document record.
+
+    If a RawDocument with the same content_hash exists, returns it.
+    Otherwise, creates a new RawDocument.
+
+    Args:
+        source_id: Source identifier
+        doc_id: Document identifier within the source
+        file_path: Local filesystem path (e.g., "/data/files/doc.pdf")
+        hostname: Hostname where file_path is valid (e.g., "compute-node-01")
+        uri: Original source URI (typically a URL)
+        source_type: MIME type (e.g., "application/pdf")
+        file_size: File size in bytes
+        content_hash: Hash of file content (required for deduplication)
+        meta: Additional metadata
+        session: Optional database session. If provided, uses this session instead of creating a new one.
+                When a session is provided, the caller is responsible for committing the transaction.
+
+    Returns:
+        RawDocument object (created or retrieved)
+
+    Raises:
+        ValueError: If content_hash is not provided
+    """
+    from ..db_models import RawDocument
+
+    _ensure_db_initialized()
+
+    if not content_hash:
+        raise ValueError("content_hash is required for raw document deduplication")
+
+    with get_db_session(session) as session:
+        # Check if raw document with same hash already exists
+        existing = session.query(RawDocument).filter(
+            RawDocument.content_hash == content_hash
+        ).first()
+
+        if existing:
+            logger.info(f"Found existing raw document with hash: {content_hash[:16]}...")
+            return existing
+
+        # Create new raw document
+        raw_doc = RawDocument(
+            source_id=source_id,
+            doc_id=doc_id,
+            file_path=file_path,
+            hostname=hostname,
+            uri=uri,
+            source_type=source_type or "application/octet-stream",
+            file_size=file_size,
+            content_hash=content_hash,
+            meta=meta or {},
+        )
+        session.add(raw_doc)
+        session.flush()  # Get the ID without committing
+        session.refresh(raw_doc)
+
+        logger.info(f"Created raw document: {raw_doc.id} (hash: {content_hash[:16]}...)")
+        return raw_doc
+
+
+def insert_raw_document(
+    source_id: str,
+    doc_id: str,
+    file_path: str | None = None,
+    hostname: str | None = None,
+    uri: str | None = None,
+    source_type: str | None = None,
+    file_size: int | None = None,
+    content_hash: str | None = None,
+    meta: Dict[str, Any] | None = None,
+    session: Optional[Any] = None,
+) -> str | None:
+    """Insert a raw document record if it doesn't already exist (by content_hash).
+
+    Args:
+        source_id: Source identifier
+        doc_id: Document identifier within the source
+        file_path: Local filesystem path (e.g., "/data/files/doc.pdf")
+        hostname: Hostname where file_path is valid (e.g., "compute-node-01")
+        uri: Original source URI (typically a URL)
+        source_type: MIME type (e.g., "application/pdf")
+        file_size: File size in bytes
+        content_hash: Hash of file content (required for deduplication)
+        meta: Additional metadata
+        session: Optional database session. If provided, uses this session instead of creating a new one.
+                When a session is provided, the caller is responsible for committing the transaction.
+
+    Returns:
+        RawDocument ID if inserted, None if already exists
+
+    Raises:
+        ValueError: If content_hash is not provided
+    """
+    from ..db_models import RawDocument
+
+    _ensure_db_initialized()
+
+    if not content_hash:
+        raise ValueError("content_hash is required for raw document deduplication")
+
+    with get_db_session(session) as session:
+        # Check if raw document with same hash already exists
+        existing = session.query(RawDocument).filter(
+            RawDocument.content_hash == content_hash
+        ).first()
+
+        if existing:
+            logger.info(f"Raw document already exists with hash: {content_hash[:16]}...")
+            return None
+
+        # Create new raw document
+        raw_doc = RawDocument(
+            source_id=source_id,
+            doc_id=doc_id,
+            file_path=file_path,
+            hostname=hostname,
+            uri=uri,
+            source_type=source_type or "application/octet-stream",
+            file_size=file_size,
+            content_hash=content_hash,
+            meta=meta or {},
+        )
+        session.add(raw_doc)
+        session.flush()  # Get the ID without committing
+        session.refresh(raw_doc)
+
+        logger.info(f"Inserted raw document: {raw_doc.id} (hash: {content_hash[:16]}...)")
+        return raw_doc.id
 
 
 def delete_document(
@@ -1102,23 +1398,153 @@ def delete_document(
         if not document:
             raise ValueError(f"Document {document_id} not found")
 
-        # Get chunk count before deletion (if embedding module available)
-        chunk_count = 0
-        try:
-            from .embedding import get_chunks
-            chunks = get_chunks(document_id=document_id)
-            chunk_count = len(chunks) if chunks else 0
-        except (ImportError, Exception):
-            pass
+        # Get chunk count before deletion
+        from ..embedding import get_chunks
+        chunks = get_chunks(document_id=document_id)
+        chunk_count = len(chunks) if chunks else 0
 
-        # Delete the document (chunks and embeddings will be cascade deleted)
+        # Manually delete chunks first to avoid foreign key constraint issues
+        from ..embedding.db_models import Chunk, ChunkEmbeddingLog
+        session.query(Chunk).filter(Chunk.document_id == document_id).delete(synchronize_session=False)
+        session.flush()
+        
+        # Manually delete chunk embedding logs to avoid foreign key constraint issues
+        session.query(ChunkEmbeddingLog).filter(ChunkEmbeddingLog.document_id == document_id).delete(synchronize_session=False)
+        session.flush()
+
+        # Delete the document (embeddings will be cascade deleted via chunks)
         session.delete(document)
+        session.commit()
 
         return {
             "deleted": True,
             "document_id": document_id,
             "chunk_count": chunk_count,
         }
+
+
+def get_raw_document(
+    document_id: str,
+    session: Optional[Any] = None,
+) -> Optional[Any]:
+    """Get a RawDocument by Document ID.
+    
+    This function looks up a Document by its ID, then retrieves the associated RawDocument
+    using the Document's raw_document_id field.
+    
+    Args:
+        document_id: UUID of the Document
+        session: Optional database session (creates new one if not provided)
+    
+    Returns:
+        RawDocument object if found, None if Document not found or has no raw_document_id
+    
+    Example:
+        ```python
+        from kb_mcp.kb.documents import get_raw_document
+        
+        # Get raw document for a document
+        raw_doc = get_raw_document("550e8400-e29b-41d4-a716-446655440000")
+        if raw_doc:
+            print(f"Raw document: {raw_doc.id}")
+            print(f"File path: {raw_doc.file_path}")
+        else:
+            print("No raw document found for this document")
+        ```
+    """
+    from ..db_models import RawDocument, Document
+    
+    with get_db_session(session) as session:
+        # Get the document
+        document = session.query(Document).filter(Document.id == document_id).first()
+        if not document:
+            return None
+        
+        # Check if document has a raw_document_id
+        if not document.raw_document_id:
+            return None
+        
+        # Get the raw document
+        raw_doc = session.query(RawDocument).filter(
+            RawDocument.id == document.raw_document_id
+        ).first()
+        
+        return raw_doc
+
+
+def delete_raw_document(
+    raw_document_id: str,
+    delete_linked_documents: bool = False,
+    session: Optional[Any] = None,
+) -> Dict[str, Any]:
+    """Delete a raw document and return information about what was affected.
+    
+    By default, deleting a RawDocument will set raw_document_id to NULL in related Documents,
+    but will not delete the Documents themselves. If delete_linked_documents=True, all linked
+    documents will also be deleted (along with their chunks and embeddings).
+    
+    Args:
+        raw_document_id: UUID of the raw document to delete
+        delete_linked_documents: If True, also delete all documents linked to this raw document
+        session: Optional database session (creates new one if not provided)
+    
+    Returns:
+        Dictionary with:
+        - deleted: bool - Whether the raw document was deleted
+        - raw_document_id: str - The raw document ID
+        - document_count: int - Number of documents that referenced this raw document
+        - deleted_documents: int - Number of documents deleted (if delete_linked_documents=True)
+    
+    Raises:
+        ValueError: If raw document not found
+    """
+    from ..db_models import RawDocument, Document
+    from ..embedding.db_models import Chunk, ChunkEmbeddingLog
+    
+    with get_db_session(session) as session:
+        raw_doc = session.query(RawDocument).filter(RawDocument.id == raw_document_id).first()
+        if not raw_doc:
+            raise ValueError(f"RawDocument {raw_document_id} not found")
+
+        # Get documents that reference this raw document
+        linked_documents = session.query(Document).filter(
+            Document.raw_document_id == raw_document_id
+        ).all()
+        document_count = len(linked_documents)
+        
+        deleted_documents = 0
+        
+        # If requested, delete all linked documents first
+        if delete_linked_documents and linked_documents:
+            for doc in linked_documents:
+                # Manually delete chunks first
+                session.query(Chunk).filter(Chunk.document_id == doc.id).delete(synchronize_session=False)
+                session.flush()
+                
+                # Manually delete chunk embedding logs
+                session.query(ChunkEmbeddingLog).filter(ChunkEmbeddingLog.document_id == doc.id).delete(synchronize_session=False)
+                session.flush()
+                
+                # Delete the document
+                session.delete(doc)
+                deleted_documents += 1
+            
+            session.flush()
+
+        # Delete the raw document
+        session.delete(raw_doc)
+        session.commit()
+
+        result = {
+            "deleted": True,
+            "raw_document_id": raw_document_id,
+            "document_count": document_count,
+        }
+        
+        if delete_linked_documents:
+            result["deleted_documents"] = deleted_documents
+        
+        return result
 
 
 def get_options() -> Dict[str, Any]:

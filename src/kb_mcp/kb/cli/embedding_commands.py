@@ -5,29 +5,16 @@ import sys
 
 from .. import get
 from ..database import get_db_session
-
-# Import embedding functions (may not be available if dependencies not installed)
-try:
-    from ..embedding import (
-        get_chunk_strategies, get_chunks, drop_chunks, get_embedding_names,
-        embed_chunk, embed_chunks, chunk_and_embed, get_embeddings, get_embedding_vector,
-        drop_embedding, chunk_document
-    )
-    from ..embedding.db_models import Chunk, ChunkEmbeddingLog, ParsingLog
-    EMBEDDING_AVAILABLE = True
-except ImportError:
-    EMBEDDING_AVAILABLE = False
-    Chunk = None
-    ChunkEmbeddingLog = None
-    ParsingLog = None
+from ..embedding import (
+    get_chunk_strategies, get_chunks, drop_chunks, get_embedding_names,
+    embed_chunk, embed_chunks, chunk_and_embed, get_embeddings, get_embedding_vector,
+    drop_embedding, chunk_document
+)
+from ..embedding.db_models import Chunk, ChunkEmbeddingLog, ParsingLog
 
 
 def cmd_chunks_list(args):
     """List all chunk strategies."""
-    if not EMBEDDING_AVAILABLE:
-        print("Error: Embedding module not available. Install with: pip install tiktoken")
-        sys.exit(1)
-
     strategies = get_chunk_strategies()
 
     if args.json:
@@ -51,10 +38,6 @@ def cmd_chunks_list(args):
 
 def cmd_chunks_get(args):
     """Get chunks for a document."""
-    if not EMBEDDING_AVAILABLE:
-        print("Error: Embedding module not available. Install with: pip install tiktoken")
-        sys.exit(1)
-
     chunks = get_chunks(
         document_id=args.document_id,
         chunk_strategy=args.strategy,
@@ -90,11 +73,7 @@ def cmd_chunks_get(args):
 
 def cmd_chunks_drop(args):
     """Drop chunks for a document."""
-    if not EMBEDDING_AVAILABLE:
-        print("Error: Embedding module not available. Install with: pip install tiktoken")
-        sys.exit(1)
-
-    # Get confirmation unless --yes is specified
+# Get confirmation unless --yes is specified
     if not args.yes:
         strategy_msg = f" with strategy '{args.strategy}'" if args.strategy else ""
         confirmation = input(f"Drop all chunks{strategy_msg} for document {args.document_id}? [y/N]: ")
@@ -113,11 +92,7 @@ def cmd_chunks_drop(args):
 
 def cmd_chunks_chunk(args):
     """Chunk a document."""
-    if not EMBEDDING_AVAILABLE:
-        print("Error: Embedding module not available. Install with: pip install tiktoken")
-        sys.exit(1)
-
-    # Get the document
+# Get the document
     doc = get(uuid=args.document_id)
     if not doc:
         print(f"Error: Document {args.document_id} not found")
@@ -157,10 +132,6 @@ def cmd_chunks_chunk(args):
 
 def cmd_embedding_list(args):
     """List all embedding configurations."""
-    if not EMBEDDING_AVAILABLE:
-        print("Error: Embedding module not available.")
-        sys.exit(1)
-
     configs = get_embedding_names()
 
     if args.json:
@@ -188,10 +159,6 @@ def cmd_embedding_list(args):
 
 def cmd_embed(args):
     """Chunk and embed a document (top-level command)."""
-    if not EMBEDDING_AVAILABLE:
-        print("Error: Embedding module not available.")
-        sys.exit(1)
-
     try:
         # Get the document
         from ..db_models import Document
@@ -228,10 +195,6 @@ def cmd_embed(args):
 
 def cmd_embedding_get(args):
     """Get embeddings for a chunk or document."""
-    if not EMBEDDING_AVAILABLE:
-        print("Error: Embedding module not available.")
-        sys.exit(1)
-
     try:
         if args.chunk_id:
             # Get embeddings for a specific chunk
@@ -302,10 +265,6 @@ def cmd_embedding_get(args):
 
 def cmd_embedding_embed(args):
     """Embed a specific chunk."""
-    if not EMBEDDING_AVAILABLE:
-        print("Error: Embedding module not available.")
-        sys.exit(1)
-
     try:
         with get_db_session() as session:
             chunk = session.query(Chunk).filter(Chunk.id == args.chunk_id).first()
@@ -331,10 +290,6 @@ def cmd_embedding_embed(args):
 
 def cmd_embedding_drop(args):
     """Drop embeddings for a specific chunk."""
-    if not EMBEDDING_AVAILABLE:
-        print("Error: Embedding module not available.")
-        sys.exit(1)
-
     try:
         count = drop_embedding(args.chunk_id, embedding_name=args.embedding_name)
         print(f"Dropped {count} embedding(s) for chunk {args.chunk_id}")
@@ -347,10 +302,6 @@ def cmd_embedding_drop(args):
 
 def cmd_embedding_embed_all(args):
     """Generate embeddings for all chunks that don't have them yet."""
-    if not EMBEDDING_AVAILABLE:
-        print("Error: Embedding module not available.")
-        sys.exit(1)
-
     try:
         from ..tools import embed_all
 

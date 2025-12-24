@@ -10,8 +10,8 @@ from .utils import detect_mime_type, get_parser
 def parse(
     file_path: Optional[str | Path] = None,
     data: Optional[dict] = None,
-    parse_image_additional_doc: Optional[bool] = None,
-    parse_image_llm_description: Optional[bool] = None,
+    extract_images: Optional[bool] = None,
+    describe_images: Optional[bool] = None,
 ) -> List[dict]:
     """Parse a document and return list of document dictionaries.
     
@@ -29,15 +29,15 @@ def parse(
               If file_path is not provided: must include source_id, doc_id, and binary.
               If not provided and file_path is given, creates minimal dicts with auto-generated IDs.
               Can include 'source_type' (MIME type) - if not provided, will be auto-detected.
-        parse_image_additional_doc: If True, create separate Document objects for images.
-                                    If None, reads from PARSE_IMAGE_ADDITIONAL_DOC env var.
-        parse_image_llm_description: If True, generate LLM descriptions for images.
-                                     Configuration is read from env vars:
-                                     - PARSE_IMAGE_DESCRIPTION_MODEL (model name)
-                                     - PARSE_IMAGE_DESCRIPTION_NUMWORKERS
-                                     - OPENAI_BASE_URL
-                                     - OPENAI_API_KEY
-                                     If None, reads from PARSE_IMAGE_LLM_DESCRIPTION env var.
+        extract_images: If True, create separate Document objects for images.
+                       If None, reads from PARSE_IMAGE_ADDITIONAL_DOC env var.
+        describe_images: If True, generate LLM descriptions for images.
+                        Configuration is read from env vars:
+                        - PARSE_IMAGE_DESCRIPTION_MODEL (model name)
+                        - PARSE_IMAGE_DESCRIPTION_NUMWORKERS
+                        - OPENAI_BASE_URL
+                        - OPENAI_API_KEY
+                        If None, reads from PARSE_IMAGE_LLM_DESCRIPTION env var.
     
     Returns:
         List of dictionaries (can be converted to Documents):
@@ -167,15 +167,15 @@ def parse(
         # Check if we need to extract images (for additional docs or descriptions)
         from ..config import get_parser_config
         parser_config = get_parser_config()
-        if parse_image_additional_doc is None:
+        if extract_images is None:
             create_additional_docs = parser_config['image_additional_doc']
         else:
-            create_additional_docs = parse_image_additional_doc
+            create_additional_docs = extract_images
 
-        if parse_image_llm_description is None:
+        if describe_images is None:
             generate_llm_descriptions = parser_config['image_llm_description']
         else:
-            generate_llm_descriptions = parse_image_llm_description
+            generate_llm_descriptions = describe_images
         
         # Extract text and images (if enabled)
         import time
@@ -231,7 +231,7 @@ def parse(
             doc_data["doc_type"] = "text"
         
         # Store timing information in meta for retrieval
-        # This allows add_from_path to extract timing without breaking the API
+        # This allows ingest() to extract timing without breaking the API
         if "meta" not in doc_data:
             doc_data["meta"] = {}
         doc_data["meta"]["_parsing_timing"] = {

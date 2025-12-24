@@ -11,35 +11,6 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from .db_models import Base
 
-# Import embedding models to ensure they're registered with Base.metadata
-# This ensures database tables are created when init_db() is called
-try:
-    from .embedding.db_models import Chunk, EmbeddingConfig  # noqa: F401
-except ImportError:
-    # Embedding module may not be available if dependencies aren't installed
-    pass
-
-# Import search models to ensure they're registered with Base.metadata
-try:
-    from .search.db_models import SearchLog  # noqa: F401
-except ImportError:
-    # Search module may not be available if dependencies aren't installed
-    pass
-
-# Import eval models to ensure they're registered with Base.metadata
-try:
-    from .eval.db_models import (  # noqa: F401
-        EvalGeneration,
-        EvalDataset,
-        EvalAudit,
-        EvalRun,
-        EvalResult,
-        EvalRetrievedDocument,
-    )
-except ImportError:
-    # Eval module may not be available
-    pass
-
 logger = logging.getLogger(__name__)
 
 
@@ -259,21 +230,19 @@ def init_db(create_tables: bool = True) -> None:
     Args:
         create_tables: If True, create all tables. If False, only verify connection.
     """
-    # Ensure eval models are imported before creating tables
+    # Ensure all models are imported before creating tables
     # This ensures they're registered with Base.metadata
-    try:
-        from .eval.db_models import (  # noqa: F401
-            EvalGeneration,
-            EvalDataset,
-            EvalAudit,
-            EvalRun,
-            EvalResult,
-            EvalRetrievedDocument,
-        )
-    except ImportError:
-        # Eval module may not be available
-        pass
-    
+    from .embedding.db_models import Chunk, EmbeddingConfig  # noqa: F401
+    from .search.db_models import SearchLog  # noqa: F401
+    from .eval.db_models import (  # noqa: F401
+        EvalGeneration,
+        EvalDataset,
+        EvalAudit,
+        EvalRun,
+        EvalResult,
+        EvalRetrievedDocument,
+    )
+
     engine = get_engine()
     database_url = get_database_url()
 

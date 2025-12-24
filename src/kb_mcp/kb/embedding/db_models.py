@@ -710,14 +710,9 @@ class Chunk(Base):
             embedding = chunk.embed()
             ```
         """
-        try:
-            from .embedding import embed_chunk
-        except ImportError:
-            raise ImportError(
-                "Embedding module not available. Please ensure all dependencies are installed."
-            )
+        from .embedding import embed_chunk
 
-        # Use object's session if attached, otherwise None
+# Use object's session if attached, otherwise None
         from sqlalchemy.inspection import inspect as sqlalchemy_inspect
         obj_state = sqlalchemy_inspect(self)
         if session is None:
@@ -765,14 +760,9 @@ class Chunk(Base):
         if not self.id:
             return {}
 
-        try:
-            from .embedding import get_embeddings
-        except ImportError:
-            raise ImportError(
-                "Embedding module not available. Please ensure all dependencies are installed."
-            )
+        from .embedding import get_embeddings
 
-        # get_embeddings creates its own session, so we just call it directly
+# get_embeddings creates its own session, so we just call it directly
         return get_embeddings(self.id, embedding_name=embedding_name)
 
     def get_embedding_vector(
@@ -800,14 +790,9 @@ class Chunk(Base):
         if not self.id:
             return None
 
-        try:
-            from .embedding import get_embedding_vector
-        except ImportError:
-            raise ImportError(
-                "Embedding module not available. Please ensure all dependencies are installed."
-            )
+        from .embedding import get_embedding_vector
 
-        # get_embedding_vector creates its own session, so we just call it directly
+# get_embedding_vector creates its own session, so we just call it directly
         return get_embedding_vector(self.id, embedding_name=embedding_name)
 
 

@@ -74,16 +74,20 @@ class Source(ABC):
         item: Dict[str, Any],
         output_dir: Path,
         session: Any,
-    ) -> Optional[List[Any]]:
+    ) -> Dict[str, Any]:
         """Process a single item and add it to the knowledge base.
-        
+
         Args:
             item: Item dictionary from fetch_items()
             output_dir: Directory to save downloaded files
             session: Database session for adding documents
-            
+
         Returns:
-            List of Document objects added, or None if processing failed
+            Dictionary with processing results. Required fields:
+            - document_ids (list[str]): List of document IDs created (empty if failed)
+            - num_documents (int): Number of documents created
+            - parsed (bool): Whether parsing occurred
+            - error (str|None): Error message if processing failed, None if successful
         """
         pass
     
@@ -100,7 +104,7 @@ class Source(ABC):
         Args:
             query: Optional query string to filter items
             max_results: Optional maximum number of items to process
-            output_dir: Directory to save downloaded files (default: data/local/{source_id})
+            output_dir: Directory to save downloaded files (default: data/sources/{source_id})
             auto_embed: If True, automatically chunk and embed all documents for this source
                        that don't have chunks yet (default: True)
             auto_summarize: If True, automatically generate summaries for all documents for this source
@@ -112,7 +116,7 @@ class Source(ABC):
         # Setup output directory
         if output_dir is None:
             data_dir = get_data_dir()
-            output_dir = Path(data_dir) / "local" / self.source_id
+            output_dir = Path(data_dir) / "sources" / self.source_id
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         
@@ -170,8 +174,6 @@ class Source(ABC):
                     f"{summarize_result['embedded']} chunks embedded, "
                     f"{summarize_result['errors']} errors"
                 )
-            except ImportError as e:
-                logger.warning(f"Summary module not available, skipping auto-summarize: {e}")
             except Exception as e:
                 logger.error(f"Error during auto-summarize: {e}", exc_info=True)
         
@@ -185,8 +187,6 @@ class Source(ABC):
                     f"Embedding complete: {embed_result['chunked']} chunked, "
                     f"{embed_result['skipped']} skipped, {embed_result['errors']} errors"
                 )
-            except ImportError as e:
-                logger.warning(f"Embedding module not available, skipping auto-embed: {e}")
             except Exception as e:
                 logger.error(f"Error during auto-embed: {e}", exc_info=True)
 
@@ -197,49 +197,60 @@ class Source(ABC):
         items: List[Dict[str, Any]],
         output_dir: Path,
         max_results: Optional[int] = None,
-    ) -> List[Any]:
-        """Process items sequentially in a single thread."""
+    ) -> List[str]:
+        """Process items sequentially in a single thread.
+
+        Returns:
+            List of document IDs that were created
+        """
         from ..kb import get_db_session
-        
-        documents = []
+
+        document_ids = []
         processed = 0
         errors = 0
-        
+
         # Commit after each document to ensure progress is saved
         # auto_commit=True will handle final cleanup (no-op since everything is already committed)
         with get_db_session() as session:
             for i, item in enumerate(items):
                 if max_results and processed >= max_results:
                     break
-                
+
                 item_id = item.get("id", f"item-{i}")
                 logger.info(f"Processing item {i+1}/{len(items)}: {item_id}")
-                
+
                 try:
-                    doc_list = self.process_item(item, output_dir, session)
-                    if doc_list:
-                        documents.extend(doc_list)
-                        processed += 1
-                        
-                        # Commit after each document to ensure progress is saved
-                        # This is slower but safer - if an error occurs, we don't lose all progress
-                        session.commit()
-                    else:
-                        logger.warning(f"Item {item_id} returned no documents")
+                    result = self.process_item(item, output_dir, session)
+
+                    # Check if there was an error
+                    if result.get("error"):
+                        errors += 1
+                        logger.warning(f"Item {item_id} failed: {result['error']}")
+                        session.rollback()
+                        continue
+
+                    # Success - add document IDs and commit
+                    document_ids.extend(result.get("document_ids", []))
+                    processed += 1
+
+                    # Commit after each document to ensure progress is saved
+                    # This is slower but safer - if an error occurs, we don't lose all progress
+                    session.commit()
+
                 except Exception as e:
                     errors += 1
                     logger.error(f"Error processing item {item_id}: {e}", exc_info=True)
                     # Rollback on error to avoid leaving partial data
                     session.rollback()
                     continue
-                
+
                 # Be polite - delay between requests
                 if self.delay > 0:
                     time.sleep(self.delay)
-        
+
         if errors > 0:
             logger.warning(f"Encountered {errors} error(s) during processing")
-        
-        return documents
+
+        return document_ids
     
 

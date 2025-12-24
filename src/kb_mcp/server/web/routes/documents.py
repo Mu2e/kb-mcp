@@ -394,7 +394,7 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
 
         try:
             t0 = time.time()
-            doc = get(uuid=doc_id)
+            doc = get(uid=doc_id)
             timings['get_document'] = time.time() - t0
             timings['get_document_since_start'] = time.time() - t_start
             if not doc:
@@ -572,7 +572,7 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
                 try:
                     timings['get_parent_since_last'] = time.time() - t0
                     t0 = time.time()
-                    parent_doc = get(uuid=doc.parent_id)
+                    parent_doc = get(uid=doc.parent_id)
                     timings['get_parent'] = time.time() - t0
                     timings['get_parent_since_start'] = time.time() - t_start
                     if parent_doc:
@@ -1347,7 +1347,7 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
         from ....kb import get
         
         try:
-            doc = get(uuid=doc_id)
+            doc = get(uid=doc_id)
             if not doc:
                 return HTMLResponse(
                     html_templates.base_template(
@@ -1435,7 +1435,7 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
         from ....kb import get, delete_document
         
         try:
-            doc = get(uuid=doc_id)
+            doc = get(uid=doc_id)
             if not doc:
                 return HTMLResponse(
                     html_templates.base_template(
@@ -1516,7 +1516,7 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
         from ....kb import get
         
         try:
-            doc = get(uuid=doc_id)
+            doc = get(uid=doc_id)
             if not doc:
                 return HTMLResponse(
                     html_templates.base_template(
@@ -1897,7 +1897,7 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
             uri = f"local://uploads/{final_filename}"
 
             # Ensure source exists
-            from ....kb import add_source, add_from_path
+            from ....kb import add_source, ingest, Document
             
             # Create source if it doesn't exist (using add_source which handles upsert)
             add_source(
@@ -1933,123 +1933,60 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
                 # If parse_images is enabled, also enable LLM descriptions by default
                 parse_image_llm_description = parse_images
 
-                # Use a session to ensure parsing log is created and all operations happen in same transaction
-                from ....kb import get_db_session
+                # Extract meta and uri from data_dict
+                doc_id_value = data_dict.get("doc_id")
+                if not doc_id_value:
+                    # Use filename stem as doc_id if not provided
+                    doc_id_value = file_path.stem
+
+                # Use the new ingest() function which handles the full workflow
+                result = ingest(
+                    str(file_path),
+                    source_id=source_id,
+                    doc_id=doc_id_value,
+                    uri=uri,
+                    meta=data_dict.get("meta"),
+                    extract_images=parse_images,
+                    describe_images=parse_image_llm_description,
+                    copy_to_kb=False,  # Files already in upload directory
+                    generate_summary=generate_summary,
+                    chunk_and_embed=chunk_and_embed,
+                    create_summary_chunks=create_summary_chunks,
+                    chunk_strategy=chunk_strategy if chunk_strategy else None,
+                )
+
+                # Get result information
+                doc_count = result["num_documents"]
+                doc_ids = result["document_ids"]
+
+                # Query documents for building success message
+                from ....kb import get_db_session, get
                 with get_db_session() as session:
-                    docs = add_from_path(
-                        str(file_path),
-                        data=data_dict,
-                        parse_image_additional_doc=parse_images,
-                        parse_image_llm_description=parse_image_llm_description,
-                        session=session,
-                    )
-                    # Don't commit yet - we have more operations to do in this session
+                    docs = get(uid=doc_ids, session=session)
+                    if not isinstance(docs, list):
+                        docs = [docs] if docs else []
 
-                    doc_count = len(docs)
-
-                    # Separate text and image documents
-                    text_documents = [doc for doc in docs if doc.doc_type != "image"]
-                    image_documents = [doc for doc in docs if doc.doc_type == "image"]
-
-                    # Step 1: Generate summaries for text documents (if requested)
-                    if generate_summary and text_documents:
-                        try:
-                            for doc in text_documents:
-                                try:
-                                    doc.generate_summary(
-                                        include_title=True,
-                                        include_gist=True,
-                                        include_summary=True,
-                                    )
-                                    logger.info(f"Generated summary for document {doc.id}")
-                                except Exception as e:
-                                    logger.warning(f"Could not generate summary for document {doc.id}: {e}")
-                        except Exception as e:
-                            logger.warning(f"Error generating summaries: {e}", exc_info=True)
-
-                    # Step 2: Chunk and embed if requested, track chunk counts
-                    chunk_counts = {}
-                    if chunk_and_embed:
-                        try:
-                            from ....kb.embedding import chunk_and_embed as chunk_and_embed_func
-
-                            # Process text documents with regular strategy
-                            if text_documents:
-                                for doc in text_documents:
-                                    try:
-                                        # Chunk with default strategy
-                                        chunks = chunk_and_embed_func(
-                                            doc,
-                                            chunk_strategy=chunk_strategy if chunk_strategy else None,
-                                            session=session,
-                                        )
-                                        chunk_counts[doc.id] = len(chunks) if chunks else 0
-
-                                        # Also create summary chunks if requested and summary exists
-                                        if create_summary_chunks and doc.summary:
-                                            try:
-                                                summary_chunks = chunk_and_embed_func(
-                                                    doc,
-                                                    chunk_strategy="summary",
-                                                    session=session,
-                                                )
-                                                # Add summary chunk count to total
-                                                if summary_chunks:
-                                                    chunk_counts[doc.id] = chunk_counts.get(doc.id, 0) + len(summary_chunks)
-                                            except Exception as e:
-                                                logger.warning(f"Could not create summary chunks for document {doc.id}: {e}")
-
-                                    except ValueError as e:
-                                        # Document might not have text, skip it
-                                        logger.debug(f"Skipping chunk_and_embed for document {doc.id}: {e}")
-                                        chunk_counts[doc.id] = 0
-                                    except Exception as e:
-                                        logger.warning(f"Error chunking document {doc.id}: {e}")
-                                        chunk_counts[doc.id] = 0
-
-                            # Process image documents with image strategy
-                            if image_documents and create_image_chunks:
-                                for doc in image_documents:
-                                    try:
-                                        chunks = chunk_and_embed_func(
-                                            doc,
-                                            chunk_strategy="image",
-                                            session=session,
-                                        )
-                                        chunk_counts[doc.id] = len(chunks) if chunks else 0
-                                    except Exception as e:
-                                        logger.warning(f"Could not create image chunks for document {doc.id}: {e}")
-                                        chunk_counts[doc.id] = 0
-
-                        except Exception as e:
-                            logger.warning(f"Error chunking and embedding documents: {e}", exc_info=True)
-                            # Don't fail the upload if chunking/embedding fails
-
-                    # Build success message with links to documents (while still in session)
-                    doc_ids = [doc.id for doc in docs]
+                    # Build success message with links to documents
                     doc_links = []
                     for doc in docs:
                         chunk_info = ""
-                        if chunk_and_embed and doc.id in chunk_counts:
-                            chunk_count = chunk_counts[doc.id]
-                            if chunk_count > 0:
-                                chunk_info = f" ({chunk_count} chunk{'s' if chunk_count != 1 else ''})"
+                        if chunk_and_embed and result.get("num_chunks", 0) > 0:
+                            # Note: We don't have per-document chunk counts from ingest(),
+                            # but we can indicate that chunking happened
+                            chunk_info = " (chunked)"
                         doc_links.append(f'<a href="/web/document/{doc.id}">Document {doc.id}</a> ({doc.doc_type}){chunk_info}')
 
                     # Security: Escape filename in success message to prevent XSS
                     safe_filename = html_escape(filename)
-                    chunk_status = " and chunked/embedded" if chunk_and_embed else ""
-                    if doc_count == 1:
+                    chunk_status = f" and chunked/embedded ({result['num_chunks']} chunks)" if chunk_and_embed and result.get("num_chunks", 0) > 0 else ""
+                    summary_status = f" with summaries" if generate_summary and result.get("num_summaries", 0) > 0 else ""
+
+                    if doc_count == 1 and docs:
                         doc = docs[0]
-                        chunk_info = ""
-                        if chunk_and_embed and doc.id in chunk_counts:
-                            chunk_count = chunk_counts[doc.id]
-                            if chunk_count > 0:
-                                chunk_info = f" ({chunk_count} chunk{'s' if chunk_count != 1 else ''})"
-                        success_message = f'Upload successful! File "{safe_filename}" added as <a href="/web/document/{doc.id}">Document {doc.id}</a> ({doc.doc_type}){chunk_info}{chunk_status}.'
+                        success_message = f'Upload successful! File "{safe_filename}" added as <a href="/web/document/{doc.id}">Document {doc.id}</a> ({doc.doc_type}){summary_status}{chunk_status}.'
                     else:
                         doc_list = ", ".join(doc_links)
-                        success_message = f'Upload successful! File "{safe_filename}" created {doc_count} documents: {doc_list}{chunk_status}.'
+                        success_message = f'Upload successful! File "{safe_filename}" created {doc_count} documents: {doc_list}{summary_status}{chunk_status}.'
 
                     # Redirect to knowledge base explorer with success message and filter to upload source
                     from urllib.parse import urlencode
@@ -2058,9 +1995,6 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
                         "message": success_message,
                         "uploaded_docs": ",".join(doc_ids)
                     }
-
-                    # Commit all changes to database
-                    session.commit()
                 redirect_url = f"/web?{urlencode(redirect_params)}"
                 
                 return RedirectResponse(url=redirect_url, status_code=303)

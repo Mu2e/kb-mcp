@@ -3,24 +3,12 @@
 import json
 import sys
 
-# Import search function (may not be available if dependencies not installed)
-try:
-    from ..search import search, get_similar
-    from ..logs import get_search_logs
-    SEARCH_AVAILABLE = True
-except ImportError:
-    SEARCH_AVAILABLE = False
-    search = None
-    get_similar = None
-    get_search_logs = None
+from ..search import search, get_similar
+from ..logs import get_search_logs
 
 
 def cmd_search(args):
     """Search for documents using vector similarity."""
-    if not SEARCH_AVAILABLE:
-        print("Error: Search module not available.")
-        sys.exit(1)
-
     try:
         # Parse filter if provided
         filter_dict = None
@@ -94,10 +82,6 @@ def cmd_search(args):
 
 def cmd_similar(args):
     """Find documents similar to a given chunk or document."""
-    if not SEARCH_AVAILABLE:
-        print("Error: Search module not available.")
-        sys.exit(1)
-
     try:
         # Parse filter if provided
         filter_dict = None
@@ -175,10 +159,6 @@ def cmd_similar(args):
 
 def cmd_search_logs(args):
     """List recent search logs."""
-    if not SEARCH_AVAILABLE:
-        print("Error: Search module not available.")
-        sys.exit(1)
-
     try:
         logs = get_search_logs(
             limit=args.limit,

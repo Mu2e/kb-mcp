@@ -84,7 +84,7 @@ class BaseEmbedder(ABC):
         """
         from ..database import get_db_session
         from ..database import get_db_session
-        from .db_models import EmbeddingConfig, create_embedding_table
+        from .db_models import EmbeddingConfig, create_embedding_table, get_embedding_table_name
         
         if not chunks:
             return []
@@ -103,7 +103,9 @@ class BaseEmbedder(ABC):
         
         # Generate embeddings using the abstract method
         try:
+            logger.info(f"Generating embeddings for {len(texts)} text(s) using {self.provider}/{self.model}")
             embeddings = self.generate_embeddings(texts, batch_size=batch_size, **kwargs)
+            logger.info(f"Successfully generated {len(embeddings)} embedding(s)")
         except Exception as e:
             logger.error(f"Error generating embeddings: {e}")
             raise
@@ -143,18 +145,33 @@ class BaseEmbedder(ABC):
                 )
                 session.add(config)
                 session.flush()
+                # Commit the config before creating the table to avoid transaction locks
+                if should_close:
+                    session.commit()
                 logger.info(f"Created embedding config: {short_name} ({self.provider}/{self.model}, dim={self.embedding_dimension})")
             # If config exists, use it as-is (don't update)
             
             # Get or create embedding table (each EmbeddingConfig corresponds to a table)
             embedding_table = create_embedding_table(config.short_name, config.dimension)
             
-            # Ensure table exists in database (create if it doesn't exist)
-            # checkfirst=True efficiently checks existence before creating
-            embedding_table.create(bind=session.bind, checkfirst=True)
-            
-            # Get dialect name for later use
+            # Ensure pgvector extension is enabled (for PostgreSQL)
             dialect_name = session.bind.dialect.name
+            if dialect_name == 'postgresql':
+                from sqlalchemy import text
+                try:
+                    result = session.execute(text("SELECT * FROM pg_extension WHERE extname = 'vector'")).first()
+                    if not result:
+                        session.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+                        session.commit()
+                except Exception as e:
+                    logger.warning(f"Could not check/enable pgvector extension: {e}")
+            
+            # Create table if it doesn't exist (checkfirst=True handles existence check)
+            try:
+                embedding_table.create(bind=session.bind, checkfirst=True)
+            except Exception as e:
+                logger.error(f"Error creating embedding table: {e}", exc_info=True)
+                raise
             
             # Create IVFFlat index for PostgreSQL with pgvector (for efficient vector similarity search)
             if dialect_name == 'postgresql':

@@ -12,8 +12,8 @@ Three ways to add documents to your knowledge base:
 ### Single File
 
 ```bash
-# Add a document
-kb add my-paper.pdf --source-id papers --doc-id paper-001
+# Ingest a document
+kb ingest my-paper.pdf --source-id papers --doc-id paper-001
 
 # Chunk and embed it for search
 kb embed papers_paper-001
@@ -22,9 +22,9 @@ kb embed papers_paper-001
 ### Batch Upload
 
 ```bash
-# Add all PDFs from a directory
+# Ingest all PDFs from a directory
 for file in docs/*.pdf; do
-  kb add "$file" --source-id archive
+  kb ingest "$file" --source-id archive
 done
 
 # Chunk and embed all documents that don't have chunks yet
