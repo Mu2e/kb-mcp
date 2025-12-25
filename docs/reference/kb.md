@@ -1,6 +1,6 @@
 # KB Module API
 
-The `kb` module provides the core knowledge base functionality for document storage, chunking, embedding, and semantic search.
+The `kb` module provides the core knowledge base functionality for document storage, chunking, embedding, and search.
 
 ## Overview
 
@@ -8,7 +8,7 @@ The KB module is organized into several sub-modules:
 
 - **kb** - Core document storage and retrieval (functions listed below)
 - **[kb.embedding](kb/embedding.md)** - Chunking and embedding operations (see also [batch operations](kb/batch.md))
-- **[kb.search](kb/search.md)** - Semantic search functionality
+- **[kb.search](kb/search.md)** - Hybrid search combining semantic (vector) and full-text search
 - **[kb.eval](kb/evaluation.md)** - Evaluation and benchmarking (see also [evaluation guide](../guides/evaluation.md))
 
 See [database schema](../guides/database.md) for details on data models and storage.

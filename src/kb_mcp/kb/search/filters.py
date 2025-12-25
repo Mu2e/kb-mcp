@@ -1,8 +1,9 @@
 """Shared filter utilities for Elasticsearch-style filtering."""
 
-from typing import Any, Dict, List, Optional, Callable, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Set
 from sqlalchemy import func, and_, or_
 from sqlalchemy.dialects import postgresql
+from sqlalchemy.orm import aliased
 
 
 def _parse_elasticsearch_filter(
@@ -12,7 +13,7 @@ def _parse_elasticsearch_filter(
 ) -> Any:
     """
     Parse an Elasticsearch-style filter query and convert it to SQLAlchemy filter conditions.
-    
+
     Supports Elasticsearch query DSL syntax:
     - term: {"term": {"field": "value"}} - exact match
     - terms: {"terms": {"field": ["value1", "value2"]}} - match any value (OR)
@@ -24,16 +25,16 @@ def _parse_elasticsearch_filter(
       - Pattern match with * (zero or more chars) and ? (single char) wildcards
       - Supports both shorthand and full Elasticsearch structure
     - bool: {"bool": {"must": [...], "should": [...], "must_not": [...]}} - boolean logic
-    
+
     Args:
         doc_alias: SQLAlchemy aliased Document model (needed to reference the meta column)
         filter_dict: Elasticsearch-style filter dictionary
         dialect_name: Database dialect name ("postgresql" or "sqlite") - determines which
                      JSON operator to use (JSONB for PostgreSQL, json_extract for SQLite)
-    
+
     Returns:
         SQLAlchemy filter condition(s)
-    
+
     Note:
         `doc_alias` is needed to build SQLAlchemy column expressions (e.g., `doc_alias.meta[field]`).
         It's passed through recursive calls for nested bool queries, even though it's only
@@ -42,23 +43,23 @@ def _parse_elasticsearch_filter(
     # Internal helper to build metadata filters (inlined for simplicity)
     def build_meta_filter(field: str, value: Any, operator: str = "==") -> Any:
         return _build_metadata_filter(doc_alias, field, value, dialect_name, operator)
-    
+
     # Internal recursive helper that uses the builder
     def _parse_recursive(filter_dict: Dict[str, Any]) -> Any:
         if not isinstance(filter_dict, dict):
             raise ValueError(f"Filter must be a dictionary, got {type(filter_dict)}")
-        
+
         # Handle bool query
         if "bool" in filter_dict:
             bool_clauses = filter_dict["bool"]
             conditions = []
-            
+
             # must: AND conditions (all must match)
             if "must" in bool_clauses:
                 must_conditions = [_parse_recursive(clause) for clause in bool_clauses["must"]]
                 if must_conditions:
                     conditions.append(and_(*must_conditions))
-            
+
             # should: OR conditions (at least one must match)
             if "should" in bool_clauses:
                 should_conditions = [_parse_recursive(clause) for clause in bool_clauses["should"]]
@@ -75,7 +76,7 @@ def _parse_elasticsearch_filter(
                         # For simplicity, we'll use OR (at least one) for now
                         # TODO: Implement proper minimum_should_match logic
                         conditions.append(or_(*should_conditions))
-            
+
             # must_not: NOT conditions
             if "must_not" in bool_clauses:
                 must_not_conditions = [_parse_recursive(clause) for clause in bool_clauses["must_not"]]
@@ -83,51 +84,51 @@ def _parse_elasticsearch_filter(
                     # NOT (A OR B) = (NOT A) AND (NOT B)
                     not_conditions = [~cond for cond in must_not_conditions]
                     conditions.append(and_(*not_conditions))
-            
+
             if not conditions:
                 return None
-            
+
             # Combine all bool conditions with AND
             return and_(*conditions) if len(conditions) > 1 else conditions[0]
-        
+
         # Handle term query: exact match
         if "term" in filter_dict:
             term_query = filter_dict["term"]
             if not isinstance(term_query, dict) or len(term_query) != 1:
                 raise ValueError("term query must have exactly one field")
-            
+
             field, value = next(iter(term_query.items()))
             return build_meta_filter(field, value, operator="==")
-        
+
         # Handle terms query: match any value (OR)
         if "terms" in filter_dict:
             terms_query = filter_dict["terms"]
             if not isinstance(terms_query, dict) or len(terms_query) != 1:
                 raise ValueError("terms query must have exactly one field")
-            
+
             field, values = next(iter(terms_query.items()))
             if not isinstance(values, list):
                 raise ValueError("terms query value must be a list")
-            
+
             # Create OR condition for multiple values
             conditions = [build_meta_filter(field, value, operator="==") for value in values]
             return or_(*conditions) if len(conditions) > 1 else conditions[0]
-        
+
         # Handle range query
         if "range" in filter_dict:
             range_query = filter_dict["range"]
             if not isinstance(range_query, dict) or len(range_query) != 1:
                 raise ValueError("range query must have exactly one field")
-            
+
             field, range_params = next(iter(range_query.items()))
             if not isinstance(range_params, dict):
                 raise ValueError("range parameters must be a dictionary")
-            
+
             # Check if this is a direct Document column (insert_time, creating_time, update_time)
             # vs a metadata field
             direct_columns = {"insert_time", "creating_time", "update_time"}
             is_direct_column = field in direct_columns
-            
+
             conditions = []
             if "gte" in range_params:
                 if is_direct_column:
@@ -149,30 +150,30 @@ def _parse_elasticsearch_filter(
                     conditions.append(getattr(doc_alias, field) < range_params["lt"])
                 else:
                     conditions.append(build_meta_filter(field, range_params["lt"], operator="<"))
-            
+
             if not conditions:
                 raise ValueError("range query must have at least one range parameter (gte, gt, lte, lt)")
-            
+
             return and_(*conditions) if len(conditions) > 1 else conditions[0]
-        
+
         # Handle match query: contains/substring match (LIKE '%value%')
         if "match" in filter_dict:
             match_query = filter_dict["match"]
             if not isinstance(match_query, dict) or len(match_query) != 1:
                 raise ValueError("match query must have exactly one field")
-            
+
             field, value = next(iter(match_query.items()))
             return _build_metadata_filter(doc_alias, field, f"%{value}%", dialect_name, operator="LIKE")
-        
+
         # Handle wildcard query: pattern match with * and ? wildcards
         if "wildcard" in filter_dict:
             wildcard_query = filter_dict["wildcard"]
             if not isinstance(wildcard_query, dict) or len(wildcard_query) != 1:
                 raise ValueError("wildcard query must have exactly one field")
-            
+
             field, pattern_or_dict = next(iter(wildcard_query.items()))
-            
-            # Support both shorthand {"wildcard": {"field": "pattern"}} 
+
+            # Support both shorthand {"wildcard": {"field": "pattern"}}
             # and full form {"wildcard": {"field": {"value": "pattern"}}}
             if isinstance(pattern_or_dict, dict):
                 # Full Elasticsearch form: {"wildcard": {"field": {"value": "pattern"}}}
@@ -182,13 +183,13 @@ def _parse_elasticsearch_filter(
             else:
                 # Shorthand form: {"wildcard": {"field": "pattern"}}
                 pattern = pattern_or_dict
-            
+
             # Convert Elasticsearch wildcards (*, ?) to SQL wildcards (%, _)
             sql_pattern = pattern.replace("*", "%").replace("?", "_")
             return _build_metadata_filter(doc_alias, field, sql_pattern, dialect_name, operator="LIKE")
-        
+
         raise ValueError(f"Unknown filter type: {filter_dict.keys()}. Supported: term, terms, range, match, wildcard, bool")
-    
+
     return _parse_recursive(filter_dict)
 
 
@@ -201,14 +202,14 @@ def _build_metadata_filter(
 ) -> Any:
     """
     Build a SQLAlchemy filter for a metadata field.
-    
+
     Args:
         doc_alias: SQLAlchemy aliased Document model
         field: Metadata field name
         value: Value to compare against
         dialect_name: Database dialect name ("postgresql" or "sqlite")
         operator: Comparison operator ("==", ">=", ">", "<=", "<", "LIKE")
-    
+
     Returns:
         SQLAlchemy filter condition
     """
@@ -218,7 +219,7 @@ def _build_metadata_filter(
     else:
         # SQLite json_extract
         field_expr = func.json_extract(doc_alias.meta, f"$.{field}")
-    
+
     # Convert value to appropriate type for comparison
     if operator == "==":
         return field_expr == str(value)
@@ -247,10 +248,10 @@ def get_filters_fallback(
 ) -> List[Any]:
     """
     Build SQLAlchemy filter conditions for document queries (SQLite fallback).
-    
+
     Supports both simple kwargs (for backward compatibility) and Elasticsearch-style
     filter queries for complex filtering.
-    
+
     Args:
         doc_alias: SQLAlchemy aliased Document model (or Document class)
         source_id: Optional filter by source ID
@@ -260,10 +261,10 @@ def get_filters_fallback(
         **kwargs: Simple metadata filters (for backward compatibility)
                   - Direct field names are treated as metadata filters
                   - Example: author="John" filters meta.author == "John"
-    
+
     Returns:
         List of SQLAlchemy filter conditions (can be combined with and_() or or_())
-    
+
     Examples:
         ```python
         # Simple filters (backward compatible)
@@ -291,30 +292,30 @@ def get_filters_fallback(
         ```
     """
     filters = []
-    
+
     if source_id:
         filters.append(doc_alias.source_id == source_id)
-    
+
     if doc_type:
         filters.append(doc_alias.doc_type == doc_type)
-    
+
     # Parse Elasticsearch-style filter if provided
     if filter:
         es_filter = _parse_elasticsearch_filter(doc_alias, filter, dialect_name)
         if es_filter is not None:
             filters.append(es_filter)
-    
+
     # Handle simple kwargs (backward compatibility)
     # Direct field names are treated as metadata filters
     for key, value in kwargs.items():
         # Skip reserved parameters
         if key in ("session", "explain_analyse", "embedding_name", "max_results"):
             continue
-        
+
         # Treat as metadata filter
         filter_cond = _build_metadata_filter(doc_alias, key, value, dialect_name, operator="==")
         filters.append(filter_cond)
-    
+
     return filters
 
 
@@ -325,41 +326,38 @@ def get_filters_pgvector(
 ) -> Tuple[str, Dict[str, Any]]:
     """
     Build PostgreSQL SQL filter from Elasticsearch-style filter using unified parser.
-    
+
     This uses _parse_elasticsearch_filter to build SQLAlchemy expressions,
     then compiles them to PostgreSQL SQL strings with named parameters.
-    
+
     Args:
         doc_alias: SQLAlchemy aliased Document model
         filter_dict: Elasticsearch-style filter dictionary
         param_counter: Starting counter for parameter names
-    
+
     Returns:
         Tuple of (SQL WHERE clause fragment, parameter dictionary)
     """
     # Parse to SQLAlchemy expression using unified parser
     filter_expr = _parse_elasticsearch_filter(doc_alias, filter_dict, dialect_name="postgresql")
-    
+
     if filter_expr is None:
         return "", {}
-    
+
     # Compile to SQL string with named parameters
-    from sqlalchemy.dialects import postgresql
-    from sqlalchemy.sql import compiler
-    
     # Compile the expression
     compiled = filter_expr.compile(
         dialect=postgresql.dialect(),
         compile_kwargs={"literal_binds": False}
     )
-    
+
     # Get SQL string (SQLAlchemy uses %s for positional parameters)
     sql = str(compiled)
-    
+
     # Extract parameters and convert to named parameters
     params = {}
     counter = param_counter
-    
+
     # SQLAlchemy stores parameters in compiled.params
     # The order matches the %s placeholders in the SQL
     if hasattr(compiled, 'params'):
@@ -374,7 +372,7 @@ def get_filters_pgvector(
             param_values = list(compiled.params.values())[:param_count] if param_count > 0 else []
         else:
             param_values = list(compiled.params) if compiled.params else []
-        
+
         # Replace each %s with a named parameter
         for value in param_values:
             param_name = f"filter_{counter}"
@@ -382,6 +380,92 @@ def get_filters_pgvector(
             # Replace first occurrence of %s
             sql = sql.replace('%s', f':{param_name}', 1)
             counter += 1
-    
+
     return sql, params
 
+
+def build_where_clause(
+    source_id: Optional[str] = None,
+    doc_type: Optional[str] = None,
+    chunking_strategy: Optional[str] = None,
+    filter: Optional[Dict[str, Any]] = None,
+    skip_kwargs: Optional[Set[str]] = None,
+    **kwargs
+) -> Tuple[str, Dict[str, Any]]:
+    """
+    Build a WHERE clause for PostgreSQL search queries.
+
+    This helper consolidates the common pattern of building WHERE clauses
+    for both pgvector and fulltext search.
+
+    Args:
+        source_id: Optional filter by source ID
+        doc_type: Optional filter by document type
+        chunking_strategy: Optional filter by chunking strategy
+        filter: Optional Elasticsearch-style filter query (dict)
+        skip_kwargs: Set of kwarg keys to skip (e.g., {"session", "explain_analyse"})
+        **kwargs: Simple metadata filters (backward compatible)
+
+    Returns:
+        Tuple of (WHERE clause SQL string, parameter dictionary)
+
+    Example:
+        ```python
+        where_sql, params = build_where_clause(
+            source_id="arxiv",
+            chunking_strategy="tokens",
+            filter={"range": {"date": {"gte": "2020"}}},
+            skip_kwargs={"session", "max_results"},
+            author="John"
+        )
+        # Returns:
+        # ("d.source_id = :source_id AND c.chunk_strategy = :chunking_strategy AND ...",
+        #  {"source_id": "arxiv", "chunking_strategy": "tokens", ...})
+        ```
+    """
+    from ..db_models import Document
+
+    where_parts: List[str] = []
+    filter_params_dict: Dict[str, Any] = {}
+
+    # Handle source_id filter
+    if source_id:
+        where_parts.append("d.source_id = :source_id")
+        filter_params_dict["source_id"] = source_id
+
+    # Handle doc_type filter
+    if doc_type:
+        where_parts.append("d.doc_type = :doc_type")
+        filter_params_dict["doc_type"] = doc_type
+
+    # Handle chunking_strategy filter
+    if chunking_strategy:
+        where_parts.append("c.chunk_strategy = :chunking_strategy")
+        filter_params_dict["chunking_strategy"] = chunking_strategy
+
+    # Handle Elasticsearch-style filter using unified parser
+    if filter:
+        # Create doc_alias for filter parser (matches 'd' in SQL query)
+        doc_alias = aliased(Document, name="d")
+        filter_sql, filter_params = get_filters_pgvector(doc_alias, filter)
+        if filter_sql:
+            where_parts.append(filter_sql)
+            filter_params_dict.update(filter_params)
+
+    # Handle simple kwargs (backward compatibility)
+    if skip_kwargs is None:
+        skip_kwargs = set()
+
+    for key, value in kwargs.items():
+        # Skip reserved parameters
+        if key in skip_kwargs:
+            continue
+
+        # Treat as metadata filter (term query)
+        param_name = f"meta_{key}"
+        where_parts.append(f"d.meta->>'{key}' = :{param_name}")
+        filter_params_dict[param_name] = str(value)
+
+    where_clause_sql = " AND ".join(where_parts) if where_parts else "TRUE"
+
+    return where_clause_sql, filter_params_dict

@@ -37,6 +37,7 @@ def get_closest(
     filter: Optional[Dict[str, Any]] = None,
     session=None,
     explain_analyse: bool = False,
+    max_chunks_per_doc: Optional[int] = None,
     **kwargs
 ) -> Dict[str, Any]:
     """
@@ -113,6 +114,7 @@ def get_closest(
                 explain_analyse=explain_analyse,
                 embedding_time=0.0,  # No embedding time when using embedding directly
                 start_time=search_start,
+                max_chunks_per_doc=max_chunks_per_doc,
                 **kwargs
             )
         else:
@@ -127,6 +129,7 @@ def get_closest(
                 filter=filter,
                 embedding_time=0.0,  # No embedding time when using embedding directly
                 start_time=search_start,
+                max_chunks_per_doc=max_chunks_per_doc,
                 **kwargs
             )
 

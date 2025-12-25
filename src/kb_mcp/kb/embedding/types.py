@@ -3,7 +3,7 @@
 import logging
 from typing import Any, Optional
 
-from sqlalchemy import TypeDecorator, JSON
+from sqlalchemy import TypeDecorator, JSON, Text
 
 logger = logging.getLogger(__name__)
 
@@ -73,4 +73,26 @@ class Vector(TypeDecorator):
         except (TypeError, ValueError):
             logger.warning(f"Could not convert embedding value to list: {type(value)}")
             return value
+
+
+class TSVector(TypeDecorator):
+    """
+    Custom type for PostgreSQL full-text search vectors (tsvector).
+
+    Uses PostgreSQL's TSVECTOR type when available,
+    falls back to Text for SQLite (full-text search won't work, but won't break).
+    """
+
+    impl = Text
+    cache_ok = True
+
+    def load_dialect_impl(self, dialect):
+        """Load the appropriate type based on the database dialect."""
+        if dialect.name == "postgresql":
+            # Use TSVECTOR for PostgreSQL
+            from sqlalchemy.dialects.postgresql import TSVECTOR
+            return dialect.type_descriptor(TSVECTOR)
+        else:
+            # SQLite or other databases - use Text (placeholder, won't be functional)
+            return dialect.type_descriptor(Text())
 

@@ -21,7 +21,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import relationship
 
 from ..db_models import Base, Document, JSONB
-from .types import Vector
+from .types import Vector, TSVector
 
 
 def sanitize_table_name(name: str) -> str:
@@ -534,11 +534,11 @@ class SummaryLog(Base):
 
 class Chunk(Base):
     """Table storing text chunks from documents.
-    
+
     Attributes:
         id (str): Primary key (UUID stored as string).
         document_id (str): Foreign key to the documents table.
-        text (str): Text content of the chunk. 
+        text (str): Text content of the chunk.
         chunk_index (int): Position in document (0-based) per chunk strategy.
         char_start_index (int): Character position where chunk starts. Optional.
         char_end_index (int): Character position where chunk ends. Optional.
@@ -547,6 +547,7 @@ class Chunk(Base):
         chunk_strategy (str): Foreign key to the chunk_strategies table.
         meta (dict): Metadata - flexible JSON field for additional metadata.
         created_time (datetime): Timestamp when the chunk was created.
+        text_search_vector (tsvector): Full-text search vector (PostgreSQL only). Auto-populated by trigger.
     """
     __tablename__ = "chunks"
 
@@ -600,6 +601,13 @@ class Chunk(Base):
         index=True,
     )
 
+    # Full-text search vector (PostgreSQL only)
+    # This will be populated by a database trigger that combines:
+    # - chunk.text (weight 'B')
+    # - document.title or document.title_gen (weight 'A')
+    # - document.summary (weight 'D')
+    text_search_vector = Column(TSVector, nullable=True)
+
     # Relationships
     document = relationship("Document", backref="chunks")
     strategy_config = relationship("ChunkStrategy", backref="chunks")
@@ -608,6 +616,8 @@ class Chunk(Base):
     __table_args__ = (
         Index("idx_chunks_document_id_index", "document_id", "chunk_index"),
         Index("idx_chunks_document_id_start", "document_id", "char_start_index"),
+        # GIN index for full-text search (PostgreSQL only)
+        Index("idx_chunks_text_search_vector", "text_search_vector", postgresql_using="gin"),
     )
 
     def __repr__(self) -> str:

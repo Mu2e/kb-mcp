@@ -20,6 +20,7 @@ class SearchLog(Base):
 
     Attributes:
         id (str): Primary key (UUID stored as string).
+        search_type (str): Type of search ("semantic", "fulltext", "hybrid").
         query (str): Search query.
         embedding_name (str): Foreign key to the embedding_configs table.
         max_results (int): Maximum number of results to return.
@@ -29,14 +30,18 @@ class SearchLog(Base):
         filter_params (dict): Filter parameters (stored as JSON).
         metadata_filters (dict): Simple key=value filters (stored as JSON).
         results (list): Results - stored as JSON list of dicts with document_id and chunk_ids.
-        best_similarity (float): Best similarity score across all results.
+        best_similarity (float): Best similarity score across all results (semantic/hybrid).
+        best_rank (float): Best rank score across all results (fulltext/hybrid).
         total_results (int): Total number of results.
         time_search_total (float): Total search time in seconds.
         time_embedding (float): Embedding generation of the search query time in seconds.
         time_deduplication (float): Deduplication of results time in seconds.
         time_db_fetch (float): Database fetch time in seconds.
-        time_distance_calc (float): Distance calculation time in seconds (of sqlite is used)
-        time_sort (float): Sorting of results by simialirity time in seconds.
+        time_distance_calc (float): Distance calculation time in seconds (if sqlite is used).
+        time_sort (float): Sorting of results by similarity time in seconds.
+        time_semantic (float): Time for semantic search in hybrid mode.
+        time_fulltext (float): Time for fulltext search in hybrid mode.
+        time_fusion (float): Time for RRF fusion in hybrid mode.
         created_time (datetime): Timestamp when the search was performed.
     """
 
@@ -50,9 +55,12 @@ class SearchLog(Base):
         index=True,
     )
     
+    # Search type
+    search_type = Column(String(32), nullable=False, default="semantic", index=True)  # "semantic", "fulltext", "hybrid"
+
     # Search query
     query = Column(Text, nullable=False, index=True)
-    
+
     # Search parameters
     embedding_name = Column(String(128), nullable=True, index=True)
     max_results = Column(Integer, nullable=False, default=10)
@@ -67,9 +75,10 @@ class SearchLog(Base):
     # Results - stored as JSON list of dicts with document_id and chunk_ids
     # Format: [{"document_id": "...", "chunk_ids": ["...", "..."]}, ...]
     results = Column(JSONB, nullable=False)  # List of result objects with document_id and chunk_ids (JSONB for PostgreSQL, JSON for SQLite)
-    best_similarity = Column(Float, nullable=True)  # Best similarity score across all results
+    best_similarity = Column(Float, nullable=True)  # Best similarity score (semantic/hybrid)
+    best_rank = Column(Float, nullable=True)  # Best rank score (fulltext/hybrid)
     total_results = Column(Integer, nullable=False, default=0)
-    
+
     # Timing information
     time_search_total = Column(Float, nullable=True)  # Total search time in seconds
     time_embedding = Column(Float, nullable=True)  # Embedding generation time
@@ -77,6 +86,9 @@ class SearchLog(Base):
     time_db_fetch = Column(Float, nullable=True)  # Database fetch time (SQLite only)
     time_distance_calc = Column(Float, nullable=True)  # Distance calculation time (SQLite only)
     time_sort = Column(Float, nullable=True)  # Sorting time (SQLite only)
+    time_semantic = Column(Float, nullable=True)  # Semantic search time (hybrid only)
+    time_fulltext = Column(Float, nullable=True)  # Fulltext search time (hybrid only)
+    time_fusion = Column(Float, nullable=True)  # RRF fusion time (hybrid only)
     
     # Timestamp
     created_time = Column(
@@ -94,6 +106,7 @@ class SearchLog(Base):
         """Convert SearchLog instance to dictionary."""
         return {
             "id": self.id,
+            "search_type": self.search_type,
             "query": self.query,
             "embedding_name": self.embedding_name,
             "max_results": self.max_results,
@@ -104,6 +117,7 @@ class SearchLog(Base):
             "metadata_filters": self.metadata_filters,
             "results": self.results,
             "best_similarity": self.best_similarity,
+            "best_rank": self.best_rank,
             "total_results": self.total_results,
             "time_search_total": self.time_search_total,
             "time_embedding": self.time_embedding,
@@ -111,6 +125,9 @@ class SearchLog(Base):
             "time_db_fetch": self.time_db_fetch,
             "time_distance_calc": self.time_distance_calc,
             "time_sort": self.time_sort,
+            "time_semantic": self.time_semantic,
+            "time_fulltext": self.time_fulltext,
+            "time_fusion": self.time_fusion,
             "created_time": self.created_time.isoformat() if self.created_time else None,
         }
 

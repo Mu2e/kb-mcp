@@ -76,7 +76,11 @@ def get_server_config() -> dict:
 
 # LLM
 def get_default_llm_model() -> str:
-    """Default LLM model. **Env Variable:** `DEFAULT_LLM_MODEL` (default: `gemini-2.5-flash-lite`)."""
+    """Default LLM model used as fallback when specific model settings are not set.
+    
+    **Env Variable:** `DEFAULT_LLM_MODEL` (default: `gemini-2.5-flash-lite`).
+    This is used as a fallback when specific model settings (e.g., SUMMARY_MODEL) are not set.
+    """
     return os.getenv("DEFAULT_LLM_MODEL", "gemini-2.5-flash-lite")
 
 def get_llm_config() -> dict:
@@ -87,12 +91,18 @@ def get_llm_config() -> dict:
 
             * `openai_api_key` (str|None): API Key (Env: `OPENAI_API_KEY`).
             * `openai_base_url` (str|None): Custom API base URL (Env: `OPENAI_BASE_URL`).
-            * `summary_model` (str): Summarization model (Env: `SUMMARY_MODEL`, default: `DEFAULT_LLM_MODEL`).
+            * `default_model` (str): Default model fallback (Env: `DEFAULT_LLM_MODEL`).
+            * `summary_model` (str): Summarization model (Env: `SUMMARY_MODEL`, defaults to DEFAULT_LLM_MODEL).
+            * `eval_gen_model` (str): Evaluation question generation model (Env: `EVAL_GEN_MODEL`, defaults to DEFAULT_LLM_MODEL).
+            * `eval_judge_model` (str): Evaluation answer judging model (Env: `EVAL_JUDGE_MODEL`, defaults to DEFAULT_LLM_MODEL).
     """
     return {
         'openai_api_key': os.getenv("OPENAI_API_KEY"),
         'openai_base_url': os.getenv("OPENAI_BASE_URL"),
+        'default_model': get_default_llm_model(),
         'summary_model': os.getenv("SUMMARY_MODEL", get_default_llm_model()),
+        'eval_gen_model': os.getenv("EVAL_GEN_MODEL", get_default_llm_model()),
+        'eval_judge_model': os.getenv("EVAL_JUDGE_MODEL", get_default_llm_model()),
     }
 
 # Integrations
@@ -186,7 +196,7 @@ def get_parser_config() -> dict:
             * `parser` (str): Parser framework to use (Env: `KB_PARSER`, default: 'kb-mcp').
             * `image_additional_doc` (bool): Create separate docs for images (Env: `PARSE_IMAGE_ADDITIONAL_DOC`).
             * `image_llm_description` (bool): Use LLM for image descriptions (Env: `PARSE_IMAGE_LLM_DESCRIPTION`).
-            * `image_description_model` (str): Model for descriptions (Env: `PARSE_IMAGE_DESCRIPTION_MODEL`).
+            * `image_description_model` (str): Model for descriptions (Env: `PARSE_IMAGE_DESCRIPTION_MODEL`, defaults to DEFAULT_LLM_MODEL).
             * `image_description_num_workers` (int): Parallel worker count (Env: `PARSE_IMAGE_DESCRIPTION_NUMWORKERS`, default: 6).
     """
     return {
@@ -219,12 +229,28 @@ def get_eval_config() -> dict:
     Returns:
         dict: Evaluation configuration with keys:
 
-            * `gen_model` (str): Question generation model (Env: `EVAL_GEN_MODEL`).
-            * `judge_model` (str): Answer judging model (Env: `EVAL_JUDGE_MODEL`).
+            * `gen_model` (str): Question generation model (Env: `EVAL_GEN_MODEL`, defaults to DEFAULT_LLM_MODEL).
+            * `judge_model` (str): Answer judging model (Env: `EVAL_JUDGE_MODEL`, defaults to DEFAULT_LLM_MODEL).
     """
     return {
         'gen_model': os.getenv("EVAL_GEN_MODEL", get_default_llm_model()),
         'judge_model': os.getenv("EVAL_JUDGE_MODEL", get_default_llm_model()),
+    }
+
+def get_search_config() -> dict:
+    """Search settings.
+
+    Returns:
+        dict: Search configuration with keys:
+
+            * `max_chunks_per_doc` (int): Maximum chunks per document in search results (Env: `SEARCH_MAX_CHUNKS_PER_DOC`, default: 10).
+            * `initial_limit_multiplier` (int): Multiplier for initial chunk retrieval (Env: `SEARCH_INITIAL_LIMIT_MULTIPLIER`, default: 50).
+            * `rrf_k` (int): Reciprocal Rank Fusion constant (Env: `SEARCH_RRF_K`, default: 60).
+    """
+    return {
+        'max_chunks_per_doc': _get_int("SEARCH_MAX_CHUNKS_PER_DOC", 10),
+        'initial_limit_multiplier': _get_int("SEARCH_INITIAL_LIMIT_MULTIPLIER", 50),
+        'rrf_k': _get_int("SEARCH_RRF_K", 60),
     }
 
 # Paths

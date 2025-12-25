@@ -224,6 +224,84 @@ def get_db_session_ephemeral(session=None, auto_commit: bool = True) -> Generato
         yield s
 
 
+def _setup_fulltext_search_trigger(engine: Engine) -> None:
+    """Set up PostgreSQL trigger for auto-updating text_search_vector on chunks.
+
+    This creates a trigger function and trigger that automatically updates the
+    text_search_vector column whenever a chunk is inserted or updated.
+
+    The text_search_vector combines:
+    - document.title or document.title_gen (weight 'A' - highest)
+    - chunk.text (weight 'B')
+    - document.summary (weight 'D' - lower)
+
+    Args:
+        engine: SQLAlchemy engine connected to PostgreSQL
+    """
+    # Check if function exists
+    check_function_sql = text("""
+        SELECT EXISTS (
+            SELECT 1 FROM pg_proc
+            WHERE proname = 'update_chunk_text_search_vector'
+        );
+    """)
+
+    # Check if trigger exists
+    check_trigger_sql = text("""
+        SELECT EXISTS (
+            SELECT 1 FROM pg_trigger
+            WHERE tgname = 'chunks_text_search_vector_update'
+        );
+    """)
+
+    with engine.connect() as conn:
+        function_exists = conn.execute(check_function_sql).scalar()
+        trigger_exists = conn.execute(check_trigger_sql).scalar()
+
+        # Only create function if it doesn't exist
+        if not function_exists:
+            create_function_sql = text("""
+                CREATE FUNCTION update_chunk_text_search_vector()
+                RETURNS TRIGGER AS $$
+                DECLARE
+                    doc_title TEXT;
+                    doc_summary TEXT;
+                BEGIN
+                    -- Get document title (prefer title, fallback to title_gen) and summary
+                    SELECT
+                        COALESCE(title, title_gen, ''),
+                        COALESCE(summary, '')
+                    INTO doc_title, doc_summary
+                    FROM documents
+                    WHERE id = NEW.document_id;
+
+                    -- Build the weighted tsvector
+                    NEW.text_search_vector :=
+                        setweight(to_tsvector('english', doc_title), 'A') ||
+                        setweight(to_tsvector('english', COALESCE(NEW.text, '')), 'B') ||
+                        setweight(to_tsvector('english', doc_summary), 'D');
+
+                    RETURN NEW;
+                END;
+                $$ LANGUAGE plpgsql;
+            """)
+            conn.execute(create_function_sql)
+            logger.info("Created full-text search trigger function")
+
+        # Only create trigger if it doesn't exist
+        if not trigger_exists:
+            create_trigger_sql = text("""
+                CREATE TRIGGER chunks_text_search_vector_update
+                BEFORE INSERT OR UPDATE ON chunks
+                FOR EACH ROW
+                EXECUTE FUNCTION update_chunk_text_search_vector();
+            """)
+            conn.execute(create_trigger_sql)
+            logger.info("Created full-text search trigger")
+
+        conn.commit()
+
+
 def init_db(create_tables: bool = True) -> None:
     """Initialize the database.
 
@@ -257,6 +335,13 @@ def init_db(create_tables: bool = True) -> None:
             logger.info("PostgreSQL vector extension enabled")
         except Exception as e:
             logger.warning(f"Could not enable vector extension (may not have permissions): {e}")
+
+        # Set up full-text search trigger
+        try:
+            _setup_fulltext_search_trigger(engine)
+            logger.info("Full-text search trigger created/verified")
+        except Exception as e:
+            logger.warning(f"Could not create full-text search trigger: {e}")
 
     if create_tables:
         # Create all tables (including SearchLog from search module and eval models)
