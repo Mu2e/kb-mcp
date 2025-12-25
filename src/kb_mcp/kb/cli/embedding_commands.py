@@ -93,7 +93,7 @@ def cmd_chunks_drop(args):
 def cmd_chunks_chunk(args):
     """Chunk a document."""
 # Get the document
-    doc = get(uuid=args.document_id)
+    doc = get(uid=args.document_id)
     if not doc:
         print(f"Error: Document {args.document_id} not found")
         sys.exit(1)
@@ -111,7 +111,7 @@ def cmd_chunks_chunk(args):
         print(f"  Config: {json.dumps(config)}")
 
     try:
-        chunks = chunk_document(doc, strategy=args.strategy, config=config if config else None)
+        chunks = chunk_document(doc, chunk_strategy=args.strategy, config=config if config else None)
         print(f" Created {len(chunks)} chunk(s)")
 
         if not args.quiet:

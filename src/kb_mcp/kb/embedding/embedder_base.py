@@ -159,12 +159,11 @@ class BaseEmbedder(ABC):
             if dialect_name == 'postgresql':
                 from sqlalchemy import text
                 try:
-                    result = session.execute(text("SELECT * FROM pg_extension WHERE extname = 'vector'")).first()
-                    if not result:
-                        session.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
-                        session.commit()
+                    # CREATE EXTENSION IF NOT EXISTS already checks if extension exists
+                    session.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+                    session.commit()
                 except Exception as e:
-                    logger.warning(f"Could not check/enable pgvector extension: {e}")
+                    logger.warning(f"Could not enable pgvector extension: {e}")
             
             # Create table if it doesn't exist (checkfirst=True handles existence check)
             try:

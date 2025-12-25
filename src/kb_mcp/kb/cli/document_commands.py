@@ -7,7 +7,8 @@ from pathlib import Path
 from .. import add_source, get
 from ..tools import ingest
 from ..db_models import Document, Source
-from ..database import get_db_session
+from ..documents import delete_raw_document
+from ..database import get_db_session, init_db
 
 
 def _interactive_dedup_choice(existing_by_id, existing_by_hash, new_doc):
@@ -60,19 +61,15 @@ def cmd_ingest(args):
         print(f"Error: File not found: {file_path}")
         sys.exit(1)
 
+    # Initialize database (creates tables if they don't exist)
+    init_db(create_tables=True)
+
     # Determine source_id if not provided
     source_id = args.source_id
     if not source_id:
         source_id = "local"
         print(f"Warning: No source_id provided, using '{source_id}'")
         print("  Use --source-id to specify a source")
-
-    # Check if source exists, create if needed
-    with get_db_session() as session:
-        source = session.query(Source).filter(Source.id == source_id).first()
-        if not source:
-            print(f"Source '{source_id}' does not exist. Creating it...")
-            add_source(source_id=source_id, name=f"Local files ({source_id})", session=session)
 
     # Determine doc_id
     doc_id = args.doc_id
@@ -94,28 +91,39 @@ def cmd_ingest(args):
         if args.chunk_overlap:
             chunk_config["chunk_overlap"] = args.chunk_overlap
 
-    # Use ingest() function for the full workflow
+    # Use a single session for all operations
     try:
-        result = ingest(
-            file_path,
-            source_id=source_id,
-            doc_id=doc_id,
-            extract_images=args.parse_images,
-            describe_images=describe_images,
-            dedup_level=args.dedup_level,
-            force_reparse=args.force_reparse,
-            copy_to_kb=not args.no_copy,
-            uri=None,
-            meta=None,
-            generate_summary=not args.no_summary,
-            chunk_and_embed=not args.no_embed,
-            create_summary_chunks=not args.no_summary_chunks and not args.no_summary,
-            chunk_strategy=args.strategy,
-            chunk_config=chunk_config,
-            embedding_name=args.embedding_name,
-            embedding_provider=args.provider,
-            embedding_model=args.model,
-        )
+        with get_db_session() as session:
+            # Check if source exists, create if needed
+            source = session.query(Source).filter(Source.id == source_id).first()
+            if not source:
+                print(f"Source '{source_id}' does not exist. Creating it...")
+                add_source(source_id=source_id, name=f"Local files ({source_id})", session=session)
+                # Flush to make source available for foreign key constraints
+                session.flush()
+
+            # Use ingest() function for the full workflow with the same session
+            result = ingest(
+                file_path,
+                source_id=source_id,
+                doc_id=doc_id,
+                extract_images=args.parse_images,
+                describe_images=describe_images,
+                dedup_level=args.dedup_level,
+                force_reparse=args.force_reparse,
+                copy_to_kb=not args.no_copy,
+                uri=None,
+                meta=None,
+                generate_summary=not args.no_summary,
+                chunk_and_embed=not args.no_embed,
+                create_summary_chunks=not args.no_summary_chunks and not args.no_summary,
+                chunk_strategy=args.strategy,
+                chunk_config=chunk_config,
+                embedding_name=args.embedding_name,
+                embedding_provider=args.provider,
+                embedding_model=args.model,
+                session=session,
+            )
 
         # Display results
         if result.get('skipped', False):

@@ -13,6 +13,7 @@ in our environment file.
 Options:
     --env FILE      Path to the .env file (default: .env)
     --cluster NAME  Cluster name: 'sophia' or 'metis' (default: sophia)
+    --list-models   Skip setup and only list available models for the cluster
     -h, --help      Show this help message and exit
 
 Description:
@@ -20,9 +21,11 @@ Description:
     with the appropriate OPENAI_API_KEY and OPENAI_BASE_URL settings for the 
     specified cluster. If we don't have an active token, it will authenticate with ALCF 
     through a URL that will be displayed in the terminal.
+    
+    Use --list-models to skip the setup and only display available models.
 
 Examples:
-    ```bash
+    \`\`\`bash
     # Use default .env file and sophia cluster
     $0
 
@@ -37,13 +40,20 @@ Examples:
 
     # Use sophia cluster explicitly
     $0 --cluster sophia
-    ```
+
+    # List available models without updating .env file
+    $0 --list-models
+
+    # List models for metis cluster
+    $0 --list-models --cluster metis
+    \`\`\`
 EOF
 }
 
 # Initialize defaults
 ENV_FILE=".env"
 CLUSTER="sophia"
+LIST_MODELS=false
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
@@ -52,22 +62,11 @@ while [[ $# -gt 0 ]]; do
                     ENV_FILE="$2"; shift 2 ;;
         --cluster)  [[ -z "$2" ]] && { echo "Error: --cluster requires a value"; show_help; exit 1; }
                     CLUSTER="$2"; shift 2 ;;
+        --list-models) LIST_MODELS=true; shift ;;
         -h|--help) show_help; exit 0 ;;
         *)          echo "Error: Unknown option '$1'"; show_help; exit 1 ;;
     esac
 done
-
-# Lets make sure we have the dependencies installed
-# mainly adds globus support
-pip install -e ".[alcf]"
-
-# get the latest script to authenticate with alcf
-curl -O https://raw.githubusercontent.com/argonne-lcf/inference-endpoints/refs/heads/main/inference_auth_token.py
-
-# authenticate with alcf
-#python inference_auth_token.py authenticate
-
-TOKEN=$(python inference_auth_token.py get_access_token)
 
 # Validate cluster argument
 if [[ "$CLUSTER" != "sophia" ]] && [[ "$CLUSTER" != "metis" ]]; then
@@ -77,70 +76,93 @@ if [[ "$CLUSTER" != "sophia" ]] && [[ "$CLUSTER" != "metis" ]]; then
     exit 1
 fi
 
-# Set base URL based on cluster
-if [ "$CLUSTER" == "metis" ]; then
-    BASE_URL="https://inference-api.alcf.anl.gov/resource_server/metis"
-else
-    BASE_URL="https://inference-api.alcf.anl.gov/resource_server/sophia"
-fi
+# Only do setup if not in list-only mode
+if [ "$LIST_MODELS" = false ]; then
+    # Lets make sure we have the dependencies installed
+    # mainly adds globus support
+    pip install -e ".[alcf]"
 
-# If .env file doesn't exist, complain
-if [ ! -f "$ENV_FILE" ]; then
-    echo "Error: .env file not found."
-    echo "   Please create it first. You can start from the example file: .env.example"
-    exit 1
-fi
+    # get the latest script to authenticate with alcf
+    curl -O https://raw.githubusercontent.com/argonne-lcf/inference-endpoints/refs/heads/main/inference_auth_token.py
 
-TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
+    # authenticate with alcf
+    #python inference_auth_token.py authenticate
+
+    TOKEN=$(python inference_auth_token.py get_access_token)
+
+    # Set base URL based on cluster
+    if [ "$CLUSTER" == "metis" ]; then
+        BASE_URL="https://inference-api.alcf.anl.gov/resource_server/metis/api/v1"
+    else
+        BASE_URL="https://inference-api.alcf.anl.gov/resource_server/sophia/vllm/v1"
+    fi
+
+    # If .env file doesn't exist, complain
+    if [ ! -f "$ENV_FILE" ]; then
+        echo "Error: .env file not found."
+        echo "   Please create it first. You can start from the example file: .env.example"
+        exit 1
+    fi
+
+    TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
 
 
-CURRENT_BASE_URL=$(grep "^OPENAI_BASE_URL=" "$ENV_FILE" | cut -d '=' -f2-)
-if [ "$CURRENT_BASE_URL" == "$BASE_URL" ]; then
-    echo "OPENAI_BASE_URL is already set to $BASE_URL, only updating OPENAI_API_KEY"
-    awk -v token="$TOKEN" '
+    CURRENT_BASE_URL=$(grep "^OPENAI_BASE_URL=" "$ENV_FILE" | cut -d '=' -f2-)
+    if [ "$CURRENT_BASE_URL" == "$BASE_URL" ]; then
+        echo "OPENAI_BASE_URL is already set to $BASE_URL, only updating OPENAI_API_KEY"
+        awk -v token="$TOKEN" '
+            /^OPENAI_API_KEY=/ {
+                print "OPENAI_API_KEY=" token;
+                next;
+            }
+            { print }
+        ' "$ENV_FILE" > "$ENV_FILE.tmp" && mv "$ENV_FILE.tmp" "$ENV_FILE"
+        exit 0
+    fi
+
+    # Process both OPENAI_API_KEY and OPENAI_BASE_URL
+    awk -v token="$TOKEN" -v base_url="$BASE_URL" -v timestamp="$TIMESTAMP" '
         /^OPENAI_API_KEY=/ {
+            print "# " $0 "[Replaced " timestamp "] ";
             print "OPENAI_API_KEY=" token;
+            key_found=1;
+            next;
+        }
+        /^OPENAI_BASE_URL=/ {
+            print "# " $0 " [Replaced " timestamp "] ";
+            print "OPENAI_BASE_URL=" base_url;
+            url_found=1;
             next;
         }
         { print }
+        END {
+            if (!key_found) {
+                print "";
+                print "# ALCF Configuration - Added " timestamp;
+                print "OPENAI_API_KEY=" token;
+            }
+            if (!url_found) {
+                if (key_found) print "";
+                print "OPENAI_BASE_URL=" base_url;
+            }
+        }
     ' "$ENV_FILE" > "$ENV_FILE.tmp" && mv "$ENV_FILE.tmp" "$ENV_FILE"
-    exit 0
+
+    echo "✓ Updated ALCF configuration in $ENV_FILE"
+    echo "  Cluster: $CLUSTER"
+    echo "  Base URL: $BASE_URL"
+    echo ""
+    echo "Current ALCF configuration:"
+    grep "^OPENAI_API_KEY=\|^OPENAI_BASE_URL=" "$ENV_FILE"
+else
+    # In list-only mode, we still need the token and auth script
+    # Check if inference_auth_token.py exists, if not download it
+    if [ ! -f "inference_auth_token.py" ]; then
+        curl -O https://raw.githubusercontent.com/argonne-lcf/inference-endpoints/refs/heads/main/inference_auth_token.py
+    fi
+    
+    TOKEN=$(python inference_auth_token.py get_access_token)
 fi
-
-# Process both OPENAI_API_KEY and OPENAI_BASE_URL
-awk -v token="$TOKEN" -v base_url="$BASE_URL" -v timestamp="$TIMESTAMP" '
-    /^OPENAI_API_KEY=/ {
-        print "# " $0 "[Replaced " timestamp "] ";
-        print "OPENAI_API_KEY=" token;
-        key_found=1;
-        next;
-    }
-    /^OPENAI_BASE_URL=/ {
-        print "# " $0 " [Replaced " timestamp "] ";
-        print "OPENAI_BASE_URL=" base_url;
-        url_found=1;
-        next;
-    }
-    { print }
-    END {
-        if (!key_found) {
-            print "";
-            print "# ALCF Configuration - Added " timestamp;
-            print "OPENAI_API_KEY=" token;
-        }
-        if (!url_found) {
-            if (key_found) print "";
-            print "OPENAI_BASE_URL=" base_url;
-        }
-    }
-' "$ENV_FILE" > "$ENV_FILE.tmp" && mv "$ENV_FILE.tmp" "$ENV_FILE"
-
-echo "✓ Updated ALCF configuration in $ENV_FILE"
-echo "  Cluster: $CLUSTER"
-echo "  Base URL: $BASE_URL"
-echo ""
-echo "Current ALCF configuration:"
-grep "^OPENAI_API_KEY=\|^OPENAI_BASE_URL=" "$ENV_FILE"
 
 
 
@@ -148,8 +170,10 @@ grep "^OPENAI_API_KEY=\|^OPENAI_BASE_URL=" "$ENV_FILE"
 
 ################################# List available models #################################
 # Fetch and display available models
-echo "Please verify OPENAI_MODEL is set in $ENV_FILE"
-echo ""
+if [ "$LIST_MODELS" = false ]; then
+    echo "Please verify OPENAI_MODEL is set in $ENV_FILE"
+    echo ""
+fi
 echo "Available models on $CLUSTER:"
 
 MODELS_JSON=$(curl -sS -X GET "https://inference-api.alcf.anl.gov/resource_server/list-endpoints" \

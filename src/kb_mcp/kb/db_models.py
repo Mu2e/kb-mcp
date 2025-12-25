@@ -573,12 +573,12 @@ class Document(Base):
                 meta={"query": result.get("query", "")},
             )
             session.add(log_entry)
-            session.commit()
-
-            # If we created our own session, refresh to keep object accessible after session closes
-            if should_close:
-                session.refresh(doc)
-
+            
+            # Flush to ensure SummaryLog is visible for subsequent operations in the same session
+            # Context manager handles commit/rollback automatically
+            # If should_close=True, it will commit; if False, caller handles commit
+            session.flush()
+            
             return doc
 
 

@@ -101,6 +101,7 @@ def get_session_factory() -> sessionmaker:
         _SessionLocal = sessionmaker(
             autocommit=False,
             autoflush=False,
+            expire_on_commit=False,
             bind=get_engine(),
         )
     return _SessionLocal
@@ -164,17 +165,18 @@ def get_db_session(session=None, auto_commit: bool = True, auto_expunge: bool = 
             
             # Refresh all objects to load their data before expunging
             # This ensures objects can be used after the session closes
-            for obj in list(session.identity_map.values()):
-                try:
-                    # Refresh to ensure we have the latest data and load all attributes
-                    session.refresh(obj)
-                    # Make transient: this fully detaches the object from the session
-                    # refresh() should have loaded all attributes into __dict__, so they'll
-                    # be available after make_transient()
-                    make_transient(obj)
-                except Exception:
-                    # Skip invalid/deleted objects
-                    pass
+            # no longer needed since we are now using expire_on_commit=False
+            #for obj in list(session.identity_map.values()):
+            #    try:
+            #        # Refresh to ensure we have the latest data and load all attributes
+            #        session.refresh(obj)
+            #        # Make transient: this fully detaches the object from the session
+            #        # refresh() should have loaded all attributes into __dict__, so they'll
+            #        # be available after make_transient()
+            #        make_transient(obj)
+            #    except Exception:
+            #        # Skip invalid/deleted objects
+            #        pass
 
             if auto_commit:
                 session.commit()
@@ -336,17 +338,18 @@ def init_db(create_tables: bool = True) -> None:
         except Exception as e:
             logger.warning(f"Could not enable vector extension (may not have permissions): {e}")
 
-        # Set up full-text search trigger
-        try:
-            _setup_fulltext_search_trigger(engine)
-            logger.info("Full-text search trigger created/verified")
-        except Exception as e:
-            logger.warning(f"Could not create full-text search trigger: {e}")
-
     if create_tables:
         # Create all tables (including SearchLog from search module and eval models)
         Base.metadata.create_all(bind=engine)
         logger.info("Database tables created/verified")
+
+        # Set up full-text search trigger AFTER tables are created
+        if database_url.startswith('postgresql'):
+            try:
+                _setup_fulltext_search_trigger(engine)
+                logger.info("Full-text search trigger created/verified")
+            except Exception as e:
+                logger.warning(f"Could not create full-text search trigger: {e}")
 
     # Test connection
     with engine.connect() as conn:
