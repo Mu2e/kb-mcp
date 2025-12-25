@@ -64,6 +64,21 @@ Edit your `.env` file with your configuration. See [Configuration Reference](../
 - **OPENAI_API_KEY**: Optional API key for `OPENAI_BASE_URL`
 - **Database Configuration**: See [Database Setup](#3-database-setup) below
 
+### ALCF (Argonne Leadership Computing Facility) Setup
+
+If you're using [ALCF's inference service](https://docs.alcf.anl.gov/services/inference-endpoints), you can use the provided setup script to automatically configure your `.env` file with the appropriate credentials.
+
+The script will:
+- Check if you have an active ALCF token
+- Update your `.env` file with `OPENAI_API_KEY` and `OPENAI_BASE_URL` for the specified cluster
+- If `OPENAI_BASE_URL` is already set correctly, only `OPENAI_API_KEY` will be updated
+
+**Usage:**
+
+```bash
+# Use default .env file and sophia cluster
+./scripts/setup_alcf.sh --help
+```
 
 ## 3. Database Setup
 

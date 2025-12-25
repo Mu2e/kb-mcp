@@ -55,6 +55,13 @@ doc = [
     "mkdocstrings[python]>=0.24.0",
 ]
 
+# Test dependencies
+test = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "fastapi[all]", # For TestClient and web testing
+]
+
 [project.scripts]
 # Server module CLI commands
 kb-server = "kb_mcp.server.server:main"
