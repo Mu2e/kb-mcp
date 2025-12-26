@@ -8,6 +8,7 @@ let currentFilters = {
     source_id: '',
     doc_type: '',
     search: '',
+    search_type: 'hybrid',  // hybrid, semantic, or fulltext
     metadata: [],
     date_type: 'insert_time',  // insert_time, creating_time, or update_time
     date_from: '',
@@ -140,6 +141,7 @@ function updateMetadataKeysDropdown(keys) {
 // Initialize filter event listeners
 function initFilters() {
     const searchInput = document.getElementById('search-input');
+    const searchType = document.getElementById('search-type');
     const sourceFilter = document.getElementById('source-filter');
     const typeFilter = document.getElementById('type-filter');
     const applyButton = document.getElementById('apply-filters');
@@ -147,19 +149,26 @@ function initFilters() {
     const metadataKeyInput = document.getElementById('metadata-key-input');
     const metadataValueInput = document.getElementById('metadata-value-input');
     const metadataFiltersRow = document.getElementById('metadata-filters-row');
-    
+
     // Update filters when search input changes
     if (searchInput) {
         // Update filters when focus leaves the search field
         searchInput.addEventListener('blur', function() {
             applyFilters();
         });
-        
+
         // Also update on Enter key
         searchInput.addEventListener('keypress', function(e) {
             if (e.key === 'Enter') {
                 applyFilters();
             }
+        });
+    }
+
+    // Update filters when search type changes
+    if (searchType) {
+        searchType.addEventListener('change', function() {
+            applyFilters();
         });
     }
     
@@ -247,6 +256,7 @@ function initFilters() {
     currentFilters.source_id = urlParams.get('source_id') || '';
     currentFilters.doc_type = urlParams.get('doc_type') || '';
     currentFilters.search = urlParams.get('search') || '';
+    currentFilters.search_type = urlParams.get('search_type') || 'hybrid';
     currentFilters.date_type = urlParams.get('date_type') || 'insert_time';
     currentFilters.date_from = urlParams.get('date_from') || '';
     currentFilters.date_to = urlParams.get('date_to') || '';
@@ -278,6 +288,9 @@ function initFilters() {
     }
     if (searchInput && currentFilters.search) {
         searchInput.value = currentFilters.search;
+    }
+    if (searchType && currentFilters.search_type) {
+        searchType.value = currentFilters.search_type;
     }
     if (dateTypeElement && currentFilters.date_type) {
         dateTypeElement.value = currentFilters.date_type;
@@ -363,28 +376,33 @@ window.removeMetadataFilter = function(index) {
 // Apply filters and reload documents
 function applyFilters() {
     const searchInput = document.getElementById('search-input');
+    const searchType = document.getElementById('search-type');
     const sourceFilter = document.getElementById('source-filter');
     const typeFilter = document.getElementById('type-filter');
-    
+
     currentFilters.search = searchInput?.value || '';
+    currentFilters.search_type = searchType?.value || 'hybrid';
     currentFilters.source_id = sourceFilter?.value || '';
     currentFilters.doc_type = typeFilter?.value || '';
-    
+
     // Reset pagination
     currentOffset = 0;
     hasMore = true;
-    
+
     // Clear document list
     const documentList = document.getElementById('document-list');
     if (documentList) {
         documentList.innerHTML = '<div class="info-box">Loading documents...</div>';
     }
-    
+
     // Update URL without reload
     const params = new URLSearchParams();
     if (currentFilters.source_id) params.set('source_id', currentFilters.source_id);
     if (currentFilters.doc_type) params.set('doc_type', currentFilters.doc_type);
     if (currentFilters.search) params.set('search', currentFilters.search);
+    if (currentFilters.search_type && currentFilters.search_type !== 'hybrid') {
+        params.set('search_type', currentFilters.search_type);
+    }
     if (currentFilters.date_type && currentFilters.date_type !== 'insert_time') {
         params.set('date_type', currentFilters.date_type);
     }
@@ -395,7 +413,7 @@ function applyFilters() {
         params.append('metadata', `${filter.key}:${filter.operation}=${filter.value}`);
     });
     window.history.pushState({}, '', '/web' + (params.toString() ? '?' + params.toString() : ''));
-    
+
     // Load documents (which will also update filter counts from the response)
     loadDocuments(true);
 }
@@ -490,6 +508,7 @@ async function loadDocuments(reset = false) {
             const searchQuery = hasSearch ? currentFilters.search : ' ';
             params.set('query', searchQuery);
             params.set('max_results', hasMetadataFilters && !hasSearch ? '100' : '20'); // Higher limit when filtering by metadata only
+            params.set('search_type', currentFilters.search_type || 'hybrid'); // Pass search type to API
             if (currentFilters.source_id) params.set('source_id', currentFilters.source_id);
             if (currentFilters.doc_type) params.set('doc_type', currentFilters.doc_type);
             
@@ -575,10 +594,14 @@ async function loadDocuments(reset = false) {
         
         const response = await fetch(apiEndpoint + '?' + params.toString());
         if (!response.ok) {
-            throw new Error('Failed to load documents');
+            const errorMsg = data.error || `Failed to load documents: ${response.status}`;
+            throw new Error(errorMsg);
         }
         
-        const data = await response.json();
+        // Check for error in response data
+        if (data.error) {
+            throw new Error(data.error);
+        }
         
         // Update total count
         const totalCountEl = document.getElementById('total-count');
@@ -616,6 +639,7 @@ async function loadDocuments(reset = false) {
                     currentOffset += data.documents.length;
                 }
             } else if (reset) {
+                console.log('No documents in response, showing "No documents found" message');
                 documentList.innerHTML = '<div class="info-box">No documents found.</div>';
                 hasMore = false;
             }
@@ -625,7 +649,8 @@ async function loadDocuments(reset = false) {
         console.error('Error loading documents:', error);
         const documentList = document.getElementById('document-list');
         if (documentList && reset) {
-            documentList.innerHTML = '<div class="error-box">Error loading documents. Please try again.</div>';
+            const errorMsg = error.message || 'Error loading documents. Please try again.';
+            documentList.innerHTML = `<div class="error-box">${escapeHtml(errorMsg)}</div>`;
         }
     } finally {
         isLoading = false;
@@ -672,10 +697,34 @@ function createDocumentElement(doc, isSearchResult = false, showSimilarity = tru
     // Only show similarity scores when there's an actual search query, not just metadata filters
     let searchInfo = '';
     if (isSearchResult && showSimilarity) {
+        const scores = [];
+
+        // Add similarity score (from semantic search)
         if (doc.best_similarity !== null && doc.best_similarity !== undefined) {
+            scores.push(`<strong>Similarity:</strong> ${(doc.best_similarity * 100).toFixed(2)}%`);
+        }
+
+        // Add score (from fulltext search)
+        if (doc.best_score !== null && doc.best_score !== undefined) {
+            scores.push(`<strong>Score:</strong> ${doc.best_score.toFixed(4)}`);
+        }
+
+        // Add legacy rank score (for backward compatibility)
+        if (doc.best_rank !== null && doc.best_rank !== undefined) {
+            scores.push(`<strong>Rank:</strong> ${doc.best_rank.toFixed(4)}`);
+        }
+
+        // Add RRF score (for hybrid search)
+        if (doc.rrf_score !== null && doc.rrf_score !== undefined) {
+            scores.push(`<strong>RRF Score:</strong> ${doc.rrf_score.toFixed(4)}`);
+        }
+
+        // Add matching chunks count
+        scores.push(`<strong>Matching Chunks:</strong> ${doc.chunks ? doc.chunks.length : 0}`);
+
+        if (scores.length > 0) {
             searchInfo = `<div class="search-info" style="background: #e8f5e9; padding: 8px; border-radius: 4px; margin: 10px 0; font-size: 14px;">
-                <strong>Similarity:</strong> ${(doc.best_similarity * 100).toFixed(2)}% | 
-                <strong>Matching Chunks:</strong> ${doc.chunks ? doc.chunks.length : 0}
+                ${scores.join(' | ')}
             </div>`;
         }
     }

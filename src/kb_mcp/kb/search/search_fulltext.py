@@ -47,7 +47,7 @@ def search_fulltext(
         Dictionary containing:
         - results: List of dictionaries, each containing:
             - document: Document object
-            - chunks: List of matching chunks with their rank scores (sorted by rank, best first)
+            - chunks: List of matching chunks with their relevance scores (sorted by score, best first)
         - metadata: Dictionary with search metadata:
             - time_search_total: Total time taken to execute the search (in seconds)
             - time_deduplication: Time taken to deduplicate and group results by document (in seconds)
@@ -73,7 +73,7 @@ def search_fulltext(
         for result in response['results']:
             print(f"Document: {result['document'].title}")
             if result['chunks']:
-                print(f"  Best match rank: {result['chunks'][0]['rank']:.3f}")
+                print(f"  Best match score: {result['chunks'][0]['score']:.3f}")
         ```
     """
     from ..database import get_db_session
@@ -101,7 +101,7 @@ def search_fulltext(
             doc_type=doc_type,
             chunking_strategy=chunking_strategy,
             filter=filter,
-            skip_kwargs={"session", "explain_analyse", "max_results"},
+            skip_kwargs={"session", "explain_analyse", "max_results", "embedding_name"},
             **kwargs
         )
 
@@ -133,14 +133,16 @@ def search_fulltext(
                     c.char_start_index,
                     c.char_end_index,
                     c.token_length,
-                    ts_rank_cd(c.text_search_vector, query.tsq) AS rank,
+                    c.section_path,
+                    ts_rank_cd(c.text_search_vector, query.tsq) AS score,
                     ROW_NUMBER() OVER (PARTITION BY c.document_id ORDER BY ts_rank_cd(c.text_search_vector, query.tsq) DESC) AS rank_in_doc
                 FROM chunks c
                 CROSS JOIN query
                 JOIN documents d ON c.document_id = d.id
-                WHERE c.text_search_vector @@ query.tsq
+                WHERE c.text_search_vector IS NOT NULL
+                  AND c.text_search_vector @@ query.tsq
                   AND {where_clause_sql}
-                ORDER BY rank DESC
+                ORDER BY score DESC
                 LIMIT :initial_limit
             ),
             diverse_chunks AS (
@@ -152,7 +154,7 @@ def search_fulltext(
                 SELECT document_id
                 FROM diverse_chunks
                 GROUP BY document_id
-                ORDER BY MAX(rank) DESC
+                ORDER BY MAX(score) DESC
                 LIMIT :max_results
             )
             SELECT
@@ -163,11 +165,12 @@ def search_fulltext(
                 dc.char_start_index,
                 dc.char_end_index,
                 dc.token_length,
-                dc.rank,
+                dc.section_path,
+                dc.score,
                 dc.rank_in_doc
             FROM diverse_chunks dc
             WHERE dc.document_id IN (SELECT document_id FROM top_documents)
-            ORDER BY dc.rank DESC
+            ORDER BY dc.score DESC
         """
 
         query_params: Dict[str, Any] = {
@@ -223,10 +226,11 @@ def search_fulltext(
                 "chunk_id": row.chunk_id,
                 "chunk_index": row.chunk_index,
                 "chunk_strategy": row.chunk_strategy,
-                "rank": float(row.rank),
+                "score": float(row.score),
                 "char_start": row.char_start_index,
                 "char_end": row.char_end_index,
                 "token_length": row.token_length,
+                "section_path": row.section_path if row.section_path else None,
             }
             doc_chunks[doc_id].append(chunk_info)
 
@@ -241,20 +245,35 @@ def search_fulltext(
         final_results = []
         for doc_id, chunks in doc_chunks.items():
             doc = documents_by_id.get(doc_id)
-            if not doc:
+            if not doc or not chunks:
                 continue
 
-            # Sort chunks by rank (best first)
-            chunks.sort(key=lambda x: x["rank"], reverse=True)
+            # Add text to chunks
+            for chunk in chunks:
+                if chunk["char_start"] is not None and \
+                   chunk["char_end"] is not None and \
+                   documents_by_id[doc_id].text is not None:
+                    chunk["text"] = documents_by_id[doc_id].text[chunk["char_start"]:chunk["char_end"]]
+                if chunk["chunk_strategy"] == "summary" and documents_by_id[doc_id].summary is not None:
+                    chunk["text"] = documents_by_id[doc_id].summary
+
+            # Sort chunks by score (best first)
+            chunks.sort(key=lambda x: x["score"], reverse=True)
 
             final_results.append({
-                "document": doc,
+                "doc_uid": doc.id,
+                "doc_id": doc.doc_id,
+                "doc_source_id": doc.source_id,
+                "doc_uri": doc.uri,
+                "doc_title": doc.title if doc.title else doc.title_gen if doc.title_gen else None,
+                "best_score": chunks[0]["score"],  # Using score as similarity for fulltext
                 "chunks": chunks,
+                "document": doc,
             })
 
-        # Sort documents by best chunk rank
+        # Sort documents by best chunk similarity (score for fulltext)
         final_results.sort(
-            key=lambda x: x["chunks"][0]["rank"] if x["chunks"] else 0,
+            key=lambda x: x["best_score"] if x["best_score"] else 0,
             reverse=True
         )
 

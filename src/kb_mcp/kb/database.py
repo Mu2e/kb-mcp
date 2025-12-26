@@ -304,6 +304,65 @@ def _setup_fulltext_search_trigger(engine: Engine) -> None:
         conn.commit()
 
 
+def populate_text_search_vectors(engine=None, batch_size: int = 1000):
+    """Populate text_search_vector for existing chunks that don't have it set.
+    
+    This is useful for chunks created before the trigger was set up.
+    
+    Args:
+        engine: SQLAlchemy engine (if None, creates a new one)
+        batch_size: Number of chunks to update per batch
+    """
+    from sqlalchemy import text
+    
+    if engine is None:
+        from .database import get_engine
+        engine = get_engine()
+    
+    with engine.connect() as conn:
+        # Count chunks with NULL text_search_vector
+        count_sql = text("SELECT COUNT(*) FROM chunks WHERE text_search_vector IS NULL")
+        null_count = conn.execute(count_sql).scalar()
+        
+        if null_count == 0:
+            logger.info("All chunks already have text_search_vector populated")
+            return
+        
+        logger.info(f"Populating text_search_vector for {null_count} chunks...")
+        
+        # Update chunks in batches
+        update_sql = text("""
+            UPDATE chunks c
+            SET text_search_vector = (
+                SELECT
+                    setweight(to_tsvector('english', COALESCE(d.title, d.title_gen, '')), 'A') ||
+                    setweight(to_tsvector('english', COALESCE(c.text, '')), 'B') ||
+                    setweight(to_tsvector('english', COALESCE(d.summary, '')), 'D')
+                FROM documents d
+                WHERE d.id = c.document_id
+            )
+            WHERE c.text_search_vector IS NULL
+            AND c.id IN (
+                SELECT id FROM chunks 
+                WHERE text_search_vector IS NULL 
+                LIMIT :batch_size
+            )
+        """)
+        
+        updated = 0
+        while True:
+            result = conn.execute(update_sql, {"batch_size": batch_size})
+            batch_updated = result.rowcount
+            if batch_updated == 0:
+                break
+            updated += batch_updated
+            conn.commit()
+            logger.info(f"Updated {updated}/{null_count} chunks...")
+        
+        logger.info(f"Successfully populated text_search_vector for {updated} chunks")
+        conn.commit()
+
+
 def init_db(create_tables: bool = True) -> None:
     """Initialize the database.
 

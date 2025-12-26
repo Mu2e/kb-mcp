@@ -293,8 +293,16 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
             <div class="filters">
                 <div class="filter-row">
                     <div class="filter-group" style="flex: 1;">
-                        <label for="search-input">Search Query (Semantic Search):</label>
-                        <input type="search" id="search-input" name="search" value="{search}" placeholder="Enter search query for semantic search...">
+                        <label for="search-input">Search Query:</label>
+                        <input type="search" id="search-input" name="search" value="{search}" placeholder="Enter search query...">
+                    </div>
+                    <div class="filter-group">
+                        <label for="search-type">Search Type:</label>
+                        <select id="search-type" name="search_type">
+                            <option value="hybrid" selected>Hybrid (Semantic + Fulltext)</option>
+                            <option value="semantic">Semantic Only</option>
+                            <option value="fulltext">Fulltext Only</option>
+                        </select>
                     </div>
                     <div class="filter-group">
                         <label for="source-filter">Source:</label>

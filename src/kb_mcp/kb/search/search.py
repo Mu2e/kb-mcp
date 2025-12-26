@@ -85,16 +85,16 @@ def log_search(
             if search_type == "semantic":
                 best_similarity = first_chunk.get('similarity')
             elif search_type == "fulltext":
-                best_rank = first_chunk.get('rank')
+                best_rank = first_chunk.get('score')  # fulltext uses 'score' not 'rank'
             elif search_type == "hybrid":
                 # For hybrid, look through all chunks to find best of each
                 for chunk in final_results[0]['chunks']:
                     if chunk.get('from_semantic') and chunk.get('similarity'):
                         if best_similarity is None or chunk['similarity'] > best_similarity:
                             best_similarity = chunk['similarity']
-                    if chunk.get('from_fulltext') and chunk.get('rank'):
-                        if best_rank is None or chunk['rank'] > best_rank:
-                            best_rank = chunk['rank']
+                    if chunk.get('from_fulltext') and chunk.get('score'):  # fulltext uses 'score' not 'rank'
+                        if best_rank is None or chunk['score'] > best_rank:
+                            best_rank = chunk['score']
 
         search_log = SearchLog(
             search_type=search_type,
@@ -409,7 +409,7 @@ def search(
         - search_fulltext(): Full-text-only search using PostgreSQL tsvector
     """
     from .search_hybrid import search_hybrid
-    from ..config import get_search_config
+    from ...config import get_search_config
 
     # Get default rrf_k from config if not provided
     if rrf_k is None:

@@ -75,6 +75,7 @@ def _search_pgvector(
                 c.char_start_index,
                 c.char_end_index,
                 c.token_length,
+                c.section_path,
                 calc.distance,
                 (1 - calc.distance) AS score,
                 ROW_NUMBER() OVER (PARTITION BY c.document_id ORDER BY calc.distance) AS rank_in_doc
@@ -108,6 +109,7 @@ def _search_pgvector(
             dc.char_start_index,
             dc.char_end_index,
             dc.token_length,
+            dc.section_path,
             dc.score,
             dc.rank_in_doc
         FROM diverse_chunks dc
@@ -147,6 +149,7 @@ def _search_pgvector(
             str(row[0] if isinstance(row, tuple) else row) for row in explain_results
         ]
         logger.info("Query execution plan:\n" + "\n".join(explain_output))
+        print("Query execution plan:\n" + "\n".join(explain_output))
 
     results = session.execute(text(vector_query), query_params).all()
 
@@ -186,6 +189,7 @@ def _search_pgvector(
             "char_start": row.char_start_index,
             "char_end": row.char_end_index,
             "token_length": row.token_length,
+            "section_path": row.section_path if row.section_path else None,
         }
         doc_chunks[doc_id].append(chunk_info)
 
@@ -196,24 +200,39 @@ def _search_pgvector(
         for doc in session.query(Document).filter(Document.id.in_(unique_doc_ids)).all()
     }
 
-    # Build final results
+     # Build final results
     final_results = []
     for doc_id, chunks in doc_chunks.items():
         doc = documents_by_id.get(doc_id)
         if not doc:
             continue
 
+        # add text to chunks
+        for chunk in chunks:
+            if chunk["char_start"] is not None and \
+               chunk["char_end"] is not None and \
+               documents_by_id[doc_id].text is not None:
+                chunk["text"] = documents_by_id[doc_id].text[chunk["char_start"]:chunk["char_end"]]
+            if chunk["chunk_strategy"] == "summary" and documents_by_id[doc_id].summary is not None:
+                chunk["text"] = documents_by_id[doc_id].summary
+
         # Sort chunks by similarity (best first)
         chunks.sort(key=lambda x: x["similarity"], reverse=True)
 
         final_results.append({
-            "document": doc,
+            "doc_uid": doc.id,
+            "doc_id": doc.doc_id,
+            "doc_source_id": doc.source_id,
+            "doc_uri": doc.uri,
+            "doc_title": doc.title if doc.title else doc.title_gen if doc.title_gen else None,
+            "best_similarity": chunks[0]["similarity"],
             "chunks": chunks,
+            "document": doc,
         })
 
     # Sort documents by best chunk similarity
     final_results.sort(
-        key=lambda x: x["chunks"][0]["similarity"] if x["chunks"] else 0,
+        key=lambda x: x["best_similarity"] if x["best_similarity"] else 0,
         reverse=True
     )
 

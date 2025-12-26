@@ -7,66 +7,6 @@ from typing import Optional, Dict, Any, List
 logger = logging.getLogger(__name__)
 
 
-def reciprocal_rank_fusion(
-    results_lists: List[List[Dict[str, Any]]],
-    k: int = 60
-) -> List[Dict[str, Any]]:
-    """
-    Combine multiple ranked lists using Reciprocal Rank Fusion (RRF).
-
-    RRF formula: RRF(d) = Σ 1 / (k + rank(d))
-    where k is a constant (default 60) and rank(d) is the rank of document d in each list.
-
-    This is position-based ranking that works well when combining results from
-    different retrieval methods with incomparable scores (like cosine similarity
-    and ts_rank).
-
-    Args:
-        results_lists: List of result lists, where each result list contains
-                      dictionaries with at least a "document_id" key
-        k: Constant for RRF formula (default 60, from original paper)
-
-    Returns:
-        Combined and re-ranked list of results, sorted by RRF score (best first).
-        Each result dict will have an added "rrf_score" field.
-
-    Reference:
-        Cormack, G. V., Clarke, C. L., & Buettcher, S. (2009).
-        "Reciprocal rank fusion outperforms condorcet and individual rank learning methods"
-    """
-    # Track RRF scores for each document
-    doc_scores: Dict[str, float] = {}
-    # Track original result info for each document (from first list that contains it)
-    doc_info: Dict[str, Dict[str, Any]] = {}
-
-    # Process each results list
-    for results_list in results_lists:
-        for rank, result in enumerate(results_list, start=1):
-            doc_id = result["document_id"]
-
-            # Calculate RRF contribution: 1 / (k + rank)
-            rrf_contribution = 1.0 / (k + rank)
-
-            # Add to cumulative score
-            if doc_id in doc_scores:
-                doc_scores[doc_id] += rrf_contribution
-            else:
-                doc_scores[doc_id] = rrf_contribution
-                # Store the first occurrence's info
-                doc_info[doc_id] = result.copy()
-
-    # Build final results list with RRF scores
-    combined_results = []
-    for doc_id, rrf_score in doc_scores.items():
-        result = doc_info[doc_id].copy()
-        result["rrf_score"] = rrf_score
-        combined_results.append(result)
-
-    # Sort by RRF score (descending)
-    combined_results.sort(key=lambda x: x["rrf_score"], reverse=True)
-
-    return combined_results
-
 
 def search_hybrid(
     query: str,
@@ -122,7 +62,8 @@ def search_hybrid(
             - chunks: List of matching chunks (merged from both search methods)
             - rrf_score: Reciprocal Rank Fusion score
             - semantic_rank: Rank from semantic search (None if not in results)
-            - fulltext_rank: Rank from full-text search (None if not in results)
+            - fulltext_rank: Position/rank in full-text search results list (1st, 2nd, 3rd, etc., None if not in results)
+            - fulltext_score: Relevance score from full-text search (in chunks, if from fulltext)
         - metadata: Dictionary with search metadata:
             - time_search_total: Total time for hybrid search
             - time_semantic: Time for semantic search
@@ -153,7 +94,7 @@ def search_hybrid(
             print(f"Document: {result['document'].title}")
             print(f"  RRF Score: {result['rrf_score']:.4f}")
             print(f"  Semantic rank: {result.get('semantic_rank', 'N/A')}")
-            print(f"  Fulltext rank: {result.get('fulltext_rank', 'N/A')}")
+                print(f"  Fulltext rank (position): {result.get('fulltext_rank', 'N/A')}")
         ```
     """
     from ..database import get_db_session
@@ -214,106 +155,96 @@ def search_hybrid(
         # Prepare results lists for RRF
         fusion_start = time.time()
 
-        # Convert semantic results to simple list with document_id
-        semantic_list = [
-            {
-                "document_id": result["document"].id,
-                "document": result["document"],
-                "chunks": result["chunks"],
-                "method": "semantic",
-            }
-            for result in semantic_results.get("results", [])
-        ]
-
-        # Convert full-text results to simple list with document_id
-        fulltext_list = [
-            {
-                "document_id": result["document"].id,
-                "document": result["document"],
-                "chunks": result["chunks"],
-                "method": "fulltext",
-            }
-            for result in fulltext_results.get("results", [])
-        ]
-
-        # Apply RRF to combine rankings
-        combined_results = reciprocal_rank_fusion(
-            [semantic_list, fulltext_list],
-            k=rrf_k
-        )
-
-        # Track which method contributed each result
-        semantic_ranks = {
-            result["document_id"]: rank + 1
-            for rank, result in enumerate(semantic_list)
-        }
-        fulltext_ranks = {
-            result["document_id"]: rank + 1
-            for rank, result in enumerate(fulltext_list)
-        }
-
-        # Build final results with merged chunk info
-        final_results = []
-        for result in combined_results[:max_results]:
-            doc_id = result["document_id"]
-
-            # Collect chunks from both methods
+        def get_rank_map(result_set, score_key):
+            # Flatten to sort globally
             all_chunks = []
-            chunks_seen = set()
+            for doc in result_set.get("results", []):
+                for chunk in doc["chunks"]:
+                    all_chunks.append(chunk)
+            
+            # Sort by their original score (descending)
+            all_chunks.sort(key=lambda x: x[score_key], reverse=True)
+            
+            # Map ID -> Rank (1-based)
+            return {chunk["chunk_id"]: i + 1 for i, chunk in enumerate(all_chunks)}
 
-            # Add semantic chunks
-            if doc_id in semantic_ranks:
-                for sem_result in semantic_list:
-                    if sem_result["document_id"] == doc_id:
-                        for chunk in sem_result["chunks"]:
-                            chunk_id = chunk["chunk_id"]
-                            if chunk_id not in chunks_seen:
-                                chunk_copy = chunk.copy()
-                                chunk_copy["from_semantic"] = True
-                                chunk_copy["from_fulltext"] = False
-                                all_chunks.append(chunk_copy)
-                                chunks_seen.add(chunk_id)
-                        break
+        rank_map_semantic = get_rank_map(semantic_results, "similarity")
+        rank_map_fulltext = get_rank_map(fulltext_results, "score")
 
-            # Add or merge full-text chunks
-            if doc_id in fulltext_ranks:
-                for ft_result in fulltext_list:
-                    if ft_result["document_id"] == doc_id:
-                        for chunk in ft_result["chunks"]:
-                            chunk_id = chunk["chunk_id"]
-                            if chunk_id in chunks_seen:
-                                # Chunk already added from semantic search - mark it as in both
-                                for existing_chunk in all_chunks:
-                                    if existing_chunk["chunk_id"] == chunk_id:
-                                        existing_chunk["from_fulltext"] = True
-                                        existing_chunk["fulltext_rank"] = chunk.get("rank")
-                                        break
-                            else:
-                                # New chunk from full-text only
-                                chunk_copy = chunk.copy()
-                                chunk_copy["from_semantic"] = False
-                                chunk_copy["from_fulltext"] = True
-                                all_chunks.append(chunk_copy)
-                                chunks_seen.add(chunk_id)
-                        break
+        fulltext_index = {} # so we only need to loop ones
+        for doc in fulltext_results.get("results", []):
+            for chunk in doc["chunks"]:
+                fulltext_index[chunk["chunk_id"]] = {"chunk": chunk, "doc": doc}
 
-            # Sort chunks: prioritize chunks found in both methods, then by best score/rank
-            def chunk_sort_key(c):
-                in_both = c.get("from_semantic", False) and c.get("from_fulltext", False)
-                semantic_sim = c.get("similarity", 0) if c.get("from_semantic") else 0
-                fulltext_rank = c.get("rank", 0) if c.get("from_fulltext") else 0
-                # Prioritize: 1) in both, 2) semantic similarity, 3) fulltext rank
-                return (not in_both, -semantic_sim, -fulltext_rank)
+        final_docs_map = {}
+        # loop over semantic results and merge in the fulltext chunks
+        for doc in semantic_results.get("results", []):
+            doc_id = doc["doc_id"]
+            final_docs_map[doc_id] = doc
 
-            all_chunks.sort(key=chunk_sort_key)
+            for chunk in doc["chunks"]:
+                c_id = chunk["chunk_id"]
+                rank_semantic = rank_map_semantic[c_id]
+                rrf_score = 1.0 / (rrf_k + rank_semantic)
 
-            final_results.append({
-                "document": result["document"],
-                "chunks": all_chunks,
-                "rrf_score": result["rrf_score"],
-                "semantic_rank": semantic_ranks.get(doc_id),
-                "fulltext_rank": fulltext_ranks.get(doc_id),
-            })
+                if "rrf_rank" not in chunk:
+                    chunk["rrf_rank"] = {"semantic":rank_semantic}
+                else:
+                    chunk["rrf_rank"]["semantic"] = rank_semantic
+
+                if c_id in fulltext_index:
+                    rank_fulltext = rank_map_fulltext[c_id]
+                    rrf_score += 1.0 / (rrf_k + rank_fulltext)
+
+                    chunk["rrf_rank"]["fulltext"] = rank_fulltext
+
+                    # merge chunk metadata
+                    #chunk["retrived"] = "semantic,fulltext"
+                    chunk["score"] = fulltext_index[c_id]["chunk"]["score"]
+                
+                    # lets make sure we have the best score for the doc
+                    if "best_score" not in final_docs_map[doc_id]:
+                        final_docs_map[doc_id]["best_score"] = chunk["score"]
+                    else:
+                        final_docs_map[doc_id]["best_score"] = max(final_docs_map[doc_id]["best_score"], chunk["score"])
+
+                    del fulltext_index[c_id]
+                #else:
+                #    chunk["retrived"] = "semantic"
+
+                chunk["rrf_score"] = rrf_score
+
+        # merge all remaining fulltext chunks
+        for c_id, data in fulltext_index.items():
+            chunk = data["chunk"]
+            source_doc = data["doc"]
+            doc_id = source_doc["doc_id"]
+
+            rank_fulltext = rank_map_fulltext[c_id]
+            chunk["rrf_score"] = 1.0 / (rrf_k + rank_fulltext)
+            if "rrf_rank" not in chunk:
+                chunk["rrf_rank"] = {"fulltext":rank_fulltext}
+            else:
+                chunk["rrf_rank"]["fulltext"] = rank_fulltext
+            #chunk["retrived"] = "fulltext"
+
+            if doc_id in final_docs_map:
+                final_docs_map[doc_id]["chunks"].append(chunk)
+                final_docs_map[doc_id]["best_score"] = source_doc["best_score"]
+            else:
+                new_doc = source_doc.copy()
+                new_doc["chunks"] = [chunk]
+                final_docs_map[doc_id] = new_doc
+                
+        final_results = list(final_docs_map.values())
+
+        # sort based on rrf_score
+        for doc in final_results:
+            doc["chunks"].sort(key=lambda x: x["rrf_score"], reverse=True)
+            doc["best_rrf"] = doc["chunks"][0]["rrf_score"]
+
+        final_results.sort(key=lambda x: x["best_rrf"], reverse=True)
+        final_results = final_results[:max_results]
 
         fusion_time = time.time() - fusion_start
         total_time = time.time() - total_start
@@ -350,8 +281,9 @@ def search_hybrid(
                 "total_results": len(final_results),
                 "query": query,
                 "max_results": max_results,
-                "semantic_results": len(semantic_list),
-                "fulltext_results": len(fulltext_list),
+                "semantic_results": semantic_results["metadata"]["total_results"],
+                "fulltext_results": fulltext_results["metadata"]["total_results"],
+                "hybrid_results": len(final_results),
                 "rrf_k": rrf_k,
             },
         }
