@@ -60,6 +60,7 @@ test = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",
     "fastapi[all]", # For TestClient and web testing
+    "reportlab",
 ]
 
 [project.scripts]
