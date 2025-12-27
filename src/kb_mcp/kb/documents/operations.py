@@ -644,6 +644,7 @@ def add_document(
         data=parse_data,
         extract_images=extract_images,
         describe_images=describe_images,
+        parser_name=parser_name,
     )
 
     if not doc_dicts:

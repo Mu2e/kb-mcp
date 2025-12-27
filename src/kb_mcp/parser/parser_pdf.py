@@ -188,13 +188,14 @@ class PDFParser(BaseParser):
                                         #image_base64 = base64.b64encode(image_bytes).decode()
                                         
                                         # Create placeholder text
-                                        placeholder = f"\n\n[Image {image_counter}]\n\n"
+                                        image_name = f"image-{image_counter}.png"
+                                        placeholder = f"\n\n![Image {image_counter}]({image_name})\n\n"
                                         page_image_placeholders.append(placeholder)
                                         
                                         # Always create minimal image dict with meta (for description generation)
                                         # Full fields (source_id, doc_id, binary, etc.) will be added in parse() if needed
                                         image_dict = {
-                                            "doc_id": f"{parent_data['doc_id']}-image-{image_counter}",
+                                            "doc_id": f"{parent_data['doc_id']}-{image_name}",
                                             "source_id": parent_data["source_id"],
                                             "source_type": "image/png",
                                             "doc_type": "image",
@@ -202,6 +203,7 @@ class PDFParser(BaseParser):
                                             "meta": {
                                                 "page": page_num_1_indexed,
                                                 "image_number": image_counter,
+                                                "image_name": image_name,
                                                 "parent_doc_id": parent_data.get("id", parent_data['doc_id']),
                                             }
                                         }

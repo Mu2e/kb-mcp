@@ -12,6 +12,7 @@ def parse(
     data: Optional[dict] = None,
     extract_images: Optional[bool] = None,
     describe_images: Optional[bool] = None,
+    parser_name: Optional[str] = None,
 ) -> List[dict]:
     """Parse a document and return list of document dictionaries.
     
@@ -38,6 +39,9 @@ def parse(
                         - OPENAI_BASE_URL
                         - OPENAI_API_KEY
                         If None, reads from PARSE_IMAGE_LLM_DESCRIPTION env var.
+        parser_name: Optional parser name (e.g., "kb-mcp", "marker"). 
+                     If "marker", uses marker-pdf for parsing (PDF only).
+                     If None or "kb-mcp", uses standard parsers.
     
     Returns:
         List of dictionaries (can be converted to Documents):
@@ -150,20 +154,17 @@ def parse(
             doc_data["source_type"] = mime_type
         else:
             mime_type = doc_data["source_type"]
-        
-        # Get appropriate parser
-        parser = get_parser(file_path, doc_type=mime_type)
-        
+
         # Add file metadata to meta dict
         file_stat = file_path.stat()
         doc_data.setdefault("meta", {}).update({
             "filename": file_path.name,
             "filepath": str(file_path.absolute()),
             "filesize": file_stat.st_size,
-        })
+            })
         if "uri" not in doc_data:
             doc_data["uri"] = f"file://{file_path.absolute()}"
-        
+            
         # Check if we need to extract images (for additional docs or descriptions)
         from ..config import get_parser_config
         parser_config = get_parser_config()
@@ -176,16 +177,29 @@ def parse(
             generate_llm_descriptions = parser_config['image_llm_description']
         else:
             generate_llm_descriptions = describe_images
-        
-        # Extract text and images (if enabled)
+
         import time
         text_extraction_start = time.time()
-        
+        image_dicts = []
+
+        if parser_name == "marker":
+            # Marker-pdf implementation
+            if mime_type != "application/pdf":
+                 raise NotImplementedError(f"Marker parser only supports PDF, got {mime_type}")
+            
+            from .parser_marker import MarkerParser
+            parser = MarkerParser(file_path, mime_type)
+        else:
+            # Standard implementation
+            # Get appropriate parser
+            parser = get_parser(file_path, doc_type=mime_type)
+            
+            
+        # Extract text and images (if enabled)
         if hasattr(parser, 'extract_text_and_images_dict') and (create_additional_docs or generate_llm_descriptions):
             # Parser supports image extraction (e.g., PDF)
             # Extract images if we need them for either additional docs or descriptions
             text, image_dicts = parser.extract_text_and_images_dict(doc_data)
-            
         else:
             # Simple text extraction
             text = parser.get_text()
@@ -204,22 +218,38 @@ def parse(
             image_description_time = time.time() - image_description_start
             
             # Replace placeholders in main text with descriptions
+            import re
+            
+            # Map of image_name to its generated description
+            image_descriptions = {
+                img_dict["meta"].get("image_name"): img_dict["text"]
+                for img_dict in image_dicts
+                if "text" in img_dict and img_dict["text"] and img_dict["meta"].get("image_name")
+            }
+
+            def replace_image_placeholder(match):
+                alt_text = match.group(1)
+                image_name = match.group(2)
+                
+                description = image_descriptions.get(image_name)
+                if description:
+                    # Update alt text with description
+                    return f"![{alt_text}: {description}]({image_name})"
+                
+                return match.group(0) # No change if no description
+
+            # Regex to match markdown image tags: ![alt](image_name)
+            text = re.sub(r'!\[(.*?)\]\((.*?)\)', replace_image_placeholder, text)
+
+            # Fallback for old standard parser placeholders [Image n] if any remain
             for img_dict in image_dicts:
-                if "text" in img_dict and img_dict["text"]:  # Only if description was generated
-                    img_number = img_dict["meta"]["image_number"]
-                    description = img_dict["text"]
-                    
-                    # Replace placeholder in main text (handle with or without newlines)
-                    placeholder_with_newlines = f"\n\n[Image {img_number}]\n\n"
-                    placeholder_simple = f"[Image {img_number}]"
-                    
-                    if placeholder_with_newlines in text:
-                        # Preserve newlines in replacement
-                        replacement = f"\n\n[Image {img_number}: {description}]\n\n"
-                        text = text.replace(placeholder_with_newlines, replacement)
-                    elif placeholder_simple in text:
-                        replacement = f"[Image {img_number}: {description}]"
-                        text = text.replace(placeholder_simple, replacement)
+                if "text" in img_dict and img_dict["text"]:
+                    img_number = img_dict["meta"].get("image_number")
+                    if img_number is not None:
+                        description = img_dict["text"]
+                        placeholder = f"[Image {img_number}]"
+                        if placeholder in text:
+                            text = text.replace(placeholder, f"[{placeholder}: {description}]")
         
         # Filter images if needed (placeholder for future filtering logic)
         # For now, keep all images that have binary data (i.e., are real image dicts)

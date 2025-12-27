@@ -1,0 +1,127 @@
+"""Marker parser for high-quality PDF to markdown conversion."""
+
+import logging
+import time
+import io
+import re
+from pathlib import Path
+from typing import List, Tuple, Dict, Any, Optional
+
+from .parser_base import BaseParser
+
+logger = logging.getLogger(__name__)
+
+# Module-level cache for the converter
+_CONVERTER_CACHE = None
+
+def _get_converter() -> Any:
+    """Initialize and return the marker PdfConverter (cached)."""
+    global _CONVERTER_CACHE
+    if _CONVERTER_CACHE is not None:
+        return _CONVERTER_CACHE
+
+    try:
+        from marker.converters.pdf import PdfConverter
+        from marker.models import create_model_dict
+    except ImportError:
+        logger.error("marker-pdf not installed. Install with: pip install \"marker-pdf[all]\"")
+        return None
+
+    logger.info("Initializing marker PdfConverter (this may take a while)...")
+    artifact_dict = create_model_dict()
+    config = {
+        "output_format": "markdown",
+        "disable_image_extraction": False,
+        "languages": "en",
+        "batch_multiplier": 6, # Use higher multiplier for the large GPUs
+    }
+    _CONVERTER_CACHE = PdfConverter(artifact_dict=artifact_dict, config=config)
+    return _CONVERTER_CACHE
+
+
+class MarkerParser(BaseParser):
+    """Parser for PDF documents using marker-pdf."""
+
+    def extract_text(self) -> str:
+        """Extract text using marker (uses extract_text_and_images_dict internally)."""
+        text, _ = self.extract_text_and_images_dict({})
+        return text
+
+    def extract_text_and_images_dict(
+        self,
+        parent_data: dict,
+    ) -> Tuple[str, List[dict]]:
+        """Extract text and images from PDF using marker-pdf.
+        
+        Args:
+            parent_data: Dictionary with parent document data
+           
+        Returns:
+            Tuple of (markdown_text, list_of_image_dicts)
+        """
+        converter = _get_converter()
+        if converter is None:
+            return "", []
+
+        try:
+            from io import BytesIO
+            
+            # Parse document
+            rendered = converter(str(self.file_path))
+            text = rendered.markdown
+            
+            image_dicts = []
+            
+            # Extract images from marker output
+            if rendered.images:
+                for img_name, img in rendered.images.items():
+                    # Convert PIL image to bytes
+                    img_byte_arr = BytesIO()
+                    
+                    # Detect format from img object or filename
+                    img_format = img.format
+                    if not img_format:
+                        ext = Path(img_name).suffix.lower()
+                        if ext in ['.jpg', '.jpeg']:
+                            img_format = 'JPEG'
+                        elif ext == '.png':
+                            img_format = 'PNG'
+                        else:
+                            img_format = 'JPEG' # Default fallback
+                            
+                    img.save(img_byte_arr, format=img_format)
+                    img_bytes = img_byte_arr.getvalue()
+                    
+                    # Create image doc dict
+                    img_dict = {
+                        "source_id": parent_data.get("source_id", "local"),
+                        "doc_id": parent_data.get("doc_id", self.file_path.stem)+"-"+img_name,
+                        "doc_type": "image",
+                        "binary": img_bytes,
+                        "meta": {
+                            "image_name": img_name,
+                            "parser": "marker",
+                        }
+                    }
+                    
+                    # Merge remaining metadata from parent
+                    if "meta" in parent_data:
+                        img_dict["meta"].update(parent_data["meta"])
+                    
+                    # Try to extract page number from name like '_page_3_Figure_3.jpeg'
+                    page_match = re.search(r'page_(\d+)', img_name)
+                    if page_match:
+                        img_dict["meta"]["page"] = int(page_match.group(1))
+                    
+                    # Extract image number if possible
+                    image_num_match = re.search(r'Figure_(\d+)', img_name)
+                    if image_num_match:
+                        img_dict["meta"]["image_number"] = int(image_num_match.group(1))
+                    
+                    image_dicts.append(img_dict)
+                    
+            return text, image_dicts
+            
+        except Exception as e:
+            logger.error(f"Error parsing with marker: {e}", exc_info=True)
+            return "", []
