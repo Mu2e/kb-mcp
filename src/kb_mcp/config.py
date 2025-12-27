@@ -4,6 +4,7 @@ Configuration management for kb-mcp.
 
 import os
 from typing import Optional
+import json
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -95,14 +96,18 @@ def get_llm_config() -> dict:
             * `summary_model` (str): Summarization model (Env: `SUMMARY_MODEL`, defaults to DEFAULT_LLM_MODEL).
             * `eval_gen_model` (str): Evaluation question generation model (Env: `EVAL_GEN_MODEL`, defaults to DEFAULT_LLM_MODEL).
             * `eval_judge_model` (str): Evaluation answer judging model (Env: `EVAL_JUDGE_MODEL`, defaults to DEFAULT_LLM_MODEL).
+            * `image_llm_description` (bool): Use LLM for image descriptions (Env: `PARSE_IMAGE_DESCRIPTION_MODEL`).
     """
+    base_url_models = json.loads(os.getenv("OPENAI_BASE_URL_MODELS", "{}"))
     return {
         'openai_api_key': os.getenv("OPENAI_API_KEY"),
         'openai_base_url': os.getenv("OPENAI_BASE_URL"),
+        'openai_base_url_models': base_url_models,
         'default_model': get_default_llm_model(),
         'summary_model': os.getenv("SUMMARY_MODEL", get_default_llm_model()),
         'eval_gen_model': os.getenv("EVAL_GEN_MODEL", get_default_llm_model()),
         'eval_judge_model': os.getenv("EVAL_JUDGE_MODEL", get_default_llm_model()),
+        'image_description_model': os.getenv("PARSE_IMAGE_DESCRIPTION_MODEL", get_default_llm_model()),
     }
 
 # Integrations

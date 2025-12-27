@@ -139,8 +139,7 @@ def search_fulltext(
                 FROM chunks c
                 CROSS JOIN query
                 JOIN documents d ON c.document_id = d.id
-                WHERE c.text_search_vector IS NOT NULL
-                  AND c.text_search_vector @@ query.tsq
+                WHERE c.text_search_vector @@ query.tsq
                   AND {where_clause_sql}
                 ORDER BY score DESC
                 LIMIT :initial_limit

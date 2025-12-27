@@ -569,122 +569,45 @@ def setup_api_routes(app, session_manager: WebSessionManager):
                 search_fn = search
 
             # Perform search
-            try:
-                logger.debug(f"Performing {search_type} search with query: '{query}', max_results: {max_results}")
-                result = search_fn(
-                    query=query,
-                    embedding_name=embedding_name,
-                    max_results=max_results,
-                    source_id=source_id,
-                    doc_type=doc_type,
-                    chunking_strategy=chunking_strategy,
-                    filter=filter_dict,
-                    **metadata_filters
-                )
-                logger.debug(f"Search returned {result.get('metadata', {}).get('total_results', 0)} total results, {len(result.get('results', []))} result objects")
-            except Exception as e:
-                logger.error(f"Error performing {search_type} search: {e}", exc_info=True)
-                return JSONResponse(
-                    {
-                        "error": f"Search failed: {str(e)}",
-                        "documents": [],
-                        "total_results": 0,
-                        "query": query,
-                        "search_type": search_type,
-                    },
-                    status_code=500
-                )
+            result = search_fn(
+                query=query,
+                embedding_name=embedding_name,
+                max_results=max_results,
+                source_id=source_id,
+                doc_type=doc_type,
+                chunking_strategy=chunking_strategy,
+                filter=filter_dict,
+                **metadata_filters
+            )
 
             # Convert results to document dictionaries
             documents_data = []
-            results_list = result.get('results', [])
-            logger.debug(f"Processing {len(results_list)} results for {search_type} search with query '{query}'")
-            
-            if not results_list:
-                logger.warning(f"No results returned from {search_type} search for query '{query}'")
-            
-            for idx, doc_result in enumerate(results_list):
+            for doc_result in result.get('results', []):
                 doc = doc_result.get('document')
-                doc_uid = doc_result.get('doc_uid')
-                
-                # If document is None or not accessible, try to fetch by doc_uid
-                if doc is None or (hasattr(doc, 'id') and doc.id is None):
-                    logger.debug(f"Result {idx}: Document object is None or invalid, trying doc_uid: {doc_uid}")
-                    if doc_uid:
-                        from ....kb.database import get_db_session
-                        from ....kb.db_models import Document
-                        try:
-                            with get_db_session() as session:
-                                doc = session.query(Document).filter(Document.id == doc_uid).first()
-                                if doc:
-                                    logger.debug(f"Successfully fetched document {doc_uid} by doc_uid")
-                                else:
-                                    logger.warning(f"Could not find document with id: {doc_uid}")
-                                    continue
-                        except Exception as e:
-                            logger.error(f"Error fetching document {doc_uid}: {e}", exc_info=True)
-                            continue
-                    else:
-                        logger.warning(f"Result {idx}: No document or doc_uid in result. Keys: {list(doc_result.keys())}")
-                        continue
-                else:
-                    # Document exists, but might be detached from session
-                    try:
-                        # Try to access an attribute to see if it's accessible
-                        _ = doc.id
-                        logger.debug(f"Result {idx}: Document {doc.id} is accessible")
-                    except Exception as e:
-                        logger.warning(f"Result {idx}: Document object not accessible: {e}. Trying to fetch by doc_uid: {doc_uid}")
-                        if doc_uid:
-                            from ....kb.database import get_db_session
-                            from ....kb.db_models import Document
-                            try:
-                                with get_db_session() as session:
-                                    doc = session.query(Document).filter(Document.id == doc_uid).first()
-                                    if not doc:
-                                        logger.warning(f"Could not find document with id: {doc_uid}")
-                                        continue
-                            except Exception as fetch_error:
-                                logger.error(f"Error fetching document {doc_uid}: {fetch_error}", exc_info=True)
-                                continue
-                        else:
-                            continue
-                
-                try:
+                if doc:
                     doc_dict = document_to_dict(doc, include_text=False)
                     # Add search-specific information
                     doc_dict['chunks'] = doc_result.get('chunks', [])
 
-                    # Extract best similarity and score from result or chunks
-                    best_similarity = doc_result.get('best_similarity')
-                    best_score = doc_result.get('best_score')
+                    # Extract best similarity and rank scores
+                    best_similarity = None
                     best_rank = None
-                    
-                    # Fallback to extracting from chunks if not in result
-                    if best_similarity is None and doc_result.get('chunks'):
+                    if doc_result.get('chunks'):
                         first_chunk = doc_result['chunks'][0]
                         best_similarity = first_chunk.get('similarity')
-                        # For fulltext, check for 'score' instead of 'rank'
-                        best_score = first_chunk.get('score')
-                        best_rank = first_chunk.get('rank')  # Legacy field, may be None
+                        best_rank = first_chunk.get('rank')
 
                     doc_dict['best_similarity'] = best_similarity
-                    doc_dict['best_score'] = best_score
-                    doc_dict['best_rank'] = best_rank  # Legacy field for backward compatibility
+                    doc_dict['best_rank'] = best_rank
 
                     # For hybrid search, include RRF score and ranks
                     if search_type == "hybrid":
-                        # Try best_rrf first (new format), then rrf_score (old format)
-                        doc_dict['rrf_score'] = doc_result.get('best_rrf') or doc_result.get('rrf_score')
+                        doc_dict['rrf_score'] = doc_result.get('rrf_score')
                         doc_dict['semantic_rank'] = doc_result.get('semantic_rank')
                         doc_dict['fulltext_rank'] = doc_result.get('fulltext_rank')
 
                     documents_data.append(doc_dict)
-                except Exception as e:
-                    logger.error(f"Error processing document result: {e}", exc_info=True)
-                    continue
 
-            logger.debug(f"Returning {len(documents_data)} documents to client for {search_type} search (query: '{query}')")
             return JSONResponse({
                 "documents": documents_data,
                 "total_results": result.get('metadata', {}).get('total_results', 0),
@@ -871,34 +794,12 @@ def setup_api_routes(app, session_manager: WebSessionManager):
             documents_data = []
             for doc_result in result.get('results', []):
                 doc = doc_result.get('document')
-                if not doc:
-                    # Try to use doc_uid or doc_id to fetch document if available
-                    doc_uid = doc_result.get('doc_uid')
-                    if doc_uid:
-                        from ....kb.database import get_db_session
-                        from ....kb.db_models import Document
-                        with get_db_session() as session:
-                            doc = session.query(Document).filter(Document.id == doc_uid).first()
-                            if not doc:
-                                continue
-                    else:
-                        continue
-                
-                try:
+                if doc:
                     doc_dict = document_to_dict(doc, include_text=False)
                     # Add search-specific information
                     doc_dict['chunks'] = doc_result.get('chunks', [])
-                    # Use best_similarity or best_score from result, fallback to chunks
-                    doc_dict['best_similarity'] = doc_result.get('best_similarity')
-                    doc_dict['best_score'] = doc_result.get('best_score')
-                    if doc_dict['best_similarity'] is None and doc_result.get('chunks'):
-                        first_chunk = doc_result['chunks'][0]
-                        doc_dict['best_similarity'] = first_chunk.get('similarity')
-                        doc_dict['best_score'] = first_chunk.get('score')
+                    doc_dict['best_similarity'] = doc_result['chunks'][0]['similarity'] if doc_result.get('chunks') else None
                     documents_data.append(doc_dict)
-                except Exception as e:
-                    logger.error(f"Error processing document result: {e}", exc_info=True)
-                    continue
             
             return JSONResponse({
                 "documents": documents_data,

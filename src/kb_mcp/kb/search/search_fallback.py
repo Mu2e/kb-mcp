@@ -249,7 +249,7 @@ def _search_fallback(
 
     # Sort documents by best chunk similarity
     final_results.sort(
-        key=lambda x: x["best_similarity"] if x["best_similarity"] else 0,
+        key=lambda x: x["chunks"][0]["similarity"] if x["chunks"] else 0,
         reverse=True
     )
 

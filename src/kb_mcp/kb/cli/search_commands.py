@@ -55,13 +55,7 @@ def cmd_search(args):
             if doc.doc_type:
                 print(f"   Type: {doc.doc_type}")
             if doc_result['chunks']:
-                first_chunk = doc_result['chunks'][0]
-                similarity = doc_result.get('best_similarity') or first_chunk.get('similarity')
-                score = doc_result.get('best_score') or first_chunk.get('score')
-                if similarity:
-                    print(f"   Best similarity: {similarity:.4f}")
-                elif score:
-                    print(f"   Best score: {score:.4f}")
+                print(f"   Best similarity: {doc_result['chunks'][0]['similarity']:.4f}")
             print(f"   Matching chunks: {len(doc_result['chunks'])}")
 
             # Show top chunks
@@ -138,13 +132,7 @@ def cmd_similar(args):
             if doc.doc_type:
                 print(f"   Type: {doc.doc_type}")
             if doc_result['chunks']:
-                first_chunk = doc_result['chunks'][0]
-                similarity = doc_result.get('best_similarity') or first_chunk.get('similarity')
-                score = doc_result.get('best_score') or first_chunk.get('score')
-                if similarity:
-                    print(f"   Best similarity: {similarity:.4f}")
-                elif score:
-                    print(f"   Best score: {score:.4f}")
+                print(f"   Best similarity: {doc_result['chunks'][0]['similarity']:.4f}")
             print(f"   Matching chunks: {len(doc_result['chunks'])}")
 
             # Show top chunks
