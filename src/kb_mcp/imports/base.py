@@ -114,11 +114,17 @@ class Source(ABC):
             List of Document objects added to knowledge base
         """
         # Setup output directory
-        if output_dir is None:
-            data_dir = get_data_dir()
-            output_dir = Path(data_dir) / "sources" / self.source_id
-        output_dir = Path(output_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
+        # Use temporary directory by default - files will be copied to KB storage by ingest()
+        use_temp_dir = output_dir is None
+        if use_temp_dir:
+            import tempfile
+            # Create temp dir that will be cleaned up when process exits
+            temp_dir = tempfile.mkdtemp(prefix=f"kb_import_{self.source_id}_")
+            output_dir = Path(temp_dir)
+            logger.debug(f"Using temporary download directory: {output_dir}")
+        else:
+            output_dir = Path(output_dir)
+            output_dir.mkdir(parents=True, exist_ok=True)
         
         logger.info(f"Fetching items from {self.name} (source_id: {self.source_id})")
         if query:
@@ -190,6 +196,15 @@ class Source(ABC):
             except Exception as e:
                 logger.error(f"Error during auto-embed: {e}", exc_info=True)
 
+        # Clean up temporary directory if we created one
+        if use_temp_dir:
+            try:
+                import shutil
+                shutil.rmtree(output_dir)
+                logger.debug(f"Cleaned up temporary directory: {output_dir}")
+            except Exception as e:
+                logger.warning(f"Could not clean up temporary directory {output_dir}: {e}")
+
         return documents
     
     def _process_items_sequential(
@@ -207,6 +222,7 @@ class Source(ABC):
 
         document_ids = []
         processed = 0
+        skipped = 0
         errors = 0
 
         # Commit after each document to ensure progress is saved
@@ -229,9 +245,14 @@ class Source(ABC):
                         session.rollback()
                         continue
 
-                    # Success - add document IDs and commit
-                    document_ids.extend(result.get("document_ids", []))
-                    processed += 1
+                    # Check if item was skipped (already exists)
+                    if result.get("skipped"):
+                        skipped += 1
+                        logger.debug(f"Item {item_id} was skipped (already processed)")
+                    else:
+                        # Success - add document IDs
+                        document_ids.extend(result.get("document_ids", []))
+                        processed += 1
 
                     # Commit after each document to ensure progress is saved
                     # This is slower but safer - if an error occurs, we don't lose all progress
@@ -250,6 +271,9 @@ class Source(ABC):
 
         if errors > 0:
             logger.warning(f"Encountered {errors} error(s) during processing")
+
+        if skipped > 0:
+            logger.info(f"Skipped {skipped} item(s) (already processed)")
 
         return document_ids
     

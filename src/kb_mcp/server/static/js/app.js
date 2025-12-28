@@ -593,11 +593,13 @@ async function loadDocuments(reset = false) {
         }
         
         const response = await fetch(apiEndpoint + '?' + params.toString());
+        const data = await response.json();
+
         if (!response.ok) {
             const errorMsg = data.error || `Failed to load documents: ${response.status}`;
             throw new Error(errorMsg);
         }
-        
+
         // Check for error in response data
         if (data.error) {
             throw new Error(data.error);

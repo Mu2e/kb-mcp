@@ -589,7 +589,8 @@ def add_document(
         result["raw_document_id"] = raw_doc_id
 
         # If raw_doc_id is None, file already exists (same content_hash)
-        if raw_doc_id is None and not force_reparse:
+        # Always get the existing raw document ID for linking purposes
+        if raw_doc_id is None:
             # Get the existing RawDocument to retrieve its ID
             from ..db_models import RawDocument
             existing_raw = db_session.query(RawDocument).filter(
@@ -597,16 +598,24 @@ def add_document(
             ).first()
 
             if existing_raw:
+                raw_doc_id = existing_raw.id  # Update raw_doc_id for linking
                 result["raw_document_id"] = existing_raw.id
-                result["skipped"] = True
 
-                logger.info(
-                    f"File already processed (hash: {content_hash[:16]}...), "
-                    f"skipping (use force_reparse=True to re-parse)"
-                )
+                # If not force_reparse, skip and return early
+                if not force_reparse:
+                    result["skipped"] = True
 
-                # Return early - file already processed, no need to re-parse
-                return result
+                    logger.info(
+                        f"File already processed (hash: {content_hash[:16]}...), "
+                        f"skipping (use force_reparse=True to re-parse)"
+                    )
+                    # Return early - file already processed, no need to re-parse
+                    return result
+                else:
+                    logger.info(
+                        f"File already processed (hash: {content_hash[:16]}...), "
+                        f"but force_reparse=True, re-parsing with parser: {parser_name}"
+                    )
 
         # If skip_parse is True, return early (only created RawDocument)
         if skip_parse:
@@ -626,52 +635,56 @@ def add_document(
         # Commit to ensure raw_doc and parser have IDs
         db_session.commit()
 
-    # If we get here, we need to parse the file
-    # Import parse function (lazy import to avoid circular dependencies)
-    from kb_mcp.parser import parse
+        # If we get here, we need to parse the file
+        # Import parse function (lazy import to avoid circular dependencies)
+        from kb_mcp.parser import parse
 
-    # Prepare data for parsing
-    parse_data = {
-        "source_id": source_id,
-        "doc_id": doc_id,
-    }
-    if meta:
-        parse_data["meta"] = meta
+        # Prepare data for parsing
+        parse_data = {
+            "source_id": source_id,
+            "doc_id": doc_id,
+        }
+        if meta:
+            parse_data["meta"] = meta
 
-    # Parse the file - returns List[dict]
-    doc_dicts = parse(
-        actual_file_path,
-        data=parse_data,
-        extract_images=extract_images,
-        describe_images=describe_images,
-        parser_name=parser_name,
-    )
+        # Parse the file - returns List[dict]
+        doc_dicts = parse(
+            actual_file_path,
+            data=parse_data,
+            extract_images=extract_images,
+            describe_images=describe_images,
+            parser_name=parser_name,
+        )
 
-    if not doc_dicts:
-        raise ValueError(f"No documents extracted from {actual_file_path}")
+        if not doc_dicts:
+            raise ValueError(f"No documents extracted from {actual_file_path}")
 
-    # Extract timing information from first document's meta (if available)
-    timing_info = None
-    if doc_dicts and isinstance(doc_dicts[0].get("meta"), dict):
-        timing_info = doc_dicts[0]["meta"].pop("_parsing_timing", None)
+        # Extract timing information from first document's meta (if available)
+        timing_info = None
+        if doc_dicts and isinstance(doc_dicts[0].get("meta"), dict):
+            timing_info = doc_dicts[0]["meta"].pop("_parsing_timing", None)
+            # Remove filepath and filesize from metadata (internal fields not needed in DB)
+            doc_dicts[0]["meta"].pop("filepath", None)
 
-    result["timing"] = timing_info
+        result["timing"] = timing_info
 
-    # Convert dicts to Document objects
-    documents = [Document.from_dict(doc_dict) for doc_dict in doc_dicts]
+        # Convert dicts to Document objects
+        documents = [Document.from_dict(doc_dict) for doc_dict in doc_dicts]
 
-    # Set raw_document_id and parser_id on all documents
-    for doc in documents:
-        doc.raw_document_id = raw_doc_id
-        doc.parser_id = parser.name
+        # Set raw_document_id and parser_id on all documents
+        for doc in documents:
+            doc.raw_document_id = raw_doc_id
+            doc.parser_id = parser.name
 
-    # Add all documents to the database (handles deduplication via dedup_level)
-    added_docs = add_parsed_many(documents, dedup_level=dedup_level, session=session)
+        # Add all documents to the database (handles deduplication via dedup_level)
+        added_docs = add_parsed_many(documents, dedup_level=dedup_level, session=db_session)
 
-    # Update result with parsing information
-    result["parsed"] = True
-    result["document_ids"] = [doc.id for doc in added_docs] if added_docs else []
-    result["num_documents"] = len(added_docs) if added_docs else 0
+        # Update result with parsing information
+        result["parsed"] = True
+        result["document_ids"] = [doc.id for doc in added_docs] if added_docs else []
+        result["num_documents"] = len(added_docs) if added_docs else 0
+
+        logger.info(f"Added {len(added_docs) if added_docs else 0} document(s) to database: {result['document_ids']}")
 
     # Log parsing operation (one entry per file parse, linked to first document)
     if added_docs and session:

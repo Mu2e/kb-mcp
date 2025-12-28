@@ -6,6 +6,7 @@ https://github.com/corrodis/mu2eDocChat/blob/main/mu2e/chunking.py
 """
 
 import logging
+from abc import ABC, abstractmethod
 from typing import Dict, List, Optional, Any
 
 import tiktoken
@@ -77,39 +78,55 @@ def count_tokens(text: str, model: Optional[str] = None) -> int:
     return len(encoding.encode(text))
 
 
-def _chunk_by_tokens(
-    text: str,
-    encoding: Optional[Any] = None,
-    chunk_size: int = 1000,
-    chunk_overlap: int = 200,
-    strategy_suffix: str = "",
-    **kwargs,  # Accept other params but don't use them
-) -> List[Dict[str, Any]]:
-    """Chunk text by token count with sliding window.
+# ============================================================================
+# Strategy-based Architecture
+# ============================================================================
 
-    Args:
-        text: Input text to chunk
-        chunk_size: Target chunk size in tokens
-        chunk_overlap: Overlap between chunks in tokens
-        encoding: Optional tiktoken encoding object. If None, uses default encoding.
-        strategy_suffix: Optional suffix to append to strategy name (e.g., "_no_gist")
+class ChunkStrategy(ABC):
+    """Abstract base class for chunking strategies.
 
-    Returns:
-        List of dictionaries with chunk information (without meta field)
+    Each strategy must implement two static methods:
+    - get_strategy_name: Returns the full strategy name that will be used
+    - chunk: Performs the actual chunking
+
+    Both methods use the same logic to ensure consistency.
     """
-    if encoding is None:
-        encoding = _get_encoding()
-    
-    # Generate chunk strategy string for this specific strategy
-    # Format: tokens_chunk_size_chunk_overlap[suffix]
-    chunk_strategy = f"tokens_{chunk_size}_{chunk_overlap}{strategy_suffix}"
-    
-    tokens = encoding.encode(text)
-    chunks = []
 
-    if len(tokens) <= chunk_size:
-        # Single chunk - return entire text
-        token_length = len(tokens)
+    @staticmethod
+    def _get_prepending_config(config: Dict[str, Any]) -> tuple[bool, bool]:
+        """Get prepending configuration with defaults.
+
+        Args:
+            config: Configuration dictionary
+
+        Returns:
+            Tuple of (prepend_gist, prepend_section_path)
+        """
+        prepend_gist = config.get("prepend_gist", True)
+        prepend_section_path = config.get("prepend_section_path", True)
+        return prepend_gist, prepend_section_path
+
+    @staticmethod
+    def _create_single_chunk(
+        text: str,
+        chunk_strategy: str,
+        encoding: Any,
+        meta: Optional[Dict[str, Any]] = None
+    ) -> List[Dict[str, Any]]:
+        """Create a single chunk from text.
+
+        Helper method for strategies that create only one chunk (summary, image).
+
+        Args:
+            text: Text content for the chunk
+            chunk_strategy: Strategy name to use
+            encoding: tiktoken encoding for token counting
+            meta: Optional metadata dict (default: empty dict)
+
+        Returns:
+            List containing a single chunk dictionary
+        """
+        token_length = len(encoding.encode(text))
         return [
             {
                 "text": text,
@@ -118,93 +135,275 @@ def _chunk_by_tokens(
                 "token_length": token_length,
                 "chunk_index": 0,
                 "chunk_strategy": chunk_strategy,
-                "meta": {
-                    "chunk_size": chunk_size,
-                    "chunk_overlap": chunk_overlap,
-                },
+                "meta": meta or {},
             }
         ]
 
-    start_idx = 0
-    chunk_index = 0
+    @staticmethod
+    @abstractmethod
+    def get_strategy_name(config: Dict[str, Any]) -> str:
+        """Get the full strategy name for this configuration.
 
-    while start_idx < len(tokens):
-        end_idx = min(start_idx + chunk_size, len(tokens))
-        chunk_tokens = tokens[start_idx:end_idx]
-        chunk_text = encoding.decode(chunk_tokens)
+        Args:
+            config: Configuration dictionary with strategy-specific parameters
 
-        # Calculate character positions
-        if start_idx == 0:
-            char_start = 0
-        else:
-            # Decode tokens up to start_idx to find char position
-            prefix_tokens = tokens[:start_idx]
-            prefix_text = encoding.decode(prefix_tokens)
-            char_start = len(prefix_text)
+        Returns:
+            Full strategy name string (e.g., "tokens_1000_200_no_gist")
+        """
+        pass
 
-        char_end = char_start + len(chunk_text)
-        token_length = len(chunk_tokens)
+    @staticmethod
+    @abstractmethod
+    def chunk(text: str, config: Dict[str, Any], encoding: Any) -> List[Dict[str, Any]]:
+        """Chunk the text according to this strategy.
 
-        chunks.append(
-            {
-                "text": chunk_text,
-                "char_start_index": char_start,
-                "char_end_index": char_end,
-                "token_length": token_length,
-                "chunk_index": chunk_index,
-                "chunk_strategy": chunk_strategy,
-                "meta": {
-                    "chunk_size": chunk_size,
-                    "chunk_overlap": chunk_overlap,
-                },
-            }
+        Args:
+            text: Input text to chunk
+            config: Configuration dictionary with strategy-specific parameters
+            encoding: tiktoken encoding object for token operations
+
+        Returns:
+            List of chunk dictionaries
+        """
+        pass
+
+
+class TokensStrategy(ChunkStrategy):
+    """Token-based chunking strategy with sliding window."""
+
+    @staticmethod
+    def _ensure_defaults(config: Dict[str, Any]) -> Dict[str, Any]:
+        """Ensure default values are set in config.
+
+        Args:
+            config: Configuration dictionary
+
+        Returns:
+            New config dictionary with defaults applied
+        """
+        result = config.copy()
+        result.setdefault("chunk_size", 1000)
+        result.setdefault("chunk_overlap", 200)
+        return result
+
+    @staticmethod
+    def get_strategy_name(config: Dict[str, Any]) -> str:
+        """Get the strategy name for token-based chunking.
+
+        Format: tokens_{chunk_size}_{chunk_overlap}[suffix]
+        Example: "tokens_1000_200" or "tokens_1000_200_no_gist"
+        """
+        config = TokensStrategy._ensure_defaults(config)
+        chunk_size = config["chunk_size"]
+        chunk_overlap = config["chunk_overlap"]
+        prepend_gist, prepend_section_path = ChunkStrategy._get_prepending_config(config)
+
+        suffix = get_chunk_strategy_suffix(
+            prepend_gist=prepend_gist,
+            prepend_section_path=prepend_section_path
         )
 
-        chunk_index += 1
+        return f"tokens_{chunk_size}_{chunk_overlap}{suffix}"
 
-        # Move start position accounting for overlap
-        start_idx = end_idx - chunk_overlap
-        if end_idx >= len(tokens):
-            break
+    @staticmethod
+    def chunk(text: str, config: Dict[str, Any], encoding: Any) -> List[Dict[str, Any]]:
+        """Chunk text by token count with sliding window."""
+        config = TokensStrategy._ensure_defaults(config)
+        chunk_size = config["chunk_size"]
+        chunk_overlap = config["chunk_overlap"]
+        chunk_strategy = TokensStrategy.get_strategy_name(config)
 
-    return chunks
+        tokens = encoding.encode(text)
+        chunks = []
+
+        if len(tokens) <= chunk_size:
+            # Single chunk - return entire text
+            token_length = len(tokens)
+            return [
+                {
+                    "text": text,
+                    "char_start_index": 0,
+                    "char_end_index": len(text),
+                    "token_length": token_length,
+                    "chunk_index": 0,
+                    "chunk_strategy": chunk_strategy,
+                    "meta": {
+                        "chunk_size": chunk_size,
+                        "chunk_overlap": chunk_overlap,
+                    },
+                }
+            ]
+
+        start_idx = 0
+        chunk_index = 0
+
+        while start_idx < len(tokens):
+            end_idx = min(start_idx + chunk_size, len(tokens))
+            chunk_tokens = tokens[start_idx:end_idx]
+            chunk_text = encoding.decode(chunk_tokens)
+
+            # Calculate character positions
+            if start_idx == 0:
+                char_start = 0
+            else:
+                # Decode tokens up to start_idx to find char position
+                prefix_tokens = tokens[:start_idx]
+                prefix_text = encoding.decode(prefix_tokens)
+                char_start = len(prefix_text)
+
+            char_end = char_start + len(chunk_text)
+            token_length = len(chunk_tokens)
+
+            chunks.append(
+                {
+                    "text": chunk_text,
+                    "char_start_index": char_start,
+                    "char_end_index": char_end,
+                    "token_length": token_length,
+                    "chunk_index": chunk_index,
+                    "chunk_strategy": chunk_strategy,
+                    "meta": {
+                        "chunk_size": chunk_size,
+                        "chunk_overlap": chunk_overlap,
+                    },
+                }
+            )
+
+            chunk_index += 1
+
+            # Move start position accounting for overlap
+            start_idx = end_idx - chunk_overlap
+            if end_idx >= len(tokens):
+                break
+
+        return chunks
 
 
-def _chunk_by_slide(
-    text: str,
-    encoding: Optional[Any] = None,
-    strategy_suffix: str = "",
-    **kwargs,  # Accept other params but don't use them for strategy string
-) -> List[Dict[str, Any]]:
-    """Chunk text using sliding window strategy.
+class SlideStrategy(ChunkStrategy):
+    """Sliding window chunking strategy.
 
     TODO: Implement sliding window strategy if needed.
-    When implemented, this strategy will have its own parameters (not chunk_size/chunk_overlap).
+    For now, this uses token-based chunking.
+    """
+
+    @staticmethod
+    def get_strategy_name(config: Dict[str, Any]) -> str:
+        """Get the strategy name for slide chunking.
+
+        Format: slide[suffix]
+        Example: "slide" or "slide_no_gist"
+        """
+        prepend_gist, prepend_section_path = ChunkStrategy._get_prepending_config(config)
+
+        suffix = get_chunk_strategy_suffix(
+            prepend_gist=prepend_gist,
+            prepend_section_path=prepend_section_path
+        )
+
+        return f"slide{suffix}"
+
+    @staticmethod
+    def chunk(text: str, config: Dict[str, Any], encoding: Any) -> List[Dict[str, Any]]:
+        """Chunk text using sliding window strategy."""
+        chunk_strategy = SlideStrategy.get_strategy_name(config)
+
+        # For now, use token-based chunking but with slide strategy string
+        logger.info("Slide strategy not yet implemented, using token-based chunking")
+        # Temporarily use token-based chunking with default params
+        chunks = TokensStrategy.chunk(text, config, encoding)
+        # Override chunk_strategy in all chunks
+        for chunk in chunks:
+            chunk["chunk_strategy"] = chunk_strategy
+        return chunks
+
+
+class SummaryStrategy(ChunkStrategy):
+    """Summary-based chunking strategy.
+
+    This strategy creates a single chunk from the document summary.
+    """
+
+    @staticmethod
+    def get_strategy_name(config: Dict[str, Any]) -> str:
+        """Get the strategy name for summary chunking.
+
+        Format: summary
+        """
+        return "summary"
+
+    @staticmethod
+    def chunk(text: str, config: Dict[str, Any], encoding: Any) -> List[Dict[str, Any]]:
+        """Create a single chunk from the summary text."""
+        chunk_strategy = SummaryStrategy.get_strategy_name(config)
+        return ChunkStrategy._create_single_chunk(text, chunk_strategy, encoding)
+
+
+class ImageStrategy(ChunkStrategy):
+    """Image-based chunking strategy.
+
+    This strategy creates a single chunk from image metadata or description.
+    """
+
+    @staticmethod
+    def get_strategy_name(config: Dict[str, Any]) -> str:
+        """Get the strategy name for image chunking.
+
+        Format: image
+        """
+        return "image"
+
+    @staticmethod
+    def chunk(text: str, config: Dict[str, Any], encoding: Any) -> List[Dict[str, Any]]:
+        """Create a single chunk from the image text/metadata."""
+        chunk_strategy = ImageStrategy.get_strategy_name(config)
+        return ChunkStrategy._create_single_chunk(text, chunk_strategy, encoding)
+
+
+# Strategy registry - store classes, not instances (all methods are static)
+_STRATEGIES: Dict[str, type[ChunkStrategy]] = {
+    "tokens": TokensStrategy,
+    "slide": SlideStrategy,
+    "summary": SummaryStrategy,
+    "image": ImageStrategy,
+}
+
+
+def get_strategy_name(strategy: str = "tokens", config: Optional[Dict[str, Any]] = None) -> str:
+    """Get the effective strategy name that will be used for chunking.
+
+    This function returns the same strategy name that will be stored in the database
+    when chunks are created. Use this to predict the strategy name before chunking.
 
     Args:
-        text: Input text to chunk
-        encoding: Optional tiktoken encoding object. If None, uses default encoding.
-        strategy_suffix: Optional suffix to append to strategy name (e.g., "_no_gist")
-        **kwargs: Other parameters (ignored for now, but may be used when fully implemented)
+        strategy: Chunking strategy name ("tokens", "slide", "summary", "image").
+        config: Optional dictionary with strategy-specific parameters:
+            - chunk_size: Target chunk size in tokens (default: 1000)
+            - chunk_overlap: Overlap between chunks in tokens (default: 200)
+            - prepend_gist: Whether to prepend document gist (default: True)
+            - prepend_section_path: Whether to prepend section path (default: True)
 
     Returns:
-        List of dictionaries with chunk information (without meta field)
+        Full strategy name string (e.g., "tokens_1000_200", "tokens_1000_200_no_gist", "summary")
+
+    Examples:
+        ```python
+        # Get default strategy name
+        get_strategy_name("tokens")
+        # Returns: "tokens_1000_200"
+
+        # Get strategy name with custom config
+        get_strategy_name("tokens", {"chunk_size": 500, "prepend_gist": False})
+        # Returns: "tokens_500_200_no_gist"
+
+        # Get summary strategy name
+        get_strategy_name("summary")
+        # Returns: "summary"
+        ```
     """
-    if encoding is None:
-        encoding = _get_encoding()
-    
-    # Generate chunk strategy string for this specific strategy
-    chunk_strategy = f"slide{strategy_suffix}"
-    
-    # For now, use token-based chunking but with slide strategy string
-    logger.info("Slide strategy not yet implemented, using token-based chunking")
-    # Temporarily use token-based chunking with default params
-    # When slide is fully implemented, replace this with actual slide logic
-    chunks = _chunk_by_tokens(text, encoding)
-    # Override chunk_strategy in all chunks
-    for chunk in chunks:
-        chunk["chunk_strategy"] = chunk_strategy
-    return chunks
+    # Get the strategy class
+    strategy_class = _STRATEGIES.get(strategy, _STRATEGIES["tokens"])
+
+    return strategy_class.get_strategy_name(config or {})
 
 
 def chunk(
@@ -217,7 +416,7 @@ def chunk(
 
     Args:
         text: Input text to chunk
-        strategy: Chunking strategy ("tokens" or "slide")
+        strategy: Chunking strategy ("tokens", "slide", "summary", "image")
         config: Optional dictionary with strategy-specific parameters:
             - chunk_size: Target chunk size in tokens (default: 1000)
             - chunk_overlap: Overlap between chunks in tokens (default: 200)
@@ -242,7 +441,7 @@ def chunk(
         chunks = chunk("Some long text...")
         chunks[0]["chunk_strategy"]
         # Returns: "tokens_1000_200"
-        
+
         # With custom config and prepending flags
         chunks = chunk(
             "Some long text...",
@@ -258,43 +457,22 @@ def chunk(
         ```
     """
 
-    # set defaults
-    if config is None:
-        config = {}
+    # Set defaults
+    config = config or {}
+    config.setdefault("model", "cl100k_base")
 
-    if "model" not in config:
-        config["model"] = "cl100k_base"
-    
-    # Ensure chunk_size and chunk_overlap have defaults if None or missing
-    if "chunk_size" not in config or config["chunk_size"] is None:
-        config["chunk_size"] = 1000
-    if "chunk_overlap" not in config or config["chunk_overlap"] is None:
-        config["chunk_overlap"] = 200
-    
-    # Get prepending flags from config (default to True)
-    prepend_gist = config.get("prepend_gist", True)
-    prepend_section_path = config.get("prepend_section_path", True)
-    
-    # Calculate strategy suffix from prepending configuration
-    strategy_suffix = get_chunk_strategy_suffix(
-        prepend_gist=prepend_gist,
-        prepend_section_path=prepend_section_path
-    )
-    
     encoding = _get_encoding(config["model"])
 
-    # Call strategy-specific function
-    if strategy == "tokens":
-        chunks = _chunk_by_tokens(text, encoding, strategy_suffix=strategy_suffix, **config)
-    elif strategy == "slide":
-        chunks = _chunk_by_slide(text, encoding, strategy_suffix=strategy_suffix, **config)
-    else:
+    # Get the strategy class
+    strategy_class = _STRATEGIES.get(strategy, _STRATEGIES["tokens"])
+    if strategy not in _STRATEGIES:
         logger.warning(f"Unknown strategy '{strategy}', using 'tokens'")
-        chunks = _chunk_by_tokens(text, encoding, strategy_suffix=strategy_suffix, **config)
-    
-    # Add meta to all chunks after getting results
 
-    for chunk in chunks:
-        chunk["meta"] = chunk.get("meta",{}) | config.copy()
-    
+    # Use the strategy to chunk the text
+    chunks = strategy_class.chunk(text, config, encoding)
+
+    # Add meta to all chunks after getting results
+    for chunk_item in chunks:
+        chunk_item["meta"] = chunk_item.get("meta", {}) | config.copy()
+
     return chunks

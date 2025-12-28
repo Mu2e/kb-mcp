@@ -206,8 +206,8 @@ def get_parser_config() -> dict:
     """
     return {
         'parser': os.getenv("KB_PARSER", "kb-mcp"),
-        'image_additional_doc': _get_bool("PARSE_IMAGE_ADDITIONAL_DOC", False),
-        'image_llm_description': _get_bool("PARSE_IMAGE_LLM_DESCRIPTION", False),
+        'image_additional_doc': _get_bool("PARSE_IMAGE_ADDITIONAL_DOC", True),
+        'image_llm_description': _get_bool("PARSE_IMAGE_LLM_DESCRIPTION", True),
         'image_description_model': os.getenv("PARSE_IMAGE_DESCRIPTION_MODEL", get_default_llm_model()),
         'image_description_num_workers': _get_int("PARSE_IMAGE_DESCRIPTION_NUMWORKERS", 6),
     }

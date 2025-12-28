@@ -7,7 +7,8 @@ from typing import Dict, Any, Optional, Union
 from .database import get_db_session
 from .db_models import Document
 from .embedding.db_models import Chunk, get_embedding_table
-from ..chunking.chunking import get_chunk_strategy_suffix
+from ..chunking.chunking import get_strategy_name
+from ..config import get_embedding_config
 
 logger = logging.getLogger(__name__)
 
@@ -413,17 +414,10 @@ def chunk_and_embed_all(
             Document.doc_type != "image"
         )
         
-        # Determine the actual strategy name that will be created (including suffix from chunk_config)
-        actual_strategy = chunk_strategy
-        if chunk_config and chunk_strategy and chunk_strategy not in ["summary", "image"]:
-            prepend_gist = chunk_config.get("prepend_gist", True)
-            prepend_section_path = chunk_config.get("prepend_section_path", True)
-            suffix = get_chunk_strategy_suffix(
-                prepend_gist=prepend_gist,
-                prepend_section_path=prepend_section_path
-            )
-            actual_strategy = chunk_strategy + suffix if suffix else chunk_strategy
-        
+        # Determine the actual strategy name that will be created
+        chunk_strategy = chunk_strategy or get_embedding_config()['chunk_strategy']
+        strategy_full_name = get_strategy_name(chunk_strategy, chunk_config)
+
         if chunk_strategy == "summary":
             # For summary strategy: find documents with summaries (non-empty) but without summary chunks
             from sqlalchemy import and_
@@ -434,10 +428,10 @@ def chunk_and_embed_all(
             # LEFT JOIN to find documents without summary chunks
             # Use subquery to check for existing summary chunks
             query = query.outerjoin(
-                Chunk, 
+                Chunk,
                 and_(
                     Document.id == Chunk.document_id,
-                    Chunk.chunk_strategy == "summary"
+                    Chunk.chunk_strategy == strategy_full_name
                 )
             ).filter(Chunk.id.is_(None))
         else:
@@ -448,7 +442,7 @@ def chunk_and_embed_all(
                 Chunk,
                 and_(
                     Document.id == Chunk.document_id,
-                    Chunk.chunk_strategy == actual_strategy
+                    Chunk.chunk_strategy == strategy_full_name
                 )
             ).filter(Chunk.id.is_(None))
         

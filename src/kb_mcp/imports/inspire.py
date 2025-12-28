@@ -46,15 +46,19 @@ class InspireSource(Source):
         source_id: str = "inspire-hep",
         delay: float = 0.5,
         timeout: float = 30.0,
+        skip_existing: bool = False,
     ):
         """Initialize the INSPIRE-HEP source.
-        
+
         Args:
             base_url: Base URL for INSPIRE-HEP website
             api_base_url: Base URL for INSPIRE-HEP API
             source_id: Source identifier for knowledge base
             delay: Delay between requests in seconds (to be polite)
             timeout: Request timeout in seconds
+            skip_existing: If True, check if (source_id, doc_id) exists in RawDocuments before downloading.
+                          This saves bandwidth by not re-downloading files already in the database.
+                          Default: False (always download)
         """
         super().__init__(
             source_id=source_id,
@@ -67,6 +71,7 @@ class InspireSource(Source):
         )
         self.base_url = base_url.rstrip("/")
         self.api_base_url = api_base_url.rstrip("/")
+        self.skip_existing = skip_existing
         self.client = httpx.Client(timeout=timeout, follow_redirects=True)
         
     def __enter__(self):
@@ -244,6 +249,25 @@ class InspireSource(Source):
                 "error": f"No documents available for record {record_id}"
             }
 
+        # Check if document already exists before downloading (if skip_existing=True)
+        if self.skip_existing:
+            from ..kb.db_models import RawDocument
+            existing_raw = session.query(RawDocument).filter(
+                RawDocument.source_id == self.source_id,
+                RawDocument.doc_id == record_id
+            ).first()
+
+            if existing_raw:
+                logger.info(f"Skipping record {record_id} - already exists in database (raw_document_id: {existing_raw.id})")
+                return {
+                    "document_ids": [],
+                    "num_documents": 0,
+                    "parsed": False,
+                    "raw_document_id": existing_raw.id,
+                    "skipped": True,
+                    "error": None
+                }
+
         # Extract metadata
         metadata = self._extract_metadata_from_api(record_data)
         pdf_url = record_data['documents'][0]['url']
@@ -259,16 +283,19 @@ class InspireSource(Source):
                 "error": f"Failed to download PDF for record {record_id}"
             }
 
-        # Add to knowledge base (files already in correct location, no need to copy)
+        # Add to knowledge base (let ingest copy file to KB storage)
         result = add_document(
             pdf_path,
             source_id=self.source_id,
             doc_id=record_id,
             uri=uri,
             meta=metadata,
-            copy_to_kb=False,  # Files already in data/sources/inspire-hep/
+            copy_to_kb=True,  # Copy from temp dir to data/sources/inspire-hep/
             session=session
         )
+
+        # Debug: log what we got back
+        logger.debug(f"add_document returned: document_ids={result.get('document_ids', [])}, num_documents={result.get('num_documents', 0)}, parsed={result.get('parsed', False)}")
 
         # Add error field (None = success)
         result["error"] = None
@@ -327,7 +354,18 @@ if __name__ == "__main__":
         action="store_true",
         help="Disable automatic chunking and embedding after processing",
     )
-    
+    parser.add_argument(
+        "--no-auto-summarize",
+        action="store_true",
+        help="Disable automatic summarization after processing",
+    )
+    parser.add_argument(
+        "--skip-existing",
+        action="store_true",
+        help="Skip documents that already exist in the database (check by source_id and doc_id before downloading). "
+             "This saves bandwidth by not re-downloading files. Default: False (always download)",
+    )
+
     args = parser.parse_args()
     cmd_inspire(args)
 

@@ -114,6 +114,7 @@ def cmd_ingest(args):
                 copy_to_kb=not args.no_copy,
                 uri=None,
                 meta=None,
+                parser_name=args.parser_name,
                 generate_summary=not args.no_summary,
                 chunk_and_embed=not args.no_embed,
                 create_summary_chunks=not args.no_summary_chunks and not args.no_summary,
@@ -245,6 +246,10 @@ def setup_commands(subparsers):
         "--force-reparse",
         action="store_true",
         help="Re-parse file even if it was already processed (by content hash)"
+    )
+    ingest_parser.add_argument(
+        "--parser-name",
+        help="Parser to use (e.g., 'kb-mcp', 'marker'). Default: uses KB_PARSER env var or 'kb-mcp'"
     )
     ingest_parser.add_argument(
         "--no-summary",

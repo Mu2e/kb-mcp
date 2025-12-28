@@ -21,8 +21,8 @@ Search behavior can be configured via environment variables (see [configuration]
 
 ## API Reference
 
-::: kb_mcp.kb.search
+::: kb_mcp.kb.search.search
 
-::: kb_mcp.kb.search_semantic
+::: kb_mcp.kb.search.search_semantic
 
-::: kb_mcp.kb.search_fulltext
+::: kb_mcp.kb.search.search_fulltext

@@ -12,28 +12,29 @@ def kb_search(
     max_results: int = 5,
     search_filter: str | None = None,
 ) -> str:
-    """Search the knowledge base using semantic search.
-    
-    Returns the most relevant documents matching the query.
-    
+    """Search the knowledge base using hybrid search (combines semantic and full-text).
+
+    Returns the most relevant documents matching the query using Reciprocal Rank Fusion
+    to combine semantic (vector) and full-text search results.
+
     Args:
         query: Natural language search query
         max_results: Maximum number of documents to return (default: 5)
         search_filter: Optional JSON filter string. Supports Elasticsearch-style queries:
-        
+
             - term: `{"term": {"field": "value"}}` - exact match
             - terms: `{"terms": {"field": ["val1", "val2"]}}` - match any
             - match: `{"match": {"field": "value"}}` - substring match
             - range: `{"range": {"field": {"gte": "min", "lte": "max"}}}` - range query
             - bool: `{"bool": {"must": [...], "should": [...]}}` - boolean logic
-            
+
             Common filters:
-            
+
             - By source: `{"term": {"source_id": "inspire-sld"}}`
             - By type: `{"term": {"doc_type": "pdf"}}`
             - By author: `{"match": {"author": "Smith"}}`
             - By insertion time: `{"range": {"insert_time": {"gte": "2024-01-01"}}}`
-    
+
     Returns:
         JSON string with matching documents including id, source_id, doc_id, title, uri, and text.
     """
@@ -82,6 +83,164 @@ def kb_search(
         
     except Exception as e:
         logger.error(f"Error in kb_search: {e}", exc_info=True)
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+def kb_search_semantic(
+    query: str,
+    max_results: int = 5,
+    search_filter: str | None = None,
+) -> str:
+    """Search the knowledge base using semantic search only.
+
+    Returns the most relevant documents matching the query based on semantic similarity
+    using vector embeddings. Good for conceptual matches.
+
+    Args:
+        query: Natural language search query
+        max_results: Maximum number of documents to return (default: 5)
+        search_filter: Optional JSON filter string. Supports Elasticsearch-style queries:
+
+            - term: `{"term": {"field": "value"}}` - exact match
+            - terms: `{"terms": {"field": ["val1", "val2"]}}` - match any
+            - match: `{"match": {"field": "value"}}` - substring match
+            - range: `{"range": {"field": {"gte": "min", "lte": "max"}}}` - range query
+            - bool: `{"bool": {"must": [...], "should": [...]}}` - boolean logic
+
+            Common filters:
+
+            - By source: `{"term": {"source_id": "inspire-sld"}}`
+            - By type: `{"term": {"doc_type": "pdf"}}`
+            - By author: `{"match": {"author": "Smith"}}`
+            - By insertion time: `{"range": {"insert_time": {"gte": "2024-01-01"}}}`
+
+    Returns:
+        JSON string with matching documents including id, source_id, doc_id, title, uri, and text.
+    """
+    from ..kb.search import search_semantic
+
+    try:
+        # Parse filter JSON if provided
+        filter_dict = None
+        if search_filter:
+            try:
+                filter_dict = json.loads(search_filter)
+            except json.JSONDecodeError as e:
+                return json.dumps({"error": f"Invalid filter JSON: {e}"}, indent=2)
+
+        response = search_semantic(
+            query=query,
+            max_results=max_results,
+            filter=filter_dict,
+        )
+
+        results = response.get("results", [])
+
+        if not results:
+            return json.dumps({"message": "No results found", "results": []}, indent=2)
+
+        # Format results for MCP response
+        formatted_results = []
+        for result in results:
+            doc = result.get("document")
+            chunks = result.get("chunks", [])
+
+            if doc:
+                formatted_results.append({
+                    "id": doc.id,
+                    "source_id": doc.source_id,
+                    "doc_id": doc.doc_id,
+                    "title": doc.title or doc.title_gen,
+                    "uri": doc.uri,
+                    "text": doc.text,
+                })
+
+        return json.dumps({
+            "count": len(formatted_results),
+            "results": formatted_results,
+        }, indent=2)
+
+    except Exception as e:
+        logger.error(f"Error in kb_search_semantic: {e}", exc_info=True)
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+def kb_search_fulltext(
+    query: str,
+    max_results: int = 5,
+    search_filter: str | None = None,
+) -> str:
+    """Search the knowledge base using full-text search only.
+
+    Returns the most relevant documents matching the query based on PostgreSQL
+    full-text search with tsvector. Good for exact keyword matches.
+
+    Args:
+        query: Natural language search query
+        max_results: Maximum number of documents to return (default: 5)
+        search_filter: Optional JSON filter string. Supports Elasticsearch-style queries:
+
+            - term: `{"term": {"field": "value"}}` - exact match
+            - terms: `{"terms": {"field": ["val1", "val2"]}}` - match any
+            - match: `{"match": {"field": "value"}}` - substring match
+            - range: `{"range": {"field": {"gte": "min", "lte": "max"}}}` - range query
+            - bool: `{"bool": {"must": [...], "should": [...]}}` - boolean logic
+
+            Common filters:
+
+            - By source: `{"term": {"source_id": "inspire-sld"}}`
+            - By type: `{"term": {"doc_type": "pdf"}}`
+            - By author: `{"match": {"author": "Smith"}}`
+            - By insertion time: `{"range": {"insert_time": {"gte": "2024-01-01"}}}`
+
+    Returns:
+        JSON string with matching documents including id, source_id, doc_id, title, uri, and text.
+    """
+    from ..kb.search import search_fulltext
+
+    try:
+        # Parse filter JSON if provided
+        filter_dict = None
+        if search_filter:
+            try:
+                filter_dict = json.loads(search_filter)
+            except json.JSONDecodeError as e:
+                return json.dumps({"error": f"Invalid filter JSON: {e}"}, indent=2)
+
+        response = search_fulltext(
+            query=query,
+            max_results=max_results,
+            filter=filter_dict,
+        )
+
+        results = response.get("results", [])
+
+        if not results:
+            return json.dumps({"message": "No results found", "results": []}, indent=2)
+
+        # Format results for MCP response
+        formatted_results = []
+        for result in results:
+            doc = result.get("document")
+            chunks = result.get("chunks", [])
+
+            if doc:
+                formatted_results.append({
+                    "id": doc.id,
+                    "source_id": doc.source_id,
+                    "doc_id": doc.doc_id,
+                    "title": doc.title or doc.title_gen,
+                    "uri": doc.uri,
+                    "text": doc.text,
+                })
+
+        return json.dumps({
+            "count": len(formatted_results),
+            "results": formatted_results,
+        }, indent=2)
+
+    except Exception as e:
+        logger.error(f"Error in kb_search_fulltext: {e}", exc_info=True)
         return json.dumps({"error": str(e)}, indent=2)
 
 
@@ -143,11 +302,13 @@ def kb_get(identifier: str) -> str:
 
 def register_tools(mcp):
     """Register MCP tools with the FastMCP instance.
-    
+
     Args:
         mcp: FastMCP instance to register tools with
     """
     mcp.tool()(kb_search)
+    mcp.tool()(kb_search_semantic)
+    mcp.tool()(kb_search_fulltext)
     mcp.tool()(kb_get)
 
 

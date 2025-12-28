@@ -617,6 +617,62 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
             except Exception as e:
                 logger.warning(f"Could not fetch child documents for {doc.id}: {e}")
 
+            # Get raw document information if available
+            raw_doc_html = ""
+            if doc.raw_document_id:
+                try:
+                    from ....kb.documents.operations import get_raw_document
+                    from ....kb.db_models import Document as DocumentModel
+                    timings['get_raw_doc_since_last'] = time.time() - t0
+                    t0 = time.time()
+                    raw_doc = get_raw_document(doc.id)
+                    timings['get_raw_doc'] = time.time() - t0
+                    timings['get_raw_doc_since_start'] = time.time() - t_start
+
+                    if raw_doc:
+                        # Get all sibling documents (other documents from the same raw document)
+                        timings['get_siblings_since_last'] = time.time() - t0
+                        t0 = time.time()
+                        from ....kb.database import get_db_session
+                        with get_db_session() as session:
+                            siblings = session.query(DocumentModel).filter(
+                                DocumentModel.raw_document_id == doc.raw_document_id,
+                                DocumentModel.doc_type == "text"
+                            ).order_by(DocumentModel.insert_time).all()
+                        timings['get_siblings'] = time.time() - t0
+                        timings['get_siblings_since_start'] = time.time() - t_start
+
+                        siblings_list = ""
+                        for sibling in siblings:
+                            sibling_label = sibling.doc_id or sibling.id
+                            sibling_parser = sibling.parser_id if sibling.parser_id else "unknown"
+                            is_current = sibling.id == doc.id
+                            style = 'color: #999; font-style: italic;' if is_current else ''
+                            siblings_list += f'<li><a href="/web/document/{sibling.id}" style="{style}">{html_escape(sibling_label)}</a> ({sibling_parser}){" (current)" if is_current else ""}</li>'
+
+                        # Format file path
+                        file_path_display = raw_doc.file_path or "N/A"
+                        if raw_doc.hostname:
+                            file_path_display = f"{raw_doc.hostname}:{file_path_display}"
+                        file_path_display = html_escape(file_path_display)
+
+                        raw_doc_html = f"""
+            <div class="card">
+                <h2>Raw Document</h2>
+                <table>
+                    <tr><th>Raw Document ID</th><td><code>{raw_doc.id}</code></td></tr>
+                    <tr><th>Host File Path</th><td>{file_path_display}</td></tr>
+                    <tr><th>File Size</th><td>{raw_doc.file_size if raw_doc.file_size else "N/A"} bytes</td></tr>
+                </table>
+                <h3 style="margin-top: 20px; margin-bottom: 10px;">All Documents from this Raw File ({len(siblings)})</h3>
+                <ul>
+                    {siblings_list}
+                </ul>
+            </div>
+                        """
+                except Exception as e:
+                    logger.warning(f"Could not fetch raw document for {doc.id}: {e}")
+
             t0 = time.time()
             timings['build_meta_html_since_last'] = time.time() - t0
             meta_html = ""
@@ -939,6 +995,7 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
                     <tr><th>ID</th><td><code>{doc.id}</code></td></tr>
                     <tr><th>Source ID</th><td>{doc.source_id}</td></tr>
                     <tr><th>Document ID</th><td>{doc.doc_id or "N/A"}</td></tr>
+                    <tr><th>Parser</th><td>{doc.parser_id}</td></tr>
                     <tr><th>Title</th><td>{doc.title or "N/A"}</td></tr>
                     <tr><th>URI</th><td>{uri_display}</td></tr>
                     <tr><th>Source Type</th><td>{doc.source_type}</td></tr>
@@ -957,6 +1014,8 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
             {children_html}
 
             {meta_html if meta_html else ''}
+
+            {raw_doc_html}
 
             {ai_content_html}
 

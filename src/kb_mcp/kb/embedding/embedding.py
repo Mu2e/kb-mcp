@@ -1,9 +1,8 @@
 """Embedding utilities for embedding module."""
 
 import logging
-from typing import List, Optional, Dict, Any, Union
+from typing import List, Optional, Dict, Any
 from .db_models import Chunk, EmbeddingConfig
-from ..database import get_db_session
 from ..database import get_db_session
 from sqlalchemy import select, delete, func, inspect as sqlalchemy_inspect
 
@@ -296,6 +295,7 @@ def chunk_and_embed(
 
         # Create log entry for this operation
         from .db_models import ChunkEmbeddingLog
+        from .utils import get_embedding_name
         import socket
 
         total_time = chunk_time + embed_time
@@ -303,6 +303,12 @@ def chunk_and_embed(
 
         # Get actual chunk strategy from first chunk (includes any suffix like _no_context)
         actual_chunk_strategy = chunks[0].chunk_strategy if chunks else chunk_strategy
+
+        # Get actual embedding name that was used (resolve from default if None)
+        actual_embedding_name = None
+        if num_embeddings > 0:
+            # Only resolve embedding name if we actually created embeddings
+            actual_embedding_name = get_embedding_name(embedding_name, session=session)
 
         log_entry = ChunkEmbeddingLog(
             document_id=document.id,
@@ -312,7 +318,7 @@ def chunk_and_embed(
             num_chunks=len(chunks) if chunks else 0,
             num_embeddings=num_embeddings,
             chunk_strategy=actual_chunk_strategy,
-            embedding_name=embedding_name or (provider and model and f"{provider}/{model}") or None,
+            embedding_name=actual_embedding_name,
             hostname=hostname,
         )
         session.add(log_entry)

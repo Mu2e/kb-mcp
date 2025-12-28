@@ -37,12 +37,13 @@ def cmd_inspire(args):
     """Handle inspire source command."""
     from .inspire import InspireSource
     print(args)
-    
+
     setup_logging(args.verbose)
-    
+
     with InspireSource(
         source_id=args.source_id,
         delay=args.delay,
+        skip_existing=args.skip_existing,
     ) as source:
         documents = source.process_all(
             query=args.query,
@@ -51,10 +52,10 @@ def cmd_inspire(args):
             auto_embed=not args.no_auto_embed,
             auto_summarize=not args.no_auto_summarize,
         )
-        
+
         print(f"\n  Successfully processed {len(documents)} document(s)")
-        for doc in documents[:10]:  # Show first 10
-            print(f"  - {doc.id}: {doc.source_id}/{doc.doc_id}")
+        for doc_id in documents[:10]:  # Show first 10 document IDs
+            print(f"  - {doc_id}")
         if len(documents) > 10:
             print(f"  ... and {len(documents) - 10} more")
 
@@ -116,6 +117,12 @@ def main():
         "--no-auto-summarize",
         action="store_true",
         help="Disable automatic summarization after processing",
+    )
+    inspire_parser.add_argument(
+        "--skip-existing",
+        action="store_true",
+        help="Skip documents that already exist in the database (check by source_id and doc_id before downloading). "
+             "This saves bandwidth by not re-downloading files. Default: False (always download)",
     )
     inspire_parser.set_defaults(func=cmd_inspire)
     
