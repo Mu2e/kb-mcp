@@ -142,7 +142,7 @@ update_env "DB_USER"     "postgres"          "$SECRETS_FILE"
 update_env "DB_NAME"     "postgres"          "$SECRETS_FILE"
 update_env "DB_URL"       "$FULL_URL"        "$SECRETS_FILE"
 
-echo "Database started on $DB_HOST. '$SECRETS_FILE' updated. See DB_URL for connection string."
+echo "Database started on $CURRENT_HOST. '$SECRETS_FILE' updated. See DB_URL for connection string."
 echo "----------------------------------------------------------------"
 echo "To connect to the database (localhost:$DB_PORT_EXTERNAL) from your local machine, use port forwarding:"
 echo "  ssh -J $USER@perlmutter.nersc.gov -L $DB_PORT_EXTERNAL:localhost:$DB_PORT_EXTERNAL $CURRENT_HOST"

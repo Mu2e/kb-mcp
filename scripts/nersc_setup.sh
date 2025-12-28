@@ -128,6 +128,21 @@ else
     echo "   checked: $SHARED_SECRETS"
 fi
 
+# Setup .env.local for user-specific overrides (e.g., ALCF credentials)
+# This file is loaded AFTER .env and overrides shared settings
+USER_ENV_LOCAL="$HOME/.kb-mcp.env.local"
+rm -f "$SCRATCH_REPO/.env.local"
+
+if [ -f "$USER_ENV_LOCAL" ]; then
+    echo "User overrides: Linking .env.local -> $USER_ENV_LOCAL"
+    ln -s "$USER_ENV_LOCAL" "$SCRATCH_REPO/.env.local"
+else
+    echo "User overrides: Creating empty $USER_ENV_LOCAL"
+    echo "# User-specific environment overrides (e.g., ALCF credentials)" > "$USER_ENV_LOCAL"
+    echo "# This file is loaded AFTER .env and takes precedence" >> "$USER_ENV_LOCAL"
+    ln -s "$USER_ENV_LOCAL" "$SCRATCH_REPO/.env.local"
+fi
+
 # --- Fix Prompt: Remove the inner (nersc-python) label ---
 # syntax: ${VARIABLE//search/replace}
 if [[ -n "$PS1" ]]; then

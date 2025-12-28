@@ -8,40 +8,44 @@ show_help() {
 Usage: $0 [OPTIONS]
 
 Configure ALCF (Argonne Leadership Computing Facility) inference service credentials
-in our environment file.
+in a user-specific environment file.
 
 Options:
-    --env FILE      Path to the .env file (default: .env)
+    --env FILE      Path to the user-specific .env file (default: .env.local)
     --cluster NAME  Cluster name: 'sophia' or 'metis' (default: sophia)
     --list-models   Skip setup and only list available models for the cluster
     -h, --help      Show this help message and exit
 
 Description:
-    This script checks if we have an active ALCF token and updates our .env file 
-    with the appropriate OPENAI_API_KEY and OPENAI_BASE_URL settings for the 
-    specified cluster. If we don't have an active token, it will authenticate with ALCF 
-    through a URL that will be displayed in the terminal.
-    
+    This script checks if we have an active ALCF token and updates a user-specific
+    .env.local file with the appropriate OPENAI_API_KEY and OPENAI_BASE_URL settings
+    for the specified cluster. If we don't have an active token, it will authenticate
+    with ALCF through a URL that will be displayed in the terminal.
+
+    The .env.local file is loaded AFTER .env and overrides shared settings, allowing
+    each user to have their own ALCF credentials without modifying the shared .env
+    file (which may be a symlink to shared secrets on NERSC).
+
     Use --list-models to skip the setup and only display available models.
 
 Examples:
     \`\`\`bash
-    # Use default .env file and sophia cluster
+    # Use default .env.local file and sophia cluster
     $0
 
-    # Specify custom .env file
-    $0 --env .env.local
+    # Specify custom env file
+    $0 --env .env.custom
 
     # Use metis cluster
     $0 --cluster metis
 
     # Use both options
-    $0 --env .env.local --cluster metis
+    $0 --env .env.custom --cluster metis
 
     # Use sophia cluster explicitly
     $0 --cluster sophia
 
-    # List available models without updating .env file
+    # List available models without updating env file
     $0 --list-models
 
     # List models for metis cluster
@@ -51,7 +55,7 @@ EOF
 }
 
 # Initialize defaults
-ENV_FILE=".env"
+ENV_FILE=".env.local"
 CLUSTER="sophia"
 LIST_MODELS=false
 
@@ -88,7 +92,10 @@ if [ "$LIST_MODELS" = false ]; then
     # authenticate with alcf
     #python inference_auth_token.py authenticate
 
-    TOKEN=$(python inference_auth_token.py get_access_token)
+    if ! TOKEN=$(python inference_auth_token.py get_access_token 2>&1); then
+        python inference_auth_token.py authenticate || exit 1
+        TOKEN=$(python inference_auth_token.py get_access_token) || exit 1
+    fi
 
     # Set base URL based on cluster
     if [ "$CLUSTER" == "metis" ]; then
@@ -97,11 +104,10 @@ if [ "$LIST_MODELS" = false ]; then
         BASE_URL="https://inference-api.alcf.anl.gov/resource_server/sophia/vllm/v1"
     fi
 
-    # If .env file doesn't exist, complain
+    # Create .env.local if it doesn't exist
     if [ ! -f "$ENV_FILE" ]; then
-        echo "Error: .env file not found."
-        echo "   Please create it first. You can start from the example file: .env.example"
-        exit 1
+        echo "Creating $ENV_FILE for user-specific settings..."
+        touch "$ENV_FILE"
     fi
 
     TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')

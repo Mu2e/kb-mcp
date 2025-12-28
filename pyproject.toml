@@ -63,6 +63,11 @@ test = [
     "reportlab",
 ]
 
+# ALCF
+alcf = [
+    "globus_sdk"
+]
+
 [project.scripts]
 # Server module CLI commands
 kb-server = "kb_mcp.server.server:main"

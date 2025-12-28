@@ -7,7 +7,14 @@ from typing import Optional
 import json
 
 from dotenv import load_dotenv
+
+# Load shared configuration from .env
 load_dotenv()
+
+# Load user-specific overrides from .env.local (takes precedence)
+# This allows users to override settings (e.g., ALCF credentials) without
+# modifying the shared .env file (which may be a symlink on NERSC)
+load_dotenv(".env.local", override=True)
 
 # --- Helpers ---
 
