@@ -105,7 +105,8 @@ echo "Starting container $DB_CONTAINER"
 podman-hpc run -d --rm \
     --name "$DB_CONTAINER" \
     --userns=keep-id \
-    -p 0.0.0.0:$DB_PORT_EXTERNAL:5432 \
+    --network=host \
+    -e PGPORT=$DB_PORT_EXTERNAL \
     -e POSTGRES_PASSWORD=$DB_PASSWORD \
     -v "$DB_DATA_DIR":/var/lib/postgresql/data \
     "$DB_IMAGE"

@@ -152,6 +152,9 @@ fi
 # --- Start the database ---
 source "$SCRATCH_REPO/scripts/nersc_setup_db.sh"
 
+# update ALCF credentials (for the moment)
+source "$SCRATCH_REPO/scripts/setup_alcf.sh"
+
 echo "Environment activated. You are in $SCRATCH_REPO"
 
 CURRENT_HOST=$(hostname -f)
