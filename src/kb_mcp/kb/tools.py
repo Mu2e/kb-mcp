@@ -4,6 +4,8 @@ import logging
 from pathlib import Path
 from typing import Dict, Any, Optional, Union
 
+from tqdm import tqdm
+
 from .database import get_db_session
 from .db_models import Document
 from .embedding.db_models import Chunk, get_embedding_table
@@ -300,7 +302,7 @@ def parse_all(
         errors = 0
         document_ids = []
 
-        for raw_doc in raw_docs:
+        for raw_doc in tqdm(raw_docs, desc="Parsing documents", unit="doc"):
             try:
                 # Check if file_path exists
                 if not raw_doc.file_path:
@@ -316,7 +318,7 @@ def parse_all(
                     skipped += 1
                     continue
 
-                logger.info(f"Parsing raw document {raw_doc.id}: {raw_doc.file_path}")
+                logger.debug(f"Parsing raw document {raw_doc.id}: {raw_doc.file_path}")
 
                 # Use add_document (files already in KB, don't copy)
                 result = add_document(
@@ -333,7 +335,7 @@ def parse_all(
 
                 document_ids.extend(result["document_ids"])
                 parsed += 1
-                logger.info(f"Successfully parsed {result['num_documents']} document(s) from {raw_doc.file_path}")
+                logger.debug(f"Successfully parsed {result['num_documents']} document(s) from {raw_doc.file_path}")
 
             except Exception as e:
                 errors += 1
@@ -458,18 +460,19 @@ def chunk_and_embed_all(
             }
         
         logger.info(f"Found {len(documents)} document(s) for source_id: {source_id} that need chunking")
-        
+
         processed = 0
         chunked = 0
         skipped = 0
         errors = 0
-        
-        for doc in documents:
+
+        # Use tqdm progress bar for better user experience
+        for doc in tqdm(documents, desc="Chunking and embedding", unit="doc"):
             try:
                 processed += 1
 
                 # Chunk and embed the document using the document method
-                logger.info(f"Chunking and embedding document {doc.id} ({doc.doc_id or doc.id})")
+                logger.debug(f"Chunking and embedding document {doc.id} ({doc.doc_id or doc.id})")
                 chunks = doc.chunk_and_embed(
                     chunk_strategy=chunk_strategy,
                     chunk_config=chunk_config,
@@ -480,7 +483,7 @@ def chunk_and_embed_all(
 
                 if chunks:
                     chunked += 1
-                    logger.info(f"Successfully chunked and embedded document {doc.id} ({len(chunks)} chunks)")
+                    logger.debug(f"Successfully chunked and embedded document {doc.id} ({len(chunks)} chunks)")
                 else:
                     skipped += 1
                     logger.warning(f"No chunks created for document {doc.id}")
@@ -596,7 +599,7 @@ def image_chunk_and_embed_all(
                 processed += 1
 
                 # Chunk and embed the image document using "image" strategy
-                logger.info(f"Chunking and embedding image document {doc.id} ({doc.doc_id or doc.id})")
+                logger.debug(f"Chunking and embedding image document {doc.id} ({doc.doc_id or doc.id})")
                 chunks = doc.chunk_and_embed(
                     chunk_strategy="image",
                     embedding_name=embedding_name,
@@ -606,7 +609,7 @@ def image_chunk_and_embed_all(
 
                 if chunks:
                     chunked += 1
-                    logger.info(f"Successfully chunked and embedded image document {doc.id}")
+                    logger.debug(f"Successfully chunked and embedded image document {doc.id}")
                 else:
                     skipped += 1
                     logger.warning(f"No chunks created for image document {doc.id}")
@@ -903,12 +906,13 @@ def summarize_all(
         skipped = 0
         errors = 0
 
-        for doc in documents:
+        # Use tqdm progress bar for better user experience
+        for doc in tqdm(documents, desc="Summarizing documents", unit="doc"):
             try:
                 processed += 1
 
                 # Generate summary using the document method
-                logger.info(f"Generating summary for document {doc.id} ({doc.doc_id or doc.id})")
+                logger.debug(f"Generating summary for document {doc.id} ({doc.doc_id or doc.id})")
                 doc.generate_summary(
                     include_title=True,
                     include_gist=True,
@@ -917,11 +921,11 @@ def summarize_all(
                 )
 
                 summarized += 1
-                logger.info(f"Successfully generated summary for document {doc.id}")
+                logger.debug(f"Successfully generated summary for document {doc.id}")
 
                 # Optionally create summary chunk
                 if create_summary_chunk and doc.summary:
-                    logger.info(f"Creating summary chunk for document {doc.id}")
+                    logger.debug(f"Creating summary chunk for document {doc.id}")
 
                     if embed_summary_chunk:
                         # Create and embed the summary chunk using the document method
@@ -934,13 +938,13 @@ def summarize_all(
                         if chunks:
                             chunked += 1
                             embedded += 1
-                            logger.info(f"Created and embedded summary chunk for document {doc.id}")
+                            logger.debug(f"Created and embedded summary chunk for document {doc.id}")
                     else:
                         # Just create the chunk without embedding
                         chunks = doc.chunk(chunk_strategy="summary")
                         if chunks:
                             chunked += 1
-                            logger.info(f"Created summary chunk for document {doc.id}")
+                            logger.debug(f"Created summary chunk for document {doc.id}")
 
             except Exception as e:
                 errors += 1

@@ -104,16 +104,27 @@ if [ "$LIST_MODELS" = false ]; then
         BASE_URL="https://inference-api.alcf.anl.gov/resource_server/sophia/vllm/v1"
     fi
 
-    # Create .env.local if it doesn't exist
-    if [ ! -f "$ENV_FILE" ]; then
-        echo "Creating $ENV_FILE for user-specific settings..."
-        touch "$ENV_FILE"
+    # Resolve symlink if .env.local is one (e.g., on NERSC)
+    if [ -L "$ENV_FILE" ]; then
+        # Get the target of the symlink
+        REAL_ENV_FILE=$(readlink -f "$ENV_FILE" 2>/dev/null || readlink "$ENV_FILE")
+        echo "Note: $ENV_FILE is a symlink to $REAL_ENV_FILE"
+        echo "      Updating the target file to preserve symlink"
+        TARGET_FILE="$REAL_ENV_FILE"
+    else
+        TARGET_FILE="$ENV_FILE"
+    fi
+
+    # Create target file if it doesn't exist
+    if [ ! -f "$TARGET_FILE" ]; then
+        echo "Creating $TARGET_FILE for user-specific settings..."
+        touch "$TARGET_FILE"
     fi
 
     TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
 
 
-    CURRENT_BASE_URL=$(grep "^OPENAI_BASE_URL=" "$ENV_FILE" | cut -d '=' -f2-)
+    CURRENT_BASE_URL=$(grep "^OPENAI_BASE_URL=" "$TARGET_FILE" 2>/dev/null | cut -d '=' -f2-)
     if [ "$CURRENT_BASE_URL" == "$BASE_URL" ]; then
         echo "OPENAI_BASE_URL is already set to $BASE_URL, only updating OPENAI_API_KEY"
         awk -v token="$TOKEN" '
@@ -122,7 +133,7 @@ if [ "$LIST_MODELS" = false ]; then
                 next;
             }
             { print }
-        ' "$ENV_FILE" > "$ENV_FILE.tmp" && mv "$ENV_FILE.tmp" "$ENV_FILE"
+        ' "$TARGET_FILE" > "$TARGET_FILE.tmp" && mv "$TARGET_FILE.tmp" "$TARGET_FILE"
         exit 0
     fi
 
@@ -152,14 +163,17 @@ if [ "$LIST_MODELS" = false ]; then
                 print "OPENAI_BASE_URL=" base_url;
             }
         }
-    ' "$ENV_FILE" > "$ENV_FILE.tmp" && mv "$ENV_FILE.tmp" "$ENV_FILE"
+    ' "$TARGET_FILE" > "$TARGET_FILE.tmp" && mv "$TARGET_FILE.tmp" "$TARGET_FILE"
 
-    echo "✓ Updated ALCF configuration in $ENV_FILE"
+    echo "✓ Updated ALCF configuration in $TARGET_FILE"
+    if [ "$TARGET_FILE" != "$ENV_FILE" ]; then
+        echo "  (via symlink $ENV_FILE)"
+    fi
     echo "  Cluster: $CLUSTER"
     echo "  Base URL: $BASE_URL"
     echo ""
     echo "Current ALCF configuration:"
-    grep "^OPENAI_API_KEY=\|^OPENAI_BASE_URL=" "$ENV_FILE"
+    grep "^OPENAI_API_KEY=\|^OPENAI_BASE_URL=" "$TARGET_FILE"
 else
     # In list-only mode, we still need the token and auth script
     # Check if inference_auth_token.py exists, if not download it
