@@ -268,86 +268,96 @@ def parse_all(
     from .db_models import RawDocument
     from .documents import add_document
 
-    with get_db_session() as session:
-        # Query for RawDocuments that don't have Documents with the specified parser
-        # Use LEFT JOIN to find raw docs without corresponding documents
-        query = session.query(RawDocument).outerjoin(
-            Document,
-            and_(
-                Document.raw_document_id == RawDocument.id,
-                Document.parser_id == parser_name
-            )
-        ).filter(Document.id.is_(None))  # Only raw docs without documents
+    from ..config import get_batch_config
 
-        if source_id:
-            query = query.filter(RawDocument.source_id == source_id)
+    batch_size = get_batch_config()['parse_batch_size']
 
-        raw_docs = query.all()
-        total_raw = len(raw_docs)
+    parsed = 0
+    skipped = 0
+    errors = 0
+    document_ids = []
+    total_processed = 0
 
-        if total_raw == 0:
-            logger.info(f"No unparsed raw documents found{' for source_id: ' + source_id if source_id else ''}")
-            return {
-                "total_raw": 0,
-                "parsed": 0,
-                "skipped": 0,
-                "errors": 0,
-                "document_ids": [],
-            }
-
-        logger.info(f"Found {total_raw} unparsed raw document(s) to process")
-
-        parsed = 0
-        skipped = 0
-        errors = 0
-        document_ids = []
-
-        for raw_doc in tqdm(raw_docs, desc="Parsing documents", unit="doc"):
-            try:
-                # Check if file_path exists
-                if not raw_doc.file_path:
-                    logger.warning(f"Raw document {raw_doc.id} has no file_path, skipping")
-                    skipped += 1
-                    continue
-
-                file_path = Path(raw_doc.file_path)
-
-                # Check if file exists
-                if not file_path.exists():
-                    logger.warning(f"Skipping raw_doc {raw_doc.id}: file not found at {raw_doc.file_path}")
-                    skipped += 1
-                    continue
-
-                logger.debug(f"Parsing raw document {raw_doc.id}: {raw_doc.file_path}")
-
-                # Use add_document (files already in KB, don't copy)
-                result = add_document(
-                    file_path,
-                    source_id=raw_doc.source_id,
-                    doc_id=raw_doc.doc_id,
-                    parser_name=parser_name,
-                    extract_images=extract_images,
-                    describe_images=describe_images,
-                    force_reparse=force_reparse,
-                    copy_to_kb=False,  # Files already in KB storage
-                    session=session,
+    # Process in batches with lock/commit cycle
+    while True:
+        with get_db_session() as session:
+            # Query for RawDocuments that don't have Documents with the specified parser
+            # Use NOT EXISTS instead of LEFT JOIN to avoid FOR UPDATE on outer join
+            subquery = session.query(Document.id).filter(
+                and_(
+                    Document.raw_document_id == RawDocument.id,
+                    Document.parser_id == parser_name
                 )
+            ).exists()
 
-                document_ids.extend(result["document_ids"])
-                parsed += 1
-                logger.debug(f"Successfully parsed {result['num_documents']} document(s) from {raw_doc.file_path}")
+            query = session.query(RawDocument).filter(~subquery)
 
-            except Exception as e:
-                errors += 1
-                logger.error(f"Error parsing raw document {raw_doc.id}: {e}", exc_info=True)
-                continue
+            if source_id:
+                query = query.filter(RawDocument.source_id == source_id)
+
+            # For parallel processing: lock a batch of rows
+            # SKIP LOCKED allows other workers to grab different rows
+            raw_docs = query.limit(batch_size).with_for_update(skip_locked=True).all()
+
+            if not raw_docs:
+                # No more documents to process
+                break
+
+            if total_processed == 0:
+                logger.info(f"Processing documents in batches of {batch_size}")
+
+            for raw_doc in tqdm(raw_docs, desc="Parsing documents", unit="doc", disable=total_processed > 0):
+                try:
+                    # Check if file_path exists
+                    if not raw_doc.file_path:
+                        logger.warning(f"Raw document {raw_doc.id} has no file_path, skipping")
+                        skipped += 1
+                        continue
+
+                    file_path = Path(raw_doc.file_path)
+
+                    # Check if file exists
+                    if not file_path.exists():
+                        logger.warning(f"Skipping raw_doc {raw_doc.id}: file not found at {raw_doc.file_path}")
+                        skipped += 1
+                        continue
+
+                    logger.debug(f"Parsing raw document {raw_doc.id}: {raw_doc.file_path}")
+
+                    # Use add_document (files already in KB, don't copy)
+                    result = add_document(
+                        file_path,
+                        source_id=raw_doc.source_id,
+                        doc_id=raw_doc.doc_id,
+                        parser_name=parser_name,
+                        extract_images=extract_images,
+                        describe_images=describe_images,
+                        force_reparse=force_reparse,
+                        copy_to_kb=False,  # Files already in KB storage
+                        session=session,
+                    )
+
+                    document_ids.extend(result["document_ids"])
+                    parsed += 1
+                    logger.debug(f"Successfully parsed {result['num_documents']} document(s) from {raw_doc.file_path}")
+
+                except Exception as e:
+                    errors += 1
+                    logger.error(f"Error parsing raw document {raw_doc.id}: {e}", exc_info=True)
+                    continue
+
+            total_processed += len(raw_docs)
+            # Commit happens here when session context exits, releasing locks
+
+    if total_processed == 0:
+        logger.info(f"No unparsed raw documents found{' for source_id: ' + source_id if source_id else ''}")
 
     logger.info(
         f"Parse complete: {parsed} parsed, {skipped} skipped, {errors} errors"
     )
 
     return {
-        "total_raw": total_raw,
+        "total_raw": total_processed,
         "parsed": parsed,
         "skipped": skipped,
         "errors": errors,
@@ -968,4 +978,5 @@ def summarize_all(
     )
 
     return result
+
 

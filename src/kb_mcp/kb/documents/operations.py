@@ -601,20 +601,30 @@ def add_document(
                 raw_doc_id = existing_raw.id  # Update raw_doc_id for linking
                 result["raw_document_id"] = existing_raw.id
 
-                # If not force_reparse, skip and return early
-                if not force_reparse:
-                    result["skipped"] = True
+                # Check if a Document with this parser already exists
+                from ..db_models import Document as DocumentModel
+                existing_doc_for_parser = db_session.query(DocumentModel).filter(
+                    DocumentModel.raw_document_id == existing_raw.id,
+                    DocumentModel.parser_id == parser_name
+                ).first()
 
+                # If document with this parser exists and not force_reparse, skip
+                if existing_doc_for_parser and not force_reparse:
+                    result["skipped"] = True
                     logger.info(
-                        f"File already processed (hash: {content_hash[:16]}...), "
+                        f"File already parsed with {parser_name} (hash: {content_hash[:16]}...), "
                         f"skipping (use force_reparse=True to re-parse)"
                     )
-                    # Return early - file already processed, no need to re-parse
                     return result
-                else:
+                elif existing_doc_for_parser and force_reparse:
                     logger.info(
-                        f"File already processed (hash: {content_hash[:16]}...), "
-                        f"but force_reparse=True, re-parsing with parser: {parser_name}"
+                        f"File already parsed with {parser_name} (hash: {content_hash[:16]}...), "
+                        f"but force_reparse=True, re-parsing"
+                    )
+                elif not existing_doc_for_parser:
+                    logger.info(
+                        f"RawDocument exists (hash: {content_hash[:16]}...), "
+                        f"but no Document for parser {parser_name}, parsing now"
                     )
 
         # If skip_parse is True, return early (only created RawDocument)
@@ -1622,5 +1632,6 @@ def get_options() -> Dict[str, Any]:
         "source_options": source_options,
         "doc_type_options": doc_type_options,
     }
+
 
 

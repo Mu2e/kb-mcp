@@ -4,6 +4,7 @@ certs/
 logs/
 data
 TODO.md
+*.log
 
 # Python
 __pycache__/
