@@ -132,3 +132,4 @@ def detect_mime_type(file_path: str | Path) -> str:
 
     return "application/octet-stream"
 
+

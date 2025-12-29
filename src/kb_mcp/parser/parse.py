@@ -154,6 +154,9 @@ def parse(
             doc_data["source_type"] = mime_type
         else:
             mime_type = doc_data["source_type"]
+        print("DEBUG: ", file_path)
+        print("DEBUG: ", detect_mime_type(file_path))
+        print("DEBUG: ", mime_type)
 
         # Add file metadata to meta dict
         file_stat = file_path.stat()
@@ -286,4 +289,3 @@ def parse(
                 file_path.unlink()
             except Exception:
                 pass
-

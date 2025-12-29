@@ -4,6 +4,7 @@ import logging
 import time
 import io
 import re
+import os
 from pathlib import Path
 from typing import List, Tuple, Dict, Any, Optional
 
@@ -35,7 +36,7 @@ def _get_converter() -> Any:
             "output_format": "markdown",
             "disable_image_extraction": False,
             "languages": "en",
-            "batch_multiplier": 6, # Use higher multiplier for the large GPUs
+            "batch_multiplier": 15, # Tested on NERSC a100 up to 30, don't really see a difference, GPU mem saturates at 40%
         }
         _CONVERTER_CACHE = PdfConverter(artifact_dict=artifact_dict, config=config)
         return _CONVERTER_CACHE
@@ -137,3 +138,4 @@ class MarkerParser(BaseParser):
         except Exception as e:
             logger.error(f"Error parsing with marker: {e}", exc_info=True)
             return "", []
+
