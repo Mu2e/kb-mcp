@@ -82,42 +82,53 @@ def get_parser(file_path: str | Path, doc_type: Optional[str] = None) -> BasePar
 
 def detect_mime_type(file_path: str | Path) -> str:
     """Detect MIME type from file path.
-    
-    Uses python-magic if available, otherwise falls back to mimetypes.
-    
+
+    Uses python-magic if available, with extension-based fallback for
+    ambiguous results. Falls back to mimetypes if magic is unavailable.
+
     Args:
         file_path: Path to the file
-    
+
     Returns:
         MIME type string
     """
     file_path = Path(file_path) if not isinstance(file_path, Path) else file_path
-    
+
     # Try python-magic first (more accurate)
+    magic_mime_type = None
     try:
         import magic
         mime = magic.Magic(mime=True)
-        mime_type = mime.from_file(str(file_path))
-        if mime_type:
-            return mime_type
+        magic_mime_type = mime.from_file(str(file_path))
+
+        # If magic returns generic octet-stream, check if extension suggests otherwise
+        if magic_mime_type == "application/octet-stream":
+            import mimetypes
+            ext_mime_type, _ = mimetypes.guess_type(str(file_path))
+            # Trust extension for common document types
+            if ext_mime_type and ext_mime_type.startswith(('application/pdf', 'text/', 'application/vnd.')):
+                return ext_mime_type
+
+        if magic_mime_type:
+            return magic_mime_type
     except ImportError:
         pass
     except Exception as e:
         import logging
         logger = logging.getLogger(__name__)
         logger.debug(f"Error using python-magic: {e}")
-    
+
     # Fall back to mimetypes
     import mimetypes
     mime_type, _ = mimetypes.guess_type(str(file_path))
     if mime_type:
         return mime_type
-    
+
     # Last resort: use file extension
     ext = file_path.suffix.lower().lstrip('.')
     mime_type, _ = mimetypes.guess_type(f"dummy.{ext}")
     if mime_type:
         return mime_type
-    
+
     return "application/octet-stream"
 

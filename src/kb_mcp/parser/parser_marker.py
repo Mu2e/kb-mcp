@@ -28,15 +28,27 @@ def _get_converter() -> Any:
         return None
 
     logger.info("Initializing marker PdfConverter (this may take a while)...")
-    artifact_dict = create_model_dict()
-    config = {
-        "output_format": "markdown",
-        "disable_image_extraction": False,
-        "languages": "en",
-        "batch_multiplier": 6, # Use higher multiplier for the large GPUs
-    }
-    _CONVERTER_CACHE = PdfConverter(artifact_dict=artifact_dict, config=config)
-    return _CONVERTER_CACHE
+
+    try:
+        artifact_dict = create_model_dict()
+        config = {
+            "output_format": "markdown",
+            "disable_image_extraction": False,
+            "languages": "en",
+            "batch_multiplier": 6, # Use higher multiplier for the large GPUs
+        }
+        _CONVERTER_CACHE = PdfConverter(artifact_dict=artifact_dict, config=config)
+        return _CONVERTER_CACHE
+    except (OSError, PermissionError) as e:
+        if "Read-only file system" in str(e):
+            logger.error(
+                "Failed to initialize marker: Cannot write to read-only package directory. "
+                "Please install marker-pdf in a writable location (e.g., venv in $SCRATCH or $HOME). "
+                f"Error: {e}"
+            )
+        else:
+            logger.error(f"Failed to initialize marker: {e}")
+        return None
 
 
 class MarkerParser(BaseParser):

@@ -183,12 +183,15 @@ def parse(
         image_dicts = []
 
         if parser_name == "marker":
-            # Marker-pdf implementation
-            if mime_type != "application/pdf":
-                 raise NotImplementedError(f"Marker parser only supports PDF, got {mime_type}")
-            
-            from .parser_marker import MarkerParser
-            parser = MarkerParser(file_path, mime_type)
+            if mime_type != "text/plain":
+                parser = get_parser(file_path, doc_type="text/plain")
+            else:
+                # Marker-pdf implementation
+                if mime_type != "application/pdf":
+                    raise NotImplementedError(f"Marker parser only supports PDF, got {mime_type}")
+                
+                from .parser_marker import MarkerParser
+                parser = MarkerParser(file_path, mime_type)
         else:
             # Standard implementation
             # Get appropriate parser
@@ -234,7 +237,7 @@ def parse(
                 description = image_descriptions.get(image_name)
                 if description:
                     # Update alt text with description
-                    return f"![{alt_text}: {description}]({image_name})"
+                    return f"![{description}]({image_name})"
                 
                 return match.group(0) # No change if no description
 

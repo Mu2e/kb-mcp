@@ -73,6 +73,22 @@ ssh -J <user-name>@perlmutter.nersc.gov -L 8443:localhost:8443 <user-name>@<logi
 
 Then access the web interface at `https://localhost:8443` in your browser.
 
+## Interactive Nodes
+
+### GPU node:
+```bash
+salloc --nodes 1 --qos interactive --time 01:00:00 --constraint gpu --account m5115_g
+```
+All nodes come with 4 GPUs. If you want to use all on them we have a script to run a command, for example like
+```bash
+./scripts/run_on_4gpus.sh kb tools parse-all inspire-hep --extract-images --describe-images --parser-name marker
+```
+
+### CPU nodes:
+```bash
+salloc --nodes 1 --qos interactive --time 01:00:00 --constraint cpu --account m5115
+```
+
 ## Database Setup
 
 The `nersc_setup_db.sh` script is automatically called by `nersc_setup.sh` to set up a PostgreSQL database with the pgvector extension. The database setup handles:
@@ -121,6 +137,7 @@ The database is accessible from other NERSC nodes, allowing compute nodes to con
     This is a symlink set up by `nersc_setup.sh` to either your `~/.kb-mcp.env` *or* the shared CFS `kb-mcp.env`. This is the file read by the application at startup.
 
 **Note:**  
+
 - Database credentials and most secrets are managed via the shared `.env` in the secrets folder.  
 - If you run the database setup (`nersc_setup_db.sh`), it will update the credentials in the shared `.env` so other users (or compute nodes) will have access to the latest settings.
 - You can always override by creating or editing your own `~/.kb-mcp.env`. This will take precedence for your user.

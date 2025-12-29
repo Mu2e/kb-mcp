@@ -12,21 +12,21 @@ logger = logging.getLogger(__name__)
 
 
 def _get_single_image_description(
-    client, 
-    document_text: str, 
-    image_base64: str, 
-    image_number: int,
+    client,
+    document_text: str,
+    image_base64: str,
+    image_identifier: str,
     model: str
 ) -> str:
     """Get description for a single image using OpenAI client.
-    
+
     Args:
         client: OpenAI client instance
         document_text: Full document text for context
         image_base64: Base64-encoded image string
-        image_number: Image number (for context)
+        image_identifier: Image identifier/name (e.g., "_page_3_Figure_3.jpeg")
         model: Model name to use
-        
+
     Returns:
         Image description string
     """
@@ -34,7 +34,8 @@ def _get_single_image_description(
     image_format = detect_image_format(image_base64)
 
     # Create prompt with document context
-    prompt = _create_image_description_prompt(document_text, image_number)
+    prompt = _create_image_description_prompt(document_text, image_identifier)
+    print("Prompt for image", image_identifier, ":\n", prompt)
 
     # Make request using OpenAI client
     response = client.chat.completions.create(
@@ -128,12 +129,14 @@ def generate_image_descriptions(
         for idx, img_dict in images_with_binary:
             # Get binary data
             image_bytes = img_dict["binary"]
-            
+
             # Encode to base64
             image_base64 = base64.b64encode(image_bytes).decode()
-            image_number = img_dict["meta"]["image_number"]
-            
-            images_for_llm.append((idx, image_base64, image_number, img_dict))
+            # Use image_name from metadata (e.g., "_page_3_Figure_3.jpeg")
+            # This is more descriptive than arbitrary numbering
+            image_identifier = img_dict.get("meta", {}).get("image_name", f"image_{idx}")
+
+            images_for_llm.append((idx, image_base64, image_identifier, img_dict))
         
         # Generate descriptions in parallel
         descriptions = [None] * len(images_for_llm)
@@ -146,27 +149,27 @@ def generate_image_descriptions(
                     client,
                     document_text,
                     image_base64,
-                    image_number,
+                    image_identifier,
                     model
                 ): i
-                for i, (_, image_base64, image_number, _) in enumerate(images_for_llm)
+                for i, (_, image_base64, image_identifier, _) in enumerate(images_for_llm)
             }
-            
+
             # Collect results
             for future in as_completed(future_to_index):
                 index = future_to_index[future]
                 try:
                     descriptions[index] = future.result()
-                    img_number = images_for_llm[index][2]
-                    logger.debug(f"✓ Image {img_number} description generated")
+                    img_id = images_for_llm[index][2]
+                    logger.debug(f"Image '{img_id}' description generated")
                 except Exception as e:
-                    logger.error(f"✗ Error getting description for image {images_for_llm[index][2]}: {e}")
+                    logger.error(f"Error getting description for image '{images_for_llm[index][2]}': {e}")
                     descriptions[index] = "Image description unavailable"
-        
+
         # Update image dicts with descriptions (modifies original dicts in image_dicts)
-        for i, (_, _, image_number, img_dict) in enumerate(images_for_llm):
+        for i, (_, _, image_identifier, img_dict) in enumerate(images_for_llm):
             description = descriptions[i]
-            
+
             # Fill text field in image dict (updates original dict in image_dicts)
             img_dict["text"] = description
         
@@ -180,21 +183,35 @@ def generate_image_descriptions(
     return image_dicts
 
 
-def _create_image_description_prompt(document_text: str, image_number: int) -> str:
+def _create_image_description_prompt(document_text: str, image_identifier: str) -> str:
     """Create prompt for image description based on document context.
-    
+
     Args:
         document_text: Full document text (for context)
-        image_number: Image number (for reference)
-        
+        image_identifier: Image identifier/name (e.g., "_page_3_Figure_3.jpeg")
+
     Returns:
         Prompt string for image description
     """
-    # Use the full document text as context (truncate if too long)
-    # Limit to last 2000 characters to avoid token limits
-    context = document_text[-2000:] if len(document_text) > 2000 else document_text
+    # Try to find the image identifier in the document text to get relevant context
+    # Search for the identifier (without extension) in the text
+    search_term = image_identifier.rsplit('.', 1)[0] if '.' in image_identifier else image_identifier
 
-    return f"""Analyze this image (Image {image_number}) from the document and provide a description for document embedding and chat purposes.
+    # Try to find where the image is referenced in the text
+    pos = document_text.find(search_term)
+
+    if pos != -1:
+        # Found the image reference - extract context around it
+        # Get ±500 characters around the reference
+        context_window = 500
+        start = max(0, pos - context_window)
+        end = min(len(document_text), pos + len(search_term) + context_window)
+        context = document_text[start:end]
+    else:
+        # Not found - we don't give any context
+        context = ""
+
+    return f"""Analyze this image ({image_identifier}) from the document and provide a description for document embedding and chat purposes.
 
 Document context:
 {context}
