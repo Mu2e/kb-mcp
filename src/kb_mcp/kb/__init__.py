@@ -15,6 +15,9 @@ from .logs import get_search_logs, get_parsing_logs, get_chunking_logs, get_all_
 from .statistics import get_statistics
 from .embedding.db_models import Chunk, EmbeddingConfig
 
+# Import graph module
+from . import graph
+
 __all__ = [
     # High-level ingestion
     "ingest",
@@ -54,6 +57,9 @@ __all__ = [
 
     # Search
     "search",
+
+    # Graph
+    "graph",
 ]
 
 from .search import search

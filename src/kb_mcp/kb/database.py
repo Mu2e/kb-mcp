@@ -322,6 +322,15 @@ def init_db(create_tables: bool = True) -> None:
         EvalResult,
         EvalRetrievedDocument,
     )
+    from .graph.db_models import (  # noqa: F401
+        GraphNodeType,
+        GraphVerb,
+        GraphNode,
+        GraphRelation,
+        GraphRelationEvidence,
+        GraphNodeMap,
+        GraphExtractionLog,
+    )
 
     engine = get_engine()
     database_url = get_database_url()
@@ -350,6 +359,13 @@ def init_db(create_tables: bool = True) -> None:
                 logger.info("Full-text search trigger created/verified")
             except Exception as e:
                 logger.warning(f"Could not create full-text search trigger: {e}")
+
+        # Auto-seed graph defaults (node types and verbs) if tables are empty
+        try:
+            from .graph.graph import seed_graph_defaults
+            seed_graph_defaults()
+        except Exception as e:
+            logger.warning(f"Could not seed graph defaults: {e}")
 
     # Test connection
     with engine.connect() as conn:
