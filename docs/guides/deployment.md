@@ -430,6 +430,11 @@ pg_dump -h localhost -U kb_user kb_database \
   -F c \
   -f kb_backup.dump
 ```
+Or in NERSC podman container:
+```bash
+podman-hpc exec kb-mcp-postgres-scorrodi pg_dump -U postgres postgres --no-owner --no-acl -F c > kb_backup.dump
+```
+
 
 **Options:**
 - `--no-owner` - Don't include ownership commands (cloud DBs have different users)

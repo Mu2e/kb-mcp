@@ -186,9 +186,10 @@ def parse(
         image_dicts = []
 
         if parser_name == "marker":
-            if mime_type != "text/plain":
-                parser = get_parser(file_path, doc_type="text/plain")
-            else:
+            #if mime_type == "text/plain":
+            #    parser = get_parser(file_path, doc_type="text/plain")
+            #else:
+            if True:
                 # Marker-pdf implementation
                 if mime_type != "application/pdf":
                     raise NotImplementedError(f"Marker parser only supports PDF, got {mime_type}")
