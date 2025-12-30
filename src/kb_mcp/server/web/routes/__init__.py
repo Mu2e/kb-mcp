@@ -10,6 +10,7 @@ from .logs import setup_logs_routes
 from .statistics import setup_statistics_routes
 from .admin import setup_admin_routes
 from .api import setup_api_routes
+from .graph import setup_graph_routes
 
 __all__ = [
     'require_auth_html',
@@ -20,5 +21,6 @@ __all__ = [
     'setup_statistics_routes',
     'setup_admin_routes',
     'setup_api_routes',
+    'setup_graph_routes',
 ]
 

@@ -7,7 +7,7 @@ from tqdm import tqdm
 
 from ..database import get_db_session
 from ..db_models import Document
-from .db_models import GraphNodeMap
+from .db_models import GraphExtractionLog
 from .extraction import extract_and_process_document
 
 logger = logging.getLogger(__name__)
@@ -25,13 +25,13 @@ def extract_all(
     Extract knowledge graph relations from all documents matching filters.
 
     This function processes documents in batch, similar to parse_all and chunk_and_embed_all.
-    By default, it skips documents that already have graph nodes extracted (unless force=True).
+    By default, it skips documents that already have extraction logs (unless force=True).
 
     Args:
         source_id: Optional source ID filter.
         parser_id: Optional parser ID filter.
-        force: If True, re-process documents even if they already have nodes extracted.
-               If False (default), skip documents with existing nodes.
+        force: If True, re-process documents even if they already have extraction logs.
+               If False (default), skip documents with existing extraction logs.
         limit: If provided, process only this many documents (useful for testing/incremental processing).
         batch_size: If provided, process in batches with LOCK/SKIP LOCKED for parallel processing.
                    If None, uses default from get_batch_config()['extract_batch_size'].
@@ -52,7 +52,7 @@ def extract_all(
             "error_details": List[Dict[str, Any]]
         }
     """
-    from ..config import get_batch_config
+    from ...config import get_batch_config
 
     # Get batch size from config if not provided
     batch_size = batch_size or get_batch_config()['extract_batch_size']
@@ -70,11 +70,10 @@ def extract_all(
     while True:
         with get_db_session() as session:
             # Build query to find documents that need extraction
-            # If not force, use NOT EXISTS to find documents without graph nodes
+            # If not force, use NOT EXISTS to find documents without extraction logs
             if not force:
-                from sqlalchemy import and_
-                subquery = session.query(GraphNodeMap.document_id).filter(
-                    GraphNodeMap.document_id == Document.id
+                subquery = session.query(GraphExtractionLog.document_id).filter(
+                    GraphExtractionLog.document_id == Document.id
                 ).exists()
 
                 query = session.query(Document).filter(~subquery)
