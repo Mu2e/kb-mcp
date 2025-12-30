@@ -187,6 +187,7 @@ def parse(
 
         if parser_name == "marker":
             #if mime_type != "text/plain":
+            #if mime_type == "text/plain":
             #    parser = get_parser(file_path, doc_type="text/plain")
             #else:
             if True:

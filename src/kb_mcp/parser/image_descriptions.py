@@ -35,7 +35,6 @@ def _get_single_image_description(
 
     # Create prompt with document context
     prompt = _create_image_description_prompt(document_text, image_identifier)
-    print("Prompt for image", image_identifier, ":\n", prompt)
 
     # Make request using OpenAI client
     response = client.chat.completions.create(

@@ -45,7 +45,18 @@ nav:
       - Authentication: guides/authentication.md
   - API Reference:
     - Configuration: reference/config.md
-    - KB/Knowledge Base: reference/kb.md
+    - KB/Knowledge Base:
+      - Overview: reference/kb.md
+      - Knowledge Graph: reference/kb/graph.md
+      - Batch Operations: reference/kb/batch.md
+      - Search: reference/kb/search.md
+      - Embedding: reference/kb/embedding.md
+      - Documents: reference/kb/documents.md
+      - Sources: reference/kb/sources.md
+      - Utilities: reference/kb/utilities.md
+      - Evaluation: reference/kb/evaluation.md
+      - Logging: reference/kb/logging.md
+      - Database: reference/kb/database.md
     - KB Server: reference/server.md
     - KB Importer: reference/importer.md
     - Parser: reference/parser.md

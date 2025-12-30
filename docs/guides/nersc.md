@@ -113,7 +113,19 @@ The database is accessible from other NERSC nodes, allowing compute nodes to con
 
 **Note:** Currently, the database data is stored in `$SCRATCH`, which is temporary. Consider backing up important data or migrating to CFS for persistence.
 
-### Files and Folders
+## Running vLLM (gpt-oss-120b) locally at NERSC
+
+After completing the setup with `nersc_setup.sh` as described above, you can run a local vLLM server on NERSC compute nodes using the `nersc_launch_llm.sh` script. The script automatically submits a SLURM job to launch vLLM on a worker node with 4 GPUs, waits for the server to become ready (typically 5-10 minutes), and updates your `.env` file with the `OPENAI_BASE_URL` and `OPENAI_API_KEY` so that kb-mcp can use the local LLM instance.
+
+To launch the vLLM server:
+
+```bash
+./scripts/nersc_launch_llm.sh
+```
+
+The script requires a Hugging Face token (set `HF_TOKEN` in your `~/.kb-mcp.env.local` file) and will output the connection details once the server is ready.
+
+## Files and Folders
 
 `kb-mcp` uses the following files and folders (by default):
 

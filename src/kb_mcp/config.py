@@ -6,7 +6,8 @@ import os
 from typing import Optional
 import json
 
-from dotenv import load_dotenv
+from anyio import Path
+from dotenv import load_dotenv, find_dotenv
 
 # Load shared configuration from .env
 load_dotenv()
@@ -14,7 +15,10 @@ load_dotenv()
 # Load user-specific overrides from .env.local (takes precedence)
 # This allows users to override settings (e.g., ALCF credentials) without
 # modifying the shared .env file (which may be a symlink on NERSC)
-load_dotenv(".env.local", override=True)
+env_path = find_dotenv()
+if env_path:
+    local_env_path = Path(env_path).with_name(".env.local")
+    load_dotenv(dotenv_path=local_env_path, override=True)
 
 # --- Helpers ---
 
@@ -104,6 +108,7 @@ def get_llm_config() -> dict:
             * `eval_gen_model` (str): Evaluation question generation model (Env: `EVAL_GEN_MODEL`, defaults to DEFAULT_LLM_MODEL).
             * `eval_judge_model` (str): Evaluation answer judging model (Env: `EVAL_JUDGE_MODEL`, defaults to DEFAULT_LLM_MODEL).
             * `image_llm_description` (bool): Use LLM for image descriptions (Env: `PARSE_IMAGE_DESCRIPTION_MODEL`).
+            * `graph_relation_extraction_model` (str): Graph relation extraction model (Env: `GRAPH_EXTRACTION_MODEL`, defaults to DEFAULT_LLM_MODEL).
     """
     base_url_models = json.loads(os.getenv("OPENAI_BASE_URL_MODELS", "{}"))
     return {
@@ -115,6 +120,24 @@ def get_llm_config() -> dict:
         'eval_gen_model': os.getenv("EVAL_GEN_MODEL", get_default_llm_model()),
         'eval_judge_model': os.getenv("EVAL_JUDGE_MODEL", get_default_llm_model()),
         'image_description_model': os.getenv("PARSE_IMAGE_DESCRIPTION_MODEL", get_default_llm_model()),
+        'graph_relation_extraction_model': os.getenv("GRAPH_EXTRACTION_MODEL", get_default_llm_model()),
+    }
+
+# Graph
+def get_graph_config() -> dict:
+    """Graph knowledge base settings.
+
+    Returns:
+        dict: Graph configuration with keys:
+
+            * `node_similarity_threshold` (float): Minimum similarity for vector matching (Env: `GRAPH_NODE_SIMILARITY_THRESHOLD`, default: 0.85).
+            * `embedding` (dict): Embedding configuration (see `get_embedding_config()`).
+            * `graph_relation_extraction_model` (str): Graph relation extraction model (Env: `GRAPH_EXTRACTION_MODEL`, defaults to DEFAULT_LLM_MODEL).
+    """
+    return {
+        'node_similarity_threshold': float(os.getenv("GRAPH_NODE_SIMILARITY_THRESHOLD", "0.85")),
+        'embedding': get_embedding_config(),
+        'graph_relation_extraction_model': os.getenv("GRAPH_EXTRACTION_MODEL", get_default_llm_model()),
     }
 
 # Integrations
@@ -207,10 +230,12 @@ def get_batch_config() -> dict:
 
             * `parse_batch_size` (int): Batch size for parse_all (Env: `PARSE_BATCH_SIZE`, default: 10).
             * `chunk_batch_size` (int): Batch size for chunk_and_embed_all (Env: `CHUNK_BATCH_SIZE`, default: 10).
+            * `extract_batch_size` (int): Batch size for graph extract_all (Env: `EXTRACT_BATCH_SIZE`, default: 10).
     """
     return {
         'parse_batch_size': _get_int("PARSE_BATCH_SIZE", 10),
         'chunk_batch_size': _get_int("CHUNK_BATCH_SIZE", 10),
+        'extract_batch_size': _get_int("EXTRACT_BATCH_SIZE", 10),
     }
 
 def get_parser_config() -> dict:

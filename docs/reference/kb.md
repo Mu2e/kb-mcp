@@ -9,6 +9,7 @@ The KB module is organized into several sub-modules:
 - **kb** - Core document storage and retrieval (functions listed below)
 - **[kb.embedding](kb/embedding.md)** - Chunking and embedding operations (see also [batch operations](kb/batch.md))
 - **[kb.search](kb/search.md)** - Hybrid search combining semantic (vector) and full-text search
+- **[kb.graph](kb/graph.md)** - Knowledge graph extraction and querying
 - **[kb.eval](kb/evaluation.md)** - Evaluation and benchmarking (see also [evaluation guide](../guides/evaluation.md))
 
 See [database schema](../guides/database.md) for details on data models and storage.
@@ -46,7 +47,9 @@ for result in results:
 
 **[Utilities](kb/utilities.md):** [`get_statistics`](kb/utilities.md#get_statistics), [`get_metadata_keys`](kb/utilities.md#get_metadata_keys)
 
-**[Batch Operations](kb/batch.md):** [`parse_all`](kb/batch.md#parse_all), [`chunk_and_embed_all`](kb/batch.md#chunk_and_embed_all), [`image_chunk_and_embed_all`](kb/batch.md#image_chunk_and_embed_all), [`embed_all`](kb/batch.md#embed_all)
+**[Batch Operations](kb/batch.md):** [`parse_all`](kb/batch.md#parse_all), [`chunk_and_embed_all`](kb/batch.md#chunk_and_embed_all), [`image_chunk_and_embed_all`](kb/batch.md#image_chunk_and_embed_all), [`embed_all`](kb/batch.md#embed_all), [`extract_all`](kb/batch.md#extract_all)
+
+**[Knowledge Graph](kb/graph.md):** [`extract_all`](kb/graph.md#extract_all), [`extract_relations`](kb/graph.md#extract_relations), [`get_node`](kb/graph.md#get_node), [`get_nodes_for_document`](kb/graph.md#get_nodes_for_document), [`find_paths`](kb/graph.md#find_paths)
 
 **[Logging](kb/logging.md):** [`get_search_logs`](kb/logging.md#get_search_logs), [`get_parsing_logs`](kb/logging.md#get_parsing_logs), [`get_chunking_logs`](kb/logging.md#get_chunking_logs), [`get_all_logs_for_document`](kb/logging.md#get_all_logs_for_document)
 

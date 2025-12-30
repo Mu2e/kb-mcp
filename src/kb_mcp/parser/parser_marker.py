@@ -104,13 +104,15 @@ class MarkerParser(BaseParser):
                             
                     img.save(img_byte_arr, format=img_format)
                     img_bytes = img_byte_arr.getvalue()
-                    
+
                     # Create image doc dict
                     img_dict = {
                         "source_id": parent_data.get("source_id", "local"),
                         "doc_id": parent_data.get("doc_id", self.file_path.stem)+"-"+img_name,
                         "doc_type": "image",
+                        "source_type": parent_data.get("source_type"),
                         "binary": img_bytes,
+                        "parent_id": parent_data.get("id"),
                         "meta": {
                             "image_name": img_name,
                             "parser": "marker",

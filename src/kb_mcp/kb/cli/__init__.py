@@ -35,6 +35,7 @@ class GroupedHelpFormatter(argparse.RawDescriptionHelpFormatter):
             command_groups = [
                 ("Document Operations", ["ingest", "get", "embed", "drop", "search", "similar"]),
                 ("Chunks, Embeddings & Sources", ["source", "chunks", "embedding"]),  # "emb" is an alias, will be shown
+                ("Knowledge Graph", ["graph"]),
                 ("Evaluation & Benchmarking", ["eval"]),
                 ("Tools & Statistics", ["tools", "stats", "logs"]),
             ]
@@ -82,6 +83,7 @@ def main():
     from . import eval_commands
     from . import tools_commands
     from . import source_commands
+    from . import graph_commands
 
     # Set up commands from each module
     document_commands.setup_commands(subparsers)
@@ -90,6 +92,7 @@ def main():
     eval_commands.setup_commands(subparsers)
     tools_commands.setup_commands(subparsers)
     source_commands.setup_commands(subparsers)
+    graph_commands.setup_commands(subparsers)
 
     args = parser.parse_args()
 
@@ -140,7 +143,7 @@ def main():
                 parser.print_help()
                 sys.exit(1)
         elif args.command == "tools":
-            from .tools_commands import cmd_deduplicate, cmd_chunk_and_embed_all, cmd_summarize_all, cmd_list_tables, cmd_drop_table, cmd_get_raw, cmd_drop_raw
+            from .tools_commands import cmd_deduplicate, cmd_chunk_and_embed_all, cmd_summarize_all, cmd_list_tables, cmd_drop_table, cmd_get_raw, cmd_drop_raw, cmd_extract_all
             if args.tools_command == "deduplicate":
                 cmd_deduplicate(args)
             elif args.tools_command == "chunk-and-embed-all":
@@ -155,6 +158,8 @@ def main():
                 cmd_get_raw(args)
             elif args.tools_command == "drop-raw":
                 cmd_drop_raw(args)
+            elif args.tools_command == "extract-all":
+                cmd_extract_all(args)
             else:
                 parser.print_help()
                 sys.exit(1)
@@ -182,6 +187,19 @@ def main():
                 cmd_eval_stats(args)
             elif args.eval_command == "list":
                 cmd_eval_list(args)
+            else:
+                parser.print_help()
+                sys.exit(1)
+        elif args.command == "graph":
+            from .graph_commands import cmd_get_node, cmd_get_nodes_for_document, cmd_process_document, cmd_extract_all
+            if args.graph_command == "get-node":
+                cmd_get_node(args)
+            elif args.graph_command == "get-nodes-for-document":
+                cmd_get_nodes_for_document(args)
+            elif args.graph_command == "process-document":
+                cmd_process_document(args)
+            elif args.graph_command == "extract-all":
+                cmd_extract_all(args)
             else:
                 parser.print_help()
                 sys.exit(1)

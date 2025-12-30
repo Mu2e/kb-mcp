@@ -9,3 +9,5 @@ Functions for processing multiple documents at once.
 ::: kb_mcp.kb.image_chunk_and_embed_all
 
 ::: kb_mcp.kb.embed_all
+
+::: kb_mcp.kb.graph.extract_all
