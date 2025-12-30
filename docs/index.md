@@ -28,11 +28,13 @@ A knowledge base system designed to be **used** via MCP (Model Context Protocol)
 - [Evaluation Workflows](guides/evaluation.md) - Testing retrieval quality
 - [Database Schema](guides/database.md) - Understanding the data models
 - [Deployment](guides/deployment.md) - Docker and Cloud Run deployment
+- [NERSC](guides/nersc.md) - NERSC specific instructions
 
 ### API Reference
 
 - [Configuration](reference/config.md) - Environment variables and settings
 - [Knowledge Base (KB)](reference/kb.md) - Core KB functionality
+  - [Knowledge Graph](reference/kb/graph.md) - Graph extraction and queries
 - [KB Server](reference/server.md) - MCP and web server
 - [KB Importer](reference/importer.md) - External source imports
 - [Parser](reference/parser.md) - Document parsing

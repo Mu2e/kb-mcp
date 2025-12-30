@@ -230,10 +230,12 @@ def get_batch_config() -> dict:
 
             * `parse_batch_size` (int): Batch size for parse_all (Env: `PARSE_BATCH_SIZE`, default: 10).
             * `chunk_batch_size` (int): Batch size for chunk_and_embed_all (Env: `CHUNK_BATCH_SIZE`, default: 10).
+            * `extract_batch_size` (int): Batch size for graph extract_all (Env: `EXTRACT_BATCH_SIZE`, default: 10).
     """
     return {
         'parse_batch_size': _get_int("PARSE_BATCH_SIZE", 10),
         'chunk_batch_size': _get_int("CHUNK_BATCH_SIZE", 10),
+        'extract_batch_size': _get_int("EXTRACT_BATCH_SIZE", 10),
     }
 
 def get_parser_config() -> dict:

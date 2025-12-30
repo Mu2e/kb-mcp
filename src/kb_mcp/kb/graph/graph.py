@@ -105,172 +105,6 @@ def get_verbs(session=None) -> List[GraphVerb]:
         return {v.name: v.description for v in verbs}
 
 
-def find_node(
-    name: str,
-    node_type: Optional[str] = None,
-    similarity_threshold: Optional[float] = None,
-    session=None,
-) -> Optional[GraphNode]:
-    """
-    Find a graph node by name and optional type.
-
-    Args:
-        name: Node name to search for.
-        node_type: Optional node type label to filter by. If None, searches across all types.
-        similarity_threshold: Minimum similarity for vector match (defaults to config).
-        session: Optional database session.
-    Returns:
-        GraphNode instance if found, else None.
-    """
-    from ...config import get_graph_config
-    from ..embedding.utils import get_embedder
-    from .matching import _normalize_name, find_similar_nodes
-
-    # Get configuration
-    graph_config = get_graph_config()
-    embedding_config = graph_config['embedding']
-    if similarity_threshold is None:
-        similarity_threshold = graph_config['node_similarity_threshold']
-
-    canonical = _normalize_name(name)
-    with get_db_session(session) as session:
-        node_type_obj = None
-        if node_type:
-            node_type_obj = session.query(GraphNodeType).filter(
-                GraphNodeType.label == node_type
-            ).first()
-
-            if not node_type_obj:
-                raise ValueError(f"Node type '{node_type}' does not exist. Please create it first or use seed_graph_defaults().")
-
-        # Strategy 1: Exact canonical name match
-        query = session.query(GraphNode).filter(GraphNode.canonical_name == canonical)
-        if node_type_obj:
-            query = query.filter(GraphNode.type_id == node_type_obj.id)
-        existing_node = query.first()
-
-        if existing_node:
-            logger.debug(f"Found exact match for '{name}' (canonical: '{canonical}')")
-            # Aliases already match (canonical matched), no need to add
-            return existing_node
-        else:
-            logger.debug(f"No exact match for '{name}' (canonical: '{canonical}'), trying aliases and vector search")
-
-        # Strategy 2: Alias match
-        # For PostgreSQL: use array contains operator
-        # For SQLite: fetch all and filter in Python
-        dialect = session.bind.dialect.name
-
-        if dialect == 'postgresql':
-            # PostgreSQL: check if canonical is in the array using raw SQL
-            # We need to use text() because our TypeDecorator doesn't support array operators
-            from sqlalchemy import text as sql_text
-            query = session.query(GraphNode).filter(
-                sql_text(f"'{canonical}' = ANY(graph_nodes.aliases)")
-            )
-            if node_type_obj:
-                query = query.filter(GraphNode.type_id == node_type_obj.id)
-            alias_match = query.first()
-
-            if alias_match:
-                logger.debug(f"Found alias match for '{name}' in node '{alias_match.name}'")
-                # Alias already matched, no need to add again
-                return alias_match
-            else:
-                logger.debug(f"No alias match for '{name}'")
-        else:
-            # SQLite: fetch all nodes of this type and check aliases in Python
-            query = session.query(GraphNode).filter(GraphNode.aliases.isnot(None))
-            if node_type_obj:
-                query = query.filter(GraphNode.type_id == node_type_obj.id)
-            nodes_with_aliases = query.all()
-
-            for node in nodes_with_aliases:
-                if node.aliases and canonical in node.aliases:
-                    logger.debug(f"Found alias match for '{name}' in node '{node.name}'")
-                    # Alias already matched, no need to add again
-                    return node
-
-        # Strategy 3: Vector similarity search
-        try:
-            # Generate embedding for query name
-            embedder = get_embedder(provider=embedding_config['provider'],
-                                    model=embedding_config['model'], 
-                                    session=session)
-            query_embedding = embedder([canonical])[0]
-
-            # Find similar nodes
-            similar_nodes = find_similar_nodes(
-                query_embedding=query_embedding,
-                node_type_id=node_type_obj.id if node_type_obj else None,
-                limit=10,
-                session=session
-            )
-
-            # Filter by threshold
-            logger.debug(f"Vector similarity search found {len(similar_nodes)} candidates for '{name}', best similarity: {similar_nodes[0][1] if similar_nodes else 'N/A'}")
-            candidates = [(node, score) for node, score in similar_nodes if score >= similarity_threshold]
-
-            if candidates:
-                logger.debug(f"Found {len(candidates)} candidates above threshold {similarity_threshold}")
-
-                # Check for ambiguity (multiple candidates within 10% of best)
-                #if len(candidates) > 1:
-                #    best_score = candidates[0][1]
-                #    ambiguous = [
-                #        (node, score) for node, score in candidates
-                #        if score >= best_score - 0.10
-                #    ]
-
-                #    if len(ambiguous) > 1:
-                #        logger.info(f"Ambiguous match for '{name}': {len(ambiguous)} candidates within 10%")
-                #        # Use LLM to disambiguate
-                #        selected_node = _disambiguate_nodes_with_llm(name, ambiguous, session)
-                #        if selected_node:
-                #            # Add name to aliases
-                #            if selected_node.aliases is None:
-                #                selected_node.aliases = []
-                #            if name not in selected_node.aliases and name != selected_node.name:
-                #                selected_node.aliases.append(name)
-                #                selected_node.updated_time = func.now()
-                #            return selected_node
-                #        else:
-                #            # LLM suggested creating new node
-                #            logger.info(f"LLM suggested creating new node for '{name}'")
-                #            # Fall through to creation
-                #    else:
-                #        # Clear winner
-                #        matched_node = candidates[0][0]
-                #        logger.debug(f"Found vector match for '{name}': '{matched_node.name}' (similarity: {candidates[0][1]:.3f})")
-                #        # Add name to aliases
-                #        if matched_node.aliases is None:
-                #            matched_node.aliases = []
-                #        if name not in matched_node.aliases and name != matched_node.name:
-                #            matched_node.aliases.append(name)
-                #            matched_node.updated_time = func.now()
-                #        return matched_node
-                #else:
-                if True:
-                    # Single candidate (or take first one)
-                    matched_node = candidates[0][0]
-                    logger.debug(f"Found vector match for '{name}': '{matched_node.name}' (similarity: {candidates[0][1]:.3f})")
-                    # Add canonical name to aliases (we search by canonical, so we need to store canonical)
-                    if matched_node.aliases is None:
-                        matched_node.aliases = []
-                    if canonical not in matched_node.aliases and canonical != matched_node.canonical_name:
-                        matched_node.aliases.append(canonical)
-                        # Mark the aliases attribute as modified so SQLAlchemy detects the change
-                        from sqlalchemy.orm.attributes import flag_modified
-                        flag_modified(matched_node, 'aliases')
-                        matched_node.updated_time = func.now()
-                        logger.debug(f"Added '{canonical}' (canonical form of '{name}') to aliases of node '{matched_node.name}'")
-                    return matched_node
-
-        except Exception as e:
-            logger.warning(f"Vector similarity search failed for '{name}': {e}")
-            # Continue to node creation
-
-
 
 
 
@@ -310,12 +144,12 @@ def get_or_create_node(
     """
     from ...config import get_graph_config
     from ..embedding.utils import get_embedder
-    from .matching import _normalize_name
+    from .matching import _normalize_name, find_node
 
     # Validate input
     if not name or not name.strip():
         raise ValueError("Node name cannot be empty")
-    
+
     canonical = _normalize_name(name)
 
     with get_db_session(session) as session:

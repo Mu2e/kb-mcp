@@ -306,3 +306,128 @@ If no good match exists, return null for choice."""
         logger.warning(f"LLM disambiguation failed: {e}, falling back to highest similarity")
         # On error, return node with highest similarity (first in list)
         return candidates[0][0] if candidates else None
+
+
+def find_node(
+    name: str,
+    node_type: Optional[str] = None,
+    similarity_threshold: Optional[float] = None,
+    session=None,
+) -> Optional[GraphNode]:
+    """
+    Find a graph node by name and optional type.
+
+    Args:
+        name: Node name to search for.
+        node_type: Optional node type label to filter by. If None, searches across all types.
+        similarity_threshold: Minimum similarity for vector match (defaults to config).
+        session: Optional database session.
+    Returns:
+        GraphNode instance if found, else None.
+    """
+    from ...config import get_graph_config
+    from ..embedding.utils import get_embedder
+    from sqlalchemy import func
+
+    # Get configuration
+    graph_config = get_graph_config()
+    embedding_config = graph_config['embedding']
+    if similarity_threshold is None:
+        similarity_threshold = graph_config['node_similarity_threshold']
+
+    canonical = _normalize_name(name)
+    with get_db_session(session) as session:
+        node_type_obj = None
+        if node_type:
+            node_type_obj = session.query(GraphNodeType).filter(
+                GraphNodeType.label == node_type
+            ).first()
+
+            if not node_type_obj:
+                raise ValueError(f"Node type '{node_type}' does not exist. Please create it first or use seed_graph_defaults().")
+
+        # Strategy 1: Exact canonical name match
+        query = session.query(GraphNode).filter(GraphNode.canonical_name == canonical)
+        if node_type_obj:
+            query = query.filter(GraphNode.type_id == node_type_obj.id)
+        existing_node = query.first()
+
+        if existing_node:
+            logger.debug(f"Found exact match for '{name}' (canonical: '{canonical}')")
+            return existing_node
+        else:
+            logger.debug(f"No exact match for '{name}' (canonical: '{canonical}'), trying aliases and vector search")
+
+        # Strategy 2: Alias match
+        dialect = session.bind.dialect.name
+
+        if dialect == 'postgresql':
+            # PostgreSQL: check if canonical is in the array using raw SQL
+            from sqlalchemy import text as sql_text
+            query = session.query(GraphNode).filter(
+                sql_text(f"'{canonical}' = ANY(graph_nodes.aliases)")
+            )
+            if node_type_obj:
+                query = query.filter(GraphNode.type_id == node_type_obj.id)
+            alias_match = query.first()
+
+            if alias_match:
+                logger.debug(f"Found alias match for '{name}' in node '{alias_match.name}'")
+                return alias_match
+            else:
+                logger.debug(f"No alias match for '{name}'")
+        else:
+            # SQLite: fetch all nodes of this type and check aliases in Python
+            query = session.query(GraphNode).filter(GraphNode.aliases.isnot(None))
+            if node_type_obj:
+                query = query.filter(GraphNode.type_id == node_type_obj.id)
+            nodes_with_aliases = query.all()
+
+            for node in nodes_with_aliases:
+                if node.aliases and canonical in node.aliases:
+                    logger.debug(f"Found alias match for '{name}' in node '{node.name}'")
+                    return node
+
+        # Strategy 3: Vector similarity search
+        try:
+            # Generate embedding for query name
+            embedder = get_embedder(provider=embedding_config['provider'],
+                                    model=embedding_config['model'],
+                                    session=session)
+            query_embedding = embedder([canonical])[0]
+
+            # Find similar nodes
+            similar_nodes = find_similar_nodes(
+                query_embedding=query_embedding,
+                node_type_id=node_type_obj.id if node_type_obj else None,
+                limit=10,
+                session=session
+            )
+
+            # Filter by threshold
+            logger.debug(f"Vector similarity search found {len(similar_nodes)} candidates for '{name}', best similarity: {similar_nodes[0][1] if similar_nodes else 'N/A'}")
+            candidates = [(node, score) for node, score in similar_nodes if score >= similarity_threshold]
+
+            if candidates:
+                logger.debug(f"Found {len(candidates)} candidates above threshold {similarity_threshold}")
+                # Take first candidate
+                matched_node = candidates[0][0]
+                logger.debug(f"Found vector match for '{name}': '{matched_node.name}' (similarity: {candidates[0][1]:.3f})")
+                # Add canonical name to aliases
+                if matched_node.aliases is None:
+                    matched_node.aliases = []
+                if canonical not in matched_node.aliases and canonical != matched_node.canonical_name:
+                    matched_node.aliases.append(canonical)
+                    # Mark the aliases attribute as modified so SQLAlchemy detects the change
+                    from sqlalchemy.orm.attributes import flag_modified
+                    flag_modified(matched_node, 'aliases')
+                    matched_node.updated_time = func.now()
+                    logger.debug(f"Added '{canonical}' (canonical form of '{name}') to aliases of node '{matched_node.name}'")
+                return matched_node
+
+        except Exception as e:
+            logger.warning(f"Vector similarity search failed for '{name}': {e}")
+            # Continue to return None
+
+        # No match found
+        return None

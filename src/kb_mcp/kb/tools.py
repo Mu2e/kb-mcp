@@ -240,6 +240,7 @@ def parse_all(
     extract_images: Optional[bool] = None,
     describe_images: Optional[bool] = None,
     force_reparse: bool = False,
+    batch_size: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Parse all raw documents that don't have corresponding processed documents yet.
 
@@ -254,6 +255,9 @@ def parse_all(
         describe_images: If True, generate LLM descriptions for images using vision model.
                         If None, reads from PARSE_IMAGE_LLM_DESCRIPTION env var.
         force_reparse: If True, re-parse even if documents already exist for this parser.
+        batch_size: If provided, process in batches with LOCK/SKIP LOCKED for parallel processing.
+                   If None, uses default from get_batch_config()['parse_batch_size'].
+                   Set to a large value (e.g., 999999) to disable batching and process all at once.
 
     Returns:
         Dictionary with:
@@ -270,7 +274,7 @@ def parse_all(
 
     from ..config import get_batch_config
 
-    batch_size = get_batch_config()['parse_batch_size']
+    batch_size = batch_size or get_batch_config()['parse_batch_size']
 
     parsed = 0
     skipped = 0

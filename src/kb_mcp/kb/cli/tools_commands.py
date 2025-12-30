@@ -114,6 +114,7 @@ def cmd_parse_all(args):
             extract_images=args.extract_images,
             describe_images=args.describe_images,
             force_reparse=args.force_reparse,
+            batch_size=getattr(args, 'batch_size', None),
         )
 
         print(f"\n  Completed:")
@@ -459,6 +460,51 @@ def cmd_drop_raw(args):
         sys.exit(1)
 
 
+def cmd_extract_all(args):
+    """Extract knowledge graph relations from all documents matching filters."""
+    from ..graph import extract_all
+
+    try:
+        print(f"Extracting graph relations from documents...")
+        if args.source_id:
+            print(f"  Source ID: {args.source_id}")
+        if args.parser_id:
+            print(f"  Parser ID: {args.parser_id}")
+        if args.force:
+            print(f"  Force: Re-processing documents with existing relations")
+        if args.limit:
+            print(f"  Limit: {args.limit} documents")
+
+        result = extract_all(
+            source_id=args.source_id,
+            parser_id=args.parser_id,
+            force=args.force,
+            limit=args.limit,
+        )
+
+        print(f"\nBatch extraction complete:")
+        print(f"  Total documents: {result['total_documents']}")
+        print(f"  Processed: {result['processed']}")
+        print(f"  Errors: {result['errors']}")
+        print(f"  Total relations extracted: {result['total_relations_extracted']}")
+        print(f"  Total relations created: {result['total_relations_created']}")
+        print(f"  Total relations updated: {result['total_relations_updated']}")
+        print(f"  Total relation errors: {result['total_relations_errors']}")
+
+        if result['error_details']:
+            print(f"\nError Details:")
+            for i, error in enumerate(result['error_details'][:5], 1):
+                print(f"  {i}. Document {error.get('document_id', 'unknown')}: {error.get('error', 'Unknown error')}")
+            if len(result['error_details']) > 5:
+                print(f"  ... and {len(result['error_details']) - 5} more")
+
+    except Exception as e:
+        print(f"Error: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+
 def setup_commands(subparsers):
     """Set up tools and utility commands."""
     # Drop command (top-level, for documents)
@@ -536,6 +582,11 @@ def setup_commands(subparsers):
         "--force-reparse",
         action="store_true",
         help="Re-parse even if documents already exist for this parser"
+    )
+    parse_all_parser.add_argument(
+        "--batch-size",
+        type=int,
+        help="Batch size for parallel processing (default: from config, set to large value like 999999 to disable batching)"
     )
     parse_all_parser.set_defaults(func=cmd_parse_all)
 
@@ -632,6 +683,31 @@ def setup_commands(subparsers):
         help="Also delete all documents linked to this raw document (and their chunks/embeddings)"
     )
     drop_raw_parser.set_defaults(func=cmd_drop_raw)
+
+    # Extract-all command (for graph relations)
+    extract_all_parser = tools_subparsers.add_parser(
+        "extract-all",
+        help="Extract knowledge graph relations from all documents matching filters"
+    )
+    extract_all_parser.add_argument(
+        "--source-id",
+        help="Filter by source ID"
+    )
+    extract_all_parser.add_argument(
+        "--parser-id",
+        help="Filter by parser ID"
+    )
+    extract_all_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Re-process documents even if they already have relations"
+    )
+    extract_all_parser.add_argument(
+        "--limit",
+        type=int,
+        help="Maximum number of documents to process"
+    )
+    extract_all_parser.set_defaults(func=cmd_extract_all)
 
     # Stats command
     stats_parser = subparsers.add_parser("stats", help="Show knowledge base statistics")

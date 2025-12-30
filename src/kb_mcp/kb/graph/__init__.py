@@ -32,6 +32,10 @@ from .queries import (
     find_paths,
 )
 
+from .tools import (
+    extract_all,
+)
+
 __all__ = [
     # Models
     "GraphNodeType",
@@ -54,7 +58,9 @@ __all__ = [
     "extract_and_process_document",
     # Queries
     "get_nodes_for_document",
-    "get_document_for_node",   
+    "get_document_for_node",
     "get_node",
     "find_paths",
+    # Tools
+    "extract_all",
 ]
