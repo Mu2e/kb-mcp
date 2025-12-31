@@ -8,6 +8,7 @@ from sqlalchemy.orm import aliased
 
 from ..database import get_db_session
 from .db_models import GraphNode, GraphNodeType, GraphRelation, GraphRelationEvidence, GraphNodeMap, GraphVerb
+from ..db_models import Document
 
 logger = logging.getLogger(__name__)
 
@@ -122,6 +123,7 @@ def get_node(
     type: Optional[str] = None,
     include_incoming: bool = True,
     include_outgoing: bool = True,
+    include_document_metadata: bool = False,
     session=None,
 ) -> Dict[str, Any]:
     """
@@ -133,6 +135,7 @@ def get_node(
         type: Node type (optional used together with name for filtering).
         include_incoming: Whether to include incoming relations (default: True).
         include_outgoing: Whether to include outgoing relations (default: True).
+        include_document_metadata: Whether to fetch document titles and types (default: False).
         session: Optional database session.
 
     Returns:
@@ -178,27 +181,24 @@ def get_node(
         raise ValueError("Either 'id' or 'name' must be provided to get a node.")
 
     with get_db_session(session) as session:
-        # 1. Fetch Node + Type in one go
+        # 1. Fetch Node + Type
         if id:
-            node_query = session.query(GraphNode, GraphNodeType.label).join(
-                GraphNodeType, GraphNode.type_id == GraphNodeType.id
-            ).filter(GraphNode.id == id)
+            node_filter = GraphNode.id == id
         else:
-            # Note: You might want to replicate find_node logic here to keep the join optimization
             from .matching import find_node
-            # For simplicity, we assume find_node returns the object, 
-            # but ideally we'd do the join here too.
             node_obj = find_node(name, type)
-            if not node_obj: return None
-            # Re-query to get the type label efficiently if find_node didn't return it
-            node_query = session.query(GraphNode, GraphNodeType.label).join(
-                GraphNodeType, GraphNode.type_id == GraphNodeType.id
-            ).filter(GraphNode.id == node_obj.id)
+            if not node_obj:
+                return None
+            node_filter = GraphNode.id == node_obj.id
 
-        result = node_query.first()
+        # Query for node + type
+        result = session.query(GraphNode, GraphNodeType.label).join(
+            GraphNodeType, GraphNode.type_id == GraphNodeType.id
+        ).filter(node_filter).first()
+
         if not result:
             return None
-            
+
         node, type_label = result
 
         # 2. Build Basic Node Dict
@@ -211,12 +211,42 @@ def get_node(
             "meta": node.meta if node.meta else {}
         }
 
-        # 3. Fetch Linked Documents (Fulfilling the docstring promise)
-        # Assuming you have a GraphNodeMap table
-        linked_docs = session.query(GraphNodeMap.document_id).filter(
-            GraphNodeMap.node_id == node.id
-        ).all()
-        linked_doc_ids = [str(d[0]) for d in linked_docs]
+        # 3. Fetch Linked Documents (separate query, but optimized)
+        if include_document_metadata:
+            # Single optimized query: Join Document + GraphNodeMap
+            linked_docs_query = session.query(
+                Document.id,
+                Document.doc_id,
+                Document.title,
+                Document.title_gen,
+                Document.doc_type,
+                Document.source_id,
+                GraphNodeMap.count
+            ).join(
+                GraphNodeMap, Document.id == GraphNodeMap.document_id
+            ).filter(
+                GraphNodeMap.node_id == node.id
+            ).order_by(
+                GraphNodeMap.count.desc()
+            ).all()
+
+            linked_docs = [
+                {
+                    "id": str(row[0]) if row[0] else row[1],
+                    "doc_id": row[1],
+                    "source_id": row[5],
+                    "title": row[2] or row[3] or None,
+                    "type": row[4],
+                    "mention_count": row[6]
+                }
+                for row in linked_docs_query
+            ]
+        else:
+            # Lightweight query - just document IDs
+            linked_docs_query = session.query(GraphNodeMap.document_id).filter(
+                GraphNodeMap.node_id == node.id
+            ).all()
+            linked_docs = [str(d[0]) for d in linked_docs_query]
 
         outgoing_relations = []
         incoming_relations = []
@@ -300,7 +330,7 @@ def get_node(
             "total_outgoing": len(outgoing_relations),
             "total_incoming": len(incoming_relations),
             "total_relations": len(outgoing_relations) + len(incoming_relations),
-            "total_documents": len(linked_doc_ids)
+            "total_documents": len(linked_docs)
         }
 
         return {
@@ -308,7 +338,7 @@ def get_node(
             "outgoing_relations": outgoing_relations,
             "incoming_relations": incoming_relations,
             "statistics": statistics,
-            "linked_documents": linked_doc_ids
+            "linked_documents": linked_docs
         }
 
 
@@ -358,51 +388,51 @@ def find_paths(
     # We look for any relation where 'current_id' is EITHER source OR target.
     # We grab the 'other' side as the next ID.
     
-    query = text(f"""
+    query = text("""
         WITH RECURSIVE search_graph(
-            current_id, 
-            depth, 
-            path_nodes, 
+            current_id,
+            depth,
+            path_nodes,
             path_edges
         ) AS (
             -- ANCHOR: Start Node
-            SELECT 
-                id, 
-                0, 
-                ARRAY[id]::text[], 
-                ARRAY[]::text[]  -- FIX: Removed trailing comma here
-            FROM graph_nodes 
+            SELECT
+                id,
+                0,
+                ARRAY[id::text]::text[],
+                ARRAY[]::text[]
+            FROM graph_nodes
             WHERE id = :start_id
 
             UNION ALL
 
             -- RECURSIVE STEP
-            SELECT 
-                CASE 
-                    WHEN r.source_id = p.current_id THEN r.target_id 
-                    ELSE r.source_id 
+            SELECT
+                CASE
+                    WHEN r.source_id = p.current_id THEN r.target_id
+                    ELSE r.source_id
                 END,
                 p.depth + 1,
-                p.path_nodes || (CASE 
-                    WHEN r.source_id = p.current_id THEN r.target_id 
-                    ELSE r.source_id 
+                p.path_nodes || (CASE
+                    WHEN r.source_id = p.current_id THEN r.target_id::text
+                    ELSE r.source_id::text
                 END),
-                p.path_edges || r.id
+                p.path_edges || r.id::text
             FROM graph_relations r, search_graph p
-            WHERE 
+            WHERE
                 (r.source_id = p.current_id OR r.target_id = p.current_id)
-                
+
                 AND p.depth < :max_depth
-                
+
                 AND NOT (
-                    (CASE 
-                        WHEN r.source_id = p.current_id THEN r.target_id 
-                        ELSE r.source_id 
+                    (CASE
+                        WHEN r.source_id = p.current_id THEN r.target_id::text
+                        ELSE r.source_id::text
                     END) = ANY(p.path_nodes)
                 )
         )
-        SELECT path_nodes, path_edges, depth 
-        FROM search_graph 
+        SELECT path_nodes, path_edges, depth
+        FROM search_graph
         WHERE current_id = :end_id
         ORDER BY depth ASC
         LIMIT :limit;
@@ -504,3 +534,65 @@ def find_paths(
             })
 
     return paths_data
+
+
+def get_relation_evidence(
+    relation_id: str,
+    session=None
+) -> List[Dict[str, Any]]:
+    """
+    Get all evidence (text excerpts) supporting a relation.
+
+    Args:
+        relation_id: UUID of the relation.
+        session: Optional database session.
+
+    Returns:
+        List of evidence dicts:
+        [
+          {
+            "doc_id": str,
+            "source_id": str,
+            "title": str,
+            "text": str,
+            "confidence": float,
+            "created_time": datetime
+          },
+          ...
+        ]
+    """
+    with get_db_session(session) as session:
+        # Verify relation exists
+        relation = session.query(GraphRelation).filter(GraphRelation.id == relation_id).first()
+        if not relation:
+            raise ValueError(f"Relation not found: {relation_id}")
+
+        # Query evidence with document metadata in single JOIN
+        evidence_results = session.query(
+            GraphRelationEvidence,
+            Document.doc_id,
+            Document.source_id,
+            Document.title,
+            Document.title_gen
+        ).outerjoin(
+            Document, GraphRelationEvidence.document_id == Document.id
+        ).filter(
+            GraphRelationEvidence.relation_id == relation_id
+        ).order_by(
+            GraphRelationEvidence.confidence.desc()
+        ).all()
+
+        evidence_list = []
+        for ev, doc_id, source_id, title, title_gen in evidence_results:
+            evidence_list.append({
+                "doc_id": doc_id,
+                "id": ev.id,
+                "source_id": source_id or "unknown",
+                "title": title or title_gen or "Untitled",
+                "text": ev.evidence_text,
+                "confidence": float(ev.confidence) if ev.confidence else 0.0,
+                "created_time": ev.created_time
+            })
+
+        logger.debug(f"Found {len(evidence_list)} evidence items for relation {relation_id}")
+        return evidence_list
