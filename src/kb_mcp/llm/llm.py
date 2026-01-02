@@ -7,24 +7,29 @@ from ..config import get_llm_config
 logger = logging.getLogger(__name__)
 
 
-def get_openai_client(model: str = None):
+def get_openai_client(model: str = None, use_async: bool = False):
     """Get OpenAI client with configuration from environment variables.
 
     Args:
         model: Model name to use (optional)
-        Used if specific models need different base URLs.
+            Used if specific models need different base URLs.
+        use_async: If True, return AsyncOpenAI client for async operations.
+            If False (default), return synchronous OpenAI client.
 
     Environment variables:
     - OPENAI_API_KEY: API key (required)
     - OPENAI_BASE_URL: Base URL for OpenAI API (optional)
 
     Returns:
-        OpenAI client instance
+        OpenAI or AsyncOpenAI client instance
 
     Raises:
         ValueError: If OPENAI_API_KEY is not set
     """
-    from openai import OpenAI
+    if use_async:
+        from openai import AsyncOpenAI as ClientClass
+    else:
+        from openai import OpenAI as ClientClass
 
     llm_config = get_llm_config()
     api_key = llm_config['openai_api_key']
@@ -44,4 +49,4 @@ def get_openai_client(model: str = None):
         client_kwargs['base_url'] = base_url
         logger.debug(f"Using OpenAI base URL: {base_url}")
 
-    return OpenAI(**client_kwargs)
+    return ClientClass(**client_kwargs)

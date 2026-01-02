@@ -83,5 +83,8 @@ kb-import = "kb_mcp.imports.cli:main"
 # Parser module CLI commands
 kb-parse = "kb_mcp.parser.cli:main"
 
+# Agent module CLI commands
+kb-agent = "kb_mcp.agents.cli:main"
+
 [project.urls]
 Repository = "https://github.com/corrodis/kb-mcp"

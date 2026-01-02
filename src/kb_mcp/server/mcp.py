@@ -8,6 +8,8 @@ from typing import Optional, List, Dict, Any
 
 from mcp.types import ImageContent
 
+from .mcp_prompts import BASE_SYSTEM_PROMPT
+
 logger = logging.getLogger(__name__)
 
 
@@ -279,7 +281,7 @@ def kb_search(
     search_type: str = "hybrid",
     search_filter: str | None = None,
 ) -> str:
-    """Search the knowledge base.
+    """Search documents in the knowledge base.
 
     Returns formatted results with metadata blocks. Small docs (<2000 chars) in full,
     large docs as excerpts with <match> tags highlighting matches.
@@ -691,7 +693,41 @@ def register_resources(mcp, oauth_provider, base_url):
 
 
 def register_prompts(mcp):
-    """Register MCP prompts with the FastMCP instance."""
+    """Register MCP prompts and prompt resources with the FastMCP instance."""
+
+    # Register domain context resource (NEW)
+    @mcp.resource("kb://sys/domain_context")
+    def get_domain_context() -> str:
+        """Returns domain-specific context and tool usage tips."""
+        return """
+### KNOWLEDGE BASE STRUCTURE
+This system is a **Hybrid Knowledge Base** comprising two interconnected layers:
+
+1.  **Document Store** (Unstructured Text)
+    - Contains PDFs, logs, papers, and reports.
+    - **Primary Tool**: `kb_search("query")` -> Returns text segments matches.
+    - **Use Case**: Finding specific facts, error codes, methodologies, or general topic overviews.
+    - **Links**: Documents often mention **Nodes**, which you can look up in the Graph layer.
+
+2.  **Knowledge Graph** (Structured Concepts)
+    - Contains **Nodes** (Concepts, Entities, Components) and **Relationships**.
+    - **Primary Tools**: 
+      - `kb_lookup_node("Name" or "UUID")`: Explores a concept's immediate neighbors.
+      - `kb_find_path("Start", "End")`: Finds how two concepts are connected.
+      - `kb_node_relation_evidence("RelID")`: Gets text proving a relationship.
+    - **Use Case**: Understanding system architecture, causal chains ("What causes X?"), and verifying connections.
+
+### EXECUTION STRATEGY
+- **Start Broad**: Use `kb_search` to find relevant documents.
+- **Pivot to Graph**: If documents mention a specific component (e.g., "dtc01", "Module X"), use `kb_lookup_node` to see its structural context.
+- **Deep Dive**: Use `kb_get` to read full content of highly relevant documents found via search or graph traversal.
+"""
+
+    # Register system prompt as a resource
+    @mcp.resource("prompts://agent/system")
+    def get_system_prompt() -> str:
+        """Returns the core system prompt for the Recursive Agent."""
+        return BASE_SYSTEM_PROMPT
 
     @mcp.prompt()
     def search_kb(topic: str) -> str:

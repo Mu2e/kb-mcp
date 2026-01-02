@@ -304,6 +304,22 @@ def get_search_config() -> dict:
         'rrf_k': _get_int("SEARCH_RRF_K", 60),
     }
 
+def get_agent_config() -> dict:
+    """Research agent configuration.
+
+    Returns:
+        dict: Agent configuration with keys:
+
+            * `agent_model` (str): LLM model for agent reasoning (Env: `AGENT_MODEL`, defaults to DEFAULT_LLM_MODEL).
+            * `max_depth` (int): Maximum recursion depth for agent delegation (Env: `AGENT_MAX_DEPTH`, default: 2).
+    """
+    return {
+        'agent_model': os.getenv("AGENT_MODEL", get_default_llm_model()),
+        'max_depth': _get_int("AGENT_MAX_DEPTH", 2),
+        'max_tool_output_chars': _get_int("AGENT_MAX_TOOL_OUTPUT_CHARS", 30000),
+        'max_aggregated_tool_output_chars': _get_int("AGENT_MAX_AGGREGATED_TOOL_OUTPUT_CHARS", 100000),
+    }
+
 # Paths
 def get_data_dir() -> str:
     """Data directory. **Env Variable:** `DATA_DIR` (default: `data`)."""
