@@ -26,7 +26,10 @@ def _get_bool(key: str, default: bool = False) -> bool:
     return os.getenv(key, str(default)).lower() == "true"
 
 def _get_int(key: str, default: int) -> int:
-    return int(os.getenv(key, str(default)))
+    value = os.getenv(key)
+    if value is None or value.strip() == "":
+        return default
+    return int(value)
 
 # --- Configuration Getters ---
 

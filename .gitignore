@@ -21,6 +21,12 @@ build/
 
 # local scripts
 inference_auth_token.py
+.huggingface_cache
+miniforge/
+env
 
 # System
 .DS_Store
+
+# local scripts
+setup.sh
