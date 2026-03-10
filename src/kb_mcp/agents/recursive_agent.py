@@ -155,7 +155,8 @@ class RecursiveAgent(BaseAgent):
             depth=self.depth + 1,
             agent_id=f"{self.agent_id}.{self.child_counter}",
             max_depth=self.max_depth,
-            run_id=self.run_id
+            run_id=self.run_id,
+            callback=self.callback  # Propagate callback to child agents
         )
         self.child_counter += 1
         

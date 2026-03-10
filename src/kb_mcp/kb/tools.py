@@ -320,13 +320,18 @@ def parse_all(
 
                     file_path = Path(raw_doc.file_path)
 
-                    # Check if file exists
-                    if not file_path.exists():
-                        logger.warning(f"Skipping raw_doc {raw_doc.id}: file not found at {raw_doc.file_path}")
-                        skipped += 1
-                        continue
-
-                    logger.debug(f"Parsing raw document {raw_doc.id}: {raw_doc.file_path}")
+                    # For marker-preloaded parser, we don't need the original PDF file
+                    # We only need the filename stem to find the Marker output directory
+                    if parser_name != "marker-preloaded":
+                        # Check if file exists (only for parsers that need the actual file)
+                        if not file_path.exists():
+                            logger.warning(f"Skipping raw_doc {raw_doc.id}: file not found at {raw_doc.file_path}")
+                            skipped += 1
+                            continue
+                        logger.debug(f"Parsing raw document {raw_doc.id}: {raw_doc.file_path}")
+                    else:
+                        # For marker-preloaded, log the expected output directory instead
+                        logger.debug(f"Parsing raw document {raw_doc.id} from stem: {file_path.stem}")
 
                     # Use add_document (files already in KB, don't copy)
                     # Pass through RawDocument metadata (includes title, authors, etc.)
