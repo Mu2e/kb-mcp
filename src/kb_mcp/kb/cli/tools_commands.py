@@ -19,13 +19,24 @@ def cmd_stats(args):
     else:
         print("Knowledge Base Statistics")
         print("=" * 40)
-        print(f"Total documents: {stats['total_documents']}")
-        print(f"Total sources: {stats['total_sources']}")
+        print(f"Total raw documents: {stats['total_raw_documents']}")
+        print(f"Total documents:     {stats['total_documents']}")
+        print(f"Total sources:       {stats['total_sources']}")
         print()
-        if stats['documents_by_source']:
-            print("Documents by source:")
-            for item in stats['documents_by_source']:
-                print(f"  {item['source_id']}: {item['count']}")
+        if stats['raw_documents_by_source'] or stats['documents_by_source']:
+            # Merge per-source raw and parsed counts for display
+            sources = sorted(set(
+                [item['source_id'] for item in stats['documents_by_source']] +
+                [item['source_id'] for item in stats['raw_documents_by_source']]
+            ))
+            raw_map = {item['source_id']: item['count'] for item in stats['raw_documents_by_source']}
+            doc_map = {item['source_id']: item['count'] for item in stats['documents_by_source']}
+            print(f"{'Source':<30} {'Raw':>6} {'Parsed':>8}")
+            print("-" * 46)
+            for source_id in sources:
+                raw = raw_map.get(source_id, 0)
+                parsed = doc_map.get(source_id, 0)
+                print(f"  {source_id:<28} {raw:>6} {parsed:>8}")
 
 
 def cmd_logs_chunking(args):
@@ -386,14 +397,53 @@ def cmd_drop(args):
         sys.exit(1)
 
 
+def cmd_list_raw(args):
+    """List raw documents, optionally filtered by source_id."""
+    from ..database import get_db_session
+    from ..db_models import RawDocument
+
+    with get_db_session() as session:
+        query = session.query(RawDocument)
+        if args.source_id:
+            query = query.filter(RawDocument.source_id == args.source_id)
+        query = query.order_by(RawDocument.source_id, RawDocument.doc_id)
+        if args.limit:
+            query = query.limit(args.limit)
+        rows = query.all()
+
+    if not rows:
+        print("No raw documents found.")
+        return
+
+    print(f"{'UUID':<36}  {'Source':<20}  Doc ID")
+    print("-" * 80)
+    for r in rows:
+        print(f"{r.id:<36}  {(r.source_id or ''):<20}  {r.doc_id or ''}")
+
+
 def cmd_get_raw(args):
-    """Get a raw document by document ID."""
+    """Get a raw document by raw document UUID or parsed document UUID."""
     try:
-        raw_doc = get_raw_document(args.document_id)
-        
+        from ..database import get_db_session
+        from ..db_models import RawDocument
+
+        # Try direct raw document UUID lookup first
+        raw_doc = None
+        with get_db_session() as session:
+            raw_doc = session.query(RawDocument).filter(RawDocument.id == args.document_id).first()
+            if raw_doc:
+                # Detach from session by accessing all fields
+                _ = raw_doc.id, raw_doc.source_id, raw_doc.doc_id, raw_doc.file_path
+                _ = raw_doc.hostname, raw_doc.uri, raw_doc.source_type
+                _ = raw_doc.file_size, raw_doc.content_hash, raw_doc.created_time, raw_doc.updated_time
+
+        # Fall back to lookup via parsed Document UUID
         if not raw_doc:
-            print(f"No raw document found for document {args.document_id}")
-            print("  (Document may not exist, or may not have an associated raw document)")
+            raw_doc = get_raw_document(args.document_id)
+
+        if not raw_doc:
+            print(f"No raw document found for {args.document_id}")
+            print("  (Pass either a raw document UUID or a parsed document UUID)")
             sys.exit(1)
         
         print(f"Raw Document: {raw_doc.id}")
@@ -669,6 +719,11 @@ def setup_commands(subparsers):
     drop_table_parser.add_argument("table_name", help="Name of the table to drop")
     drop_table_parser.add_argument("--yes", action="store_true", help="Skip confirmation prompt")
     drop_table_parser.set_defaults(func=cmd_drop_table)
+
+    list_raw_parser = tools_subparsers.add_parser("list-raw", help="List raw documents")
+    list_raw_parser.add_argument("--source-id", help="Filter by source ID")
+    list_raw_parser.add_argument("--limit", type=int, default=50, help="Maximum number of results (default: 50)")
+    list_raw_parser.set_defaults(func=cmd_list_raw)
 
     get_raw_parser = tools_subparsers.add_parser("get-raw", help="Get a raw document by document ID")
     get_raw_parser.add_argument("document_id", help="Document ID (UUID)")

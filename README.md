@@ -8,7 +8,7 @@ A knowledge base system designed to be **used** via MCP (Model Context Protocol)
 
 ```bash
 # Clone the repository
-git clone https://github.com/corrodis/kb-mcp.git
+git clone https://github.com/HEP-KE/kb-mcp.git
 cd kb-mcp
 
 # (Recommended) Create a virtual environment
