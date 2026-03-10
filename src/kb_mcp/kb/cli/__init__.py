@@ -143,7 +143,7 @@ def main():
                 parser.print_help()
                 sys.exit(1)
         elif args.command == "tools":
-            from .tools_commands import cmd_deduplicate, cmd_chunk_and_embed_all, cmd_summarize_all, cmd_list_tables, cmd_drop_table, cmd_get_raw, cmd_drop_raw, cmd_extract_all
+            from .tools_commands import cmd_deduplicate, cmd_chunk_and_embed_all, cmd_summarize_all, cmd_list_tables, cmd_drop_table, cmd_list_raw, cmd_get_raw, cmd_drop_raw, cmd_extract_all
             if args.tools_command == "deduplicate":
                 cmd_deduplicate(args)
             elif args.tools_command == "chunk-and-embed-all":
@@ -154,6 +154,8 @@ def main():
                 cmd_list_tables(args)
             elif args.tools_command == "drop-table":
                 cmd_drop_table(args)
+            elif args.tools_command == "list-raw":
+                cmd_list_raw(args)
             elif args.tools_command == "get-raw":
                 cmd_get_raw(args)
             elif args.tools_command == "drop-raw":

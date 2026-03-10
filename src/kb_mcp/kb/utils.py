@@ -24,25 +24,39 @@ def get_stats() -> Dict[str, Any]:
     with get_db_session() as session:
         # Count documents
         doc_count = session.query(Document).count()
-        
+
         # Count sources
         source_count = session.query(Source).count()
-        
-        # Count by source
+
         from sqlalchemy import func
+        # Count by source
         docs_by_source = (
             session.query(Document.source_id, func.count(Document.id))
             .group_by(Document.source_id)
             .all()
         )
-    
+
+        # Count raw documents
+        from .db_models import RawDocument
+        raw_count = session.query(RawDocument).count()
+        raw_by_source = (
+            session.query(RawDocument.source_id, func.count(RawDocument.id))
+            .group_by(RawDocument.source_id)
+            .all()
+        )
+
     return {
         "total_documents": doc_count,
         "total_sources": source_count,
         "documents_by_source": [
             {"source_id": source_id, "count": count}
             for source_id, count in docs_by_source
-        ]
+        ],
+        "total_raw_documents": raw_count,
+        "raw_documents_by_source": [
+            {"source_id": source_id, "count": count}
+            for source_id, count in raw_by_source
+        ],
     }
 
 

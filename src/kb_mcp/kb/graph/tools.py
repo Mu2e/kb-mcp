@@ -52,7 +52,7 @@ def extract_all(
             "error_details": List[Dict[str, Any]]
         }
     """
-    from ..config import get_batch_config
+    from ...config import get_batch_config
 
     # Get batch size from config if not provided
     batch_size = batch_size or get_batch_config()['extract_batch_size']

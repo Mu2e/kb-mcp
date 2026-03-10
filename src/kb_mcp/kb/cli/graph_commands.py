@@ -171,7 +171,7 @@ def cmd_extract_all(args):
             batch_size=getattr(args, 'batch_size', None),
         )
 
-        print(f"\n✓ Batch extraction complete:")
+        print(f"\nBatch extraction complete:")
         print(f"  Total documents: {result['total_documents']}")
         print(f"  Processed: {result['processed']}")
         print(f"  Errors: {result['errors']}")
