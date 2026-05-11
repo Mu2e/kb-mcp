@@ -188,6 +188,7 @@ def parse(
         _PDF_PARSERS = {
             "marker": ("kb_mcp.parser.parser_marker", "MarkerParser"),
             "docling": ("kb_mcp.parser.parser_docling", "DoclingParser"),
+            "nougat": ("kb_mcp.parser.parser_nougat", "NougatParser"),
         }
 
         if parser_name in _PDF_PARSERS:
