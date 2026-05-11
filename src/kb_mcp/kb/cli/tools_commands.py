@@ -19,24 +19,69 @@ def cmd_stats(args):
     else:
         print("Knowledge Base Statistics")
         print("=" * 40)
+        spt = stats.get('documents_by_source_parser_type', [])
+        total_text = sum(r['count'] for r in spt if r['doc_type'] == 'text')
+        total_image = sum(r['count'] for r in spt if r['doc_type'] == 'image')
+        doc_breakdown = f"  ({total_text}t / {total_image}i)" if total_image else ""
         print(f"Total raw documents: {stats['total_raw_documents']}")
-        print(f"Total documents:     {stats['total_documents']}")
+        print(f"Total documents:     {stats['total_documents']}{doc_breakdown}")
         print(f"Total sources:       {stats['total_sources']}")
         print()
         if stats['raw_documents_by_source'] or stats['documents_by_source']:
-            # Merge per-source raw and parsed counts for display
+            raw_map = {item['source_id']: item['count'] for item in stats['raw_documents_by_source']}
             sources = sorted(set(
                 [item['source_id'] for item in stats['documents_by_source']] +
                 [item['source_id'] for item in stats['raw_documents_by_source']]
             ))
-            raw_map = {item['source_id']: item['count'] for item in stats['raw_documents_by_source']}
-            doc_map = {item['source_id']: item['count'] for item in stats['documents_by_source']}
-            print(f"{'Source':<30} {'Raw':>6} {'Parsed':>8}")
-            print("-" * 46)
+
+            # Build (source_id, parser_id, doc_type) -> count lookup
+            spt = stats.get('documents_by_source_parser_type', [])
+            spt_map = {(r['source_id'], r['parser_id'], r['doc_type']): r['count'] for r in spt}
+            parsers = sorted(set(r['parser_id'] for r in spt))
+            doc_types = sorted(set(r['doc_type'] for r in spt))
+            show_images = 'image' in doc_types
+
+            # Column widths: 5 per doc_type per parser
+            col_w = 5
+
+            # Build header lines
+            # Line 1: "Source", "Raw", then parser names spanning their doc_type sub-columns
+            # Line 2: sub-column labels (t, i) under each parser
+            src_w = max(28, max((len(s) for s in sources), default=0))
+            raw_w = 6
+
+            # Each parser occupies col_w chars per doc_type + 1 space between them
+            parser_span = col_w * len(doc_types) + (len(doc_types) - 1)
+
+            header1 = f"  {'Source':<{src_w}}  {'Raw':>{raw_w}}"
+            header2 = f"  {'':<{src_w}}  {'':{raw_w}}"
+            sep_len = src_w + 2 + raw_w + 2
+
+            for p in parsers:
+                header1 += f"  {p[:parser_span]:>{parser_span}}"
+                if show_images:
+                    sub = f"{'t':>{col_w}} {'i':>{col_w}}"
+                else:
+                    sub = f"{'t':>{col_w}}"
+                header2 += f"  {sub}"
+                sep_len += 2 + parser_span
+
+            print(header1)
+            if show_images:
+                print(header2)
+            print("-" * sep_len)
+
             for source_id in sources:
                 raw = raw_map.get(source_id, 0)
-                parsed = doc_map.get(source_id, 0)
-                print(f"  {source_id:<28} {raw:>6} {parsed:>8}")
+                row = f"  {source_id:<{src_w}}  {raw:>{raw_w}}"
+                for p in parsers:
+                    t = spt_map.get((source_id, p, 'text'), 0)
+                    if show_images:
+                        i = spt_map.get((source_id, p, 'image'), 0)
+                        row += f"  {t:>{col_w}} {i:>{col_w}}"
+                    else:
+                        row += f"  {t:>{col_w}}"
+                print(row)
 
 
 def cmd_logs_chunking(args):
@@ -315,17 +360,21 @@ def cmd_deduplicate(args):
     total_by_id = sum(len(by_id_dups) for _, by_id_dups, _ in duplicates)
     total_by_hash = sum(len(by_hash_dups) for _, _, by_hash_dups in duplicates)
 
+    def _doc_label(doc):
+        parser = f"/{doc.parser_id}" if doc.parser_id else ""
+        return f"{doc.source_id}/{doc.doc_id}{parser}"
+
     if total_by_id > 0:
-        print(f"\n  {total_by_id} duplicate(s) by source_id+doc_id:")
+        print(f"\n  {total_by_id} duplicate(s) by source_id+doc_id+parser_id:")
         count = 0
         for keep_id, by_id_dups, _ in duplicates:
             if by_id_dups:
-                keep_doc = get(uuid=keep_id)
-                for dup_id in by_id_dups[:10 - count]:  # Show up to 10 total
-                    dup_doc = get(uuid=dup_id)
+                keep_doc = get(uid=keep_id)
+                for dup_id in by_id_dups[:10 - count]:
+                    dup_doc = get(uid=dup_id)
                     if keep_doc and dup_doc:
-                        print(f"    • Keep: {keep_id[:8]}... ({keep_doc.source_id}/{keep_doc.doc_id})")
-                        print(f"      Duplicate: {dup_id[:8]}... ({dup_doc.source_id}/{dup_doc.doc_id})")
+                        print(f"    • Keep: {keep_id[:8]}... ({_doc_label(keep_doc)})")
+                        print(f"      Duplicate: {dup_id[:8]}... ({_doc_label(dup_doc)})")
                     count += 1
                     if count >= 10:
                         break
@@ -335,17 +384,17 @@ def cmd_deduplicate(args):
             print(f"    ... and {total_by_id - 10} more")
 
     if total_by_hash > 0:
-        print(f"\n  {total_by_hash} duplicate(s) by content_hash:")
+        print(f"\n  {total_by_hash} duplicate(s) by content_hash+parser_id:")
         count = 0
         for keep_id, _, by_hash_dups in duplicates:
             if by_hash_dups:
-                keep_doc = get(uuid=keep_id)
-                for dup_id in by_hash_dups[:10 - count]:  # Show up to 10 total
-                    dup_doc = get(uuid=dup_id)
+                keep_doc = get(uid=keep_id)
+                for dup_id in by_hash_dups[:10 - count]:
+                    dup_doc = get(uid=dup_id)
                     if keep_doc and dup_doc:
                         hash_preview = keep_doc.content_hash[:16] if keep_doc.content_hash else 'N/A'
-                        print(f"    • Keep: {keep_id[:8]}... (hash: {hash_preview}...)")
-                        print(f"      Duplicate: {dup_id[:8]}...")
+                        print(f"    • Keep: {keep_id[:8]}... ({_doc_label(keep_doc)}, hash: {hash_preview}...)")
+                        print(f"      Duplicate: {dup_id[:8]}... ({_doc_label(dup_doc)})")
                     count += 1
                     if count >= 10:
                         break
@@ -366,7 +415,7 @@ def cmd_deduplicate(args):
     print(f"\nApplying deduplication...")
     print("  (Keeping oldest document in each duplicate group, deleting others)")
 
-    result = deduplicate()
+    result = deduplicate(by_hash=True, by_id=True)
 
     print(f" Deduplication complete:")
     print(f"  Deleted: {result['deleted']} duplicate document(s)")
@@ -508,6 +557,71 @@ def cmd_drop_raw(args):
         import traceback
         traceback.print_exc()
         sys.exit(1)
+
+
+def cmd_db_sessions(args):
+    """List PostgreSQL sessions that are idle in transaction."""
+    from ..database import get_db_session
+    from sqlalchemy import text
+
+    with get_db_session() as session:
+        rows = session.execute(text("""
+            SELECT pid,
+                   state,
+                   now() - state_change  AS idle_duration,
+                   now() - query_start   AS query_duration,
+                   left(query, 60)       AS query
+            FROM pg_stat_activity
+            WHERE state = 'idle in transaction'
+            ORDER BY state_change
+        """)).fetchall()
+
+    if not rows:
+        print("No sessions idle in transaction.")
+        return
+
+    print(f"{'PID':<8} {'Idle for':<20} {'Query ran for':<20} Last query")
+    print("-" * 100)
+    for pid, state, idle_dur, query_dur, query in rows:
+        print(f"{pid:<8} {str(idle_dur).split('.')[0]:<20} {str(query_dur).split('.')[0]:<20} {query}")
+
+
+def cmd_db_kill_idle(args):
+    """Terminate PostgreSQL sessions that are idle in transaction."""
+    from ..database import get_db_session
+    from sqlalchemy import text
+
+    with get_db_session() as session:
+        rows = session.execute(text("""
+            SELECT pid, now() - query_start AS duration
+            FROM pg_stat_activity
+            WHERE state = 'idle in transaction'
+            ORDER BY query_start
+        """)).fetchall()
+
+    if not rows:
+        print("No sessions idle in transaction.")
+        return
+
+    print(f"Found {len(rows)} session(s) idle in transaction:")
+    for pid, duration in rows:
+        print(f"  PID {pid} (idle for {duration})")
+
+    if not args.yes:
+        confirm = input("Terminate all? [y/N]: ")
+        if confirm.lower() not in ['y', 'yes']:
+            print("Cancelled.")
+            return
+
+    with get_db_session() as session:
+        result = session.execute(text("""
+            SELECT pg_terminate_backend(pid)
+            FROM pg_stat_activity
+            WHERE state = 'idle in transaction'
+        """)).fetchall()
+
+    terminated = sum(1 for (ok,) in result if ok)
+    print(f"Terminated {terminated} session(s).")
 
 
 def cmd_extract_all(args):
@@ -738,6 +852,14 @@ def setup_commands(subparsers):
         help="Also delete all documents linked to this raw document (and their chunks/embeddings)"
     )
     drop_raw_parser.set_defaults(func=cmd_drop_raw)
+
+    # DB session management
+    db_sessions_parser = tools_subparsers.add_parser("db-sessions", help="List PostgreSQL sessions idle in transaction")
+    db_sessions_parser.set_defaults(func=cmd_db_sessions)
+
+    db_kill_idle_parser = tools_subparsers.add_parser("db-kill-idle", help="Terminate PostgreSQL sessions idle in transaction")
+    db_kill_idle_parser.add_argument("--yes", action="store_true", help="Skip confirmation prompt")
+    db_kill_idle_parser.set_defaults(func=cmd_db_kill_idle)
 
     # Extract-all command (for graph relations)
     extract_all_parser = tools_subparsers.add_parser(

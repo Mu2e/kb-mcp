@@ -104,8 +104,9 @@ def cmd_parse(args):
         doc_dicts = parse(
             file_path,
             data=data,
-            parse_image_additional_doc=args.parse_image_additional_doc if args.parse_image_additional_doc else None,
-            parse_image_llm_description=args.parse_image_llm_description if args.parse_image_llm_description else None,
+            extract_images=args.parse_image_additional_doc or None,
+            describe_images=args.parse_image_llm_description or None,
+            parser_name=args.parser or None,
         )
         main_doc = doc_dicts[0]
         
@@ -116,16 +117,8 @@ def cmd_parse(args):
             'file_path': main_doc.get('uri', '').replace('file://', ''),
             'file_name': main_doc.get('meta', {}).get('filename', file_path.name),
             'file_size': main_doc.get('meta', {}).get('filesize', 0),
-            'parser': 'Unknown',  # Parser name not in new format
+            'parser': args.parser or 'kb-mcp',
         }
-        
-        # Try to get parser name from file extension
-        from .utils import get_parser
-        try:
-            parser = get_parser(file_path, doc_type=result['mime_type'])
-            result['parser'] = parser.__class__.__name__
-        except Exception:
-            pass
 
         if args.text_only:
             print(result['text'])
@@ -240,6 +233,12 @@ Examples:
     parse_parser.add_argument(
         "--doc-id",
         help="Document ID within the source (defaults to filename stem)"
+    )
+    parse_parser.add_argument(
+        "--parser",
+        choices=["kb-mcp", "marker", "docling"],
+        default=None,
+        help="Parser backend to use for PDFs (default: kb-mcp)"
     )
     
     # Image command

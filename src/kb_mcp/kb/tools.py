@@ -284,7 +284,7 @@ def parse_all(
 
     # Process in batches with lock/commit cycle
     while True:
-        with get_db_session() as session:
+        with get_db_session(auto_expunge=False) as session:
             # Query for RawDocuments that don't have Documents with the specified parser
             # Use NOT EXISTS instead of LEFT JOIN to avoid FOR UPDATE on outer join
             subquery = session.query(Document.id).filter(
@@ -310,9 +310,13 @@ def parse_all(
             if total_processed == 0:
                 logger.info(f"Processing documents in batches of {batch_size}")
 
+            # Parse inside the same session so the FOR UPDATE row locks are held
+            # across the whole batch. We commit after each document so results are
+            # saved incrementally — if the process dies mid-batch, already-parsed
+            # documents are preserved. The locks on the remaining rows are released
+            # when the connection drops, freeing them for other workers.
             for raw_doc in tqdm(raw_docs, desc="Parsing documents", unit="doc", disable=total_processed > 0):
                 try:
-                    # Check if file_path exists
                     if not raw_doc.file_path:
                         logger.warning(f"Raw document {raw_doc.id} has no file_path, skipping")
                         skipped += 1
@@ -320,7 +324,6 @@ def parse_all(
 
                     file_path = Path(raw_doc.file_path)
 
-                    # Check if file exists
                     if not file_path.exists():
                         logger.warning(f"Skipping raw_doc {raw_doc.id}: file not found at {raw_doc.file_path}")
                         skipped += 1
@@ -328,20 +331,23 @@ def parse_all(
 
                     logger.debug(f"Parsing raw document {raw_doc.id}: {raw_doc.file_path}")
 
-                    # Use add_document (files already in KB, don't copy)
-                    # Pass through RawDocument metadata (includes title, authors, etc.)
                     result = add_document(
                         file_path,
                         source_id=raw_doc.source_id,
                         doc_id=raw_doc.doc_id,
-                        meta=raw_doc.meta,  # Pass metadata from RawDocument
+                        meta=raw_doc.meta,
                         parser_name=parser_name,
                         extract_images=extract_images,
                         describe_images=describe_images,
                         force_reparse=force_reparse,
-                        copy_to_kb=False,  # Files already in KB storage
+                        copy_to_kb=False,
                         session=session,
                     )
+
+                    # Commit after each document so it's visible immediately and
+                    # won't be lost if the process dies before the batch finishes.
+                    # Row locks on the remaining batch rows are still held.
+                    session.commit()
 
                     document_ids.extend(result["document_ids"])
                     parsed += 1
@@ -350,10 +356,11 @@ def parse_all(
                 except Exception as e:
                     errors += 1
                     logger.error(f"Error parsing raw document {raw_doc.id}: {e}", exc_info=True)
+                    session.rollback()
                     continue
 
             total_processed += len(raw_docs)
-            # Commit happens here when session context exits, releasing locks
+            # Final commit + session close releases all remaining row locks
 
     if total_processed == 0:
         logger.info(f"No unparsed raw documents found{' for source_id: ' + source_id if source_id else ''}")
