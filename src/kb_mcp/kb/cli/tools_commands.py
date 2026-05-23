@@ -50,8 +50,12 @@ def cmd_stats(args):
             src_w = max(28, max((len(s) for s in sources), default=0))
             raw_w = 6
 
-            # Each parser occupies col_w chars per doc_type + 1 space between them
-            parser_span = col_w * len(doc_types) + (len(doc_types) - 1)
+            # Each parser occupies at least col_w chars per doc_type + 1 space between them,
+            # but never less than the parser name length
+            parser_span = max(
+                col_w * len(doc_types) + (len(doc_types) - 1),
+                max((len(p) for p in parsers), default=0),
+            )
 
             header1 = f"  {'Source':<{src_w}}  {'Raw':>{raw_w}}"
             header2 = f"  {'':<{src_w}}  {'':{raw_w}}"
@@ -171,6 +175,7 @@ def cmd_parse_all(args):
             describe_images=args.describe_images,
             force_reparse=args.force_reparse,
             batch_size=getattr(args, 'batch_size', None),
+            limit=getattr(args, 'limit', None),
         )
 
         print(f"\n  Completed:")
@@ -419,6 +424,41 @@ def cmd_deduplicate(args):
 
     print(f" Deduplication complete:")
     print(f"  Deleted: {result['deleted']} duplicate document(s)")
+
+
+def cmd_drop_parser(args):
+    """Bulk-delete all documents for a given parser (and optionally source)."""
+    from ..database import get_db_session
+    from ..db_models import Document
+
+    with get_db_session(auto_expunge=False) as session:
+        query = session.query(Document).filter(Document.parser_id == args.parser_id)
+        if args.source_id:
+            query = query.filter(Document.source_id == args.source_id)
+        count = query.count()
+
+    if count == 0:
+        scope = f"source '{args.source_id}', " if args.source_id else ""
+        print(f"No documents found for {scope}parser '{args.parser_id}'.")
+        return
+
+    scope = f"source '{args.source_id}', " if args.source_id else "all sources, "
+    if not args.yes:
+        confirmation = input(
+            f"Delete {count} document(s) ({scope}parser='{args.parser_id}') "
+            f"and all their chunks/embeddings? [y/N]: "
+        )
+        if confirmation.lower() not in ["y", "yes"]:
+            print("Cancelled.")
+            return
+
+    with get_db_session(auto_expunge=False) as session:
+        query = session.query(Document).filter(Document.parser_id == args.parser_id)
+        if args.source_id:
+            query = query.filter(Document.source_id == args.source_id)
+        deleted = query.delete(synchronize_session=False)
+
+    print(f"Deleted {deleted} document(s) (chunks/embeddings removed via cascade).")
 
 
 def cmd_drop(args):
@@ -752,6 +792,12 @@ def setup_commands(subparsers):
         type=int,
         help="Batch size for parallel processing (default: from config, set to large value like 999999 to disable batching)"
     )
+    parse_all_parser.add_argument(
+        "--limit", "-N",
+        type=int,
+        metavar="N",
+        help="Stop after parsing N documents (useful for testing)"
+    )
     parse_all_parser.set_defaults(func=cmd_parse_all)
 
     chunk_embed_all_parser = tools_subparsers.add_parser(
@@ -842,6 +888,15 @@ def setup_commands(subparsers):
     get_raw_parser = tools_subparsers.add_parser("get-raw", help="Get a raw document by document ID")
     get_raw_parser.add_argument("document_id", help="Document ID (UUID)")
     get_raw_parser.set_defaults(func=cmd_get_raw)
+
+    drop_parser_parser = tools_subparsers.add_parser(
+        "drop-parser",
+        help="Bulk-delete all documents for a parser (and optionally a source)"
+    )
+    drop_parser_parser.add_argument("parser_id", help="Parser ID to delete (e.g. 'nougat', 'docling', 'marker')")
+    drop_parser_parser.add_argument("--source-id", help="Restrict deletion to this source ID")
+    drop_parser_parser.add_argument("--yes", action="store_true", help="Skip confirmation prompt")
+    drop_parser_parser.set_defaults(func=cmd_drop_parser)
 
     drop_raw_parser = tools_subparsers.add_parser("drop-raw", help="Delete a raw document by ID")
     drop_raw_parser.add_argument("raw_document_id", help="Raw document ID (UUID)")

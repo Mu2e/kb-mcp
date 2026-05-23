@@ -236,7 +236,7 @@ Examples:
     )
     parse_parser.add_argument(
         "--parser",
-        choices=["kb-mcp", "marker", "docling"],
+        choices=["kb-mcp", "marker", "docling", "nougat", "unstructured", "azure"],
         default=None,
         help="Parser backend to use for PDFs (default: kb-mcp)"
     )
