@@ -24,3 +24,8 @@ inference_auth_token.py
 
 # System
 .DS_Store
+
+*.out
+*.dump
+
+._dbindex_
