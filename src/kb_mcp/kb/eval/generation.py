@@ -13,7 +13,7 @@ from .db_models import EvalDataset, get_or_create_eval_generation
 from ..documents import get
 from ..database import get_db_session
 from ..database import get_db_session
-from ...eval_utils.qa_generation import generate_qa_pairs_keypoint, generate_qa_pairs_persona
+from ...eval_utils.qa_generation import generate_qa_pairs_keypoint, generate_qa_pairs_persona, generate_qa_pairs_agentic
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +24,7 @@ def generate_questions_from_documents(
     generation_method: str = "keypoint",
     personas: Optional[List[str]] = None,
     model: Optional[str] = None,
+    name: Optional[str] = None,
     session=None,
 ) -> Dict:
     """Generate evaluation questions from documents using LLM.
@@ -67,7 +68,7 @@ def generate_questions_from_documents(
 
         for doc_id in doc_iterator:
             # Get document
-            doc = get(uuid=doc_id, session=session)
+            doc = get(uid=doc_id, session=session)
             if not doc:
                 doc_iterator.set_postfix_str("Document not found", refresh=False)
                 logger.warning(f"Document not found: {doc_id}")
@@ -99,6 +100,12 @@ def generate_questions_from_documents(
                     doc.text,
                     num_questions=questions_to_generate,
                     personas=personas,
+                    model=model,
+                )
+            elif generation_method == "agentic":
+                result = generate_qa_pairs_agentic(
+                    doc.text,
+                    num_questions=questions_to_generate,
                     model=model,
                 )
             else:
@@ -133,12 +140,15 @@ def generate_questions_from_documents(
                 question_meta = {"index": i}
                 if generation_method == "persona":
                     question_meta["persona"] = pair.get("persona")
+                elif generation_method == "agentic":
+                    question_meta["tag"] = pair.get("tag", "general")
+                    question_meta["rationale"] = pair.get("rationale", "")
 
                 question = EvalDataset(
                     question=pair["question"],
                     source_document_id=doc.id,
-                    answer=pair.get("answer"),  # Used in persona mode
-                    keypoints=pair.get("keypoint"),  # Used in keypoint mode
+                    answer=pair.get("answer"),
+                    keypoints=pair.get("keypoint"),
                     generation_time_seconds=question_time,
                     hostname=socket.gethostname(),
                     meta=question_meta,
@@ -155,7 +165,7 @@ def generate_questions_from_documents(
             source_ids = set()
             for q in all_questions:
                 if q.source_document_id:
-                    doc = get(uuid=q.source_document_id, session=session)
+                    doc = get(uid=q.source_document_id, session=session)
                     if doc:
                         source_ids.add(doc.source_id)
 
@@ -174,6 +184,9 @@ def generate_questions_from_documents(
                 meta=meta_without_method,
                 session=session,
             )
+
+            if name and not generation.name:
+                generation.name = name
 
             # Link questions to generation
             for question in all_questions:

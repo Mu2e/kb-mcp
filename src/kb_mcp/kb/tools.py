@@ -241,6 +241,7 @@ def parse_all(
     describe_images: Optional[bool] = None,
     force_reparse: bool = False,
     batch_size: Optional[int] = None,
+    limit: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Parse all raw documents that don't have corresponding processed documents yet.
 
@@ -258,6 +259,7 @@ def parse_all(
         batch_size: If provided, process in batches with LOCK/SKIP LOCKED for parallel processing.
                    If None, uses default from get_batch_config()['parse_batch_size'].
                    Set to a large value (e.g., 999999) to disable batching and process all at once.
+        limit: If provided, stop after parsing this many documents (useful for testing).
 
     Returns:
         Dictionary with:
@@ -301,7 +303,10 @@ def parse_all(
 
             # For parallel processing: lock a batch of rows
             # SKIP LOCKED allows other workers to grab different rows
-            raw_docs = query.limit(batch_size).with_for_update(skip_locked=True).all()
+            effective_batch = batch_size
+            if limit is not None:
+                effective_batch = min(batch_size, limit - total_processed)
+            raw_docs = query.limit(effective_batch).with_for_update(skip_locked=True).all()
 
             if not raw_docs:
                 # No more documents to process
@@ -315,7 +320,8 @@ def parse_all(
             # saved incrementally — if the process dies mid-batch, already-parsed
             # documents are preserved. The locks on the remaining rows are released
             # when the connection drops, freeing them for other workers.
-            for raw_doc in tqdm(raw_docs, desc="Parsing documents", unit="doc", disable=total_processed > 0):
+            batch_num = total_processed // batch_size + 1
+            for raw_doc in tqdm(raw_docs, desc=f"Parsing documents (batch {batch_num})", unit="doc"):
                 try:
                     if not raw_doc.file_path:
                         logger.warning(f"Raw document {raw_doc.id} has no file_path, skipping")
@@ -344,11 +350,6 @@ def parse_all(
                         session=session,
                     )
 
-                    # Commit after each document so it's visible immediately and
-                    # won't be lost if the process dies before the batch finishes.
-                    # Row locks on the remaining batch rows are still held.
-                    session.commit()
-
                     document_ids.extend(result["document_ids"])
                     parsed += 1
                     logger.debug(f"Successfully parsed {result['num_documents']} document(s) from {raw_doc.file_path}")
@@ -356,11 +357,13 @@ def parse_all(
                 except Exception as e:
                     errors += 1
                     logger.error(f"Error parsing raw document {raw_doc.id}: {e}", exc_info=True)
-                    session.rollback()
                     continue
 
             total_processed += len(raw_docs)
-            # Final commit + session close releases all remaining row locks
+            # Commit here — releases all FOR UPDATE locks only after the full batch
+            # is parsed and all Document rows are visible to other workers.
+            if limit is not None and total_processed >= limit:
+                break
 
     if total_processed == 0:
         logger.info(f"No unparsed raw documents found{' for source_id: ' + source_id if source_id else ''}")
@@ -386,6 +389,8 @@ def chunk_and_embed_all(
     embedding_name: Optional[str] = None,
     provider: Optional[str] = None,
     model: Optional[str] = None,
+    parser_name: Optional[str] = None,
+    force: bool = False,
 ) -> Dict[str, Any]:
     """Chunk and embed all documents for a source_id that don't have chunks yet.
 
@@ -405,6 +410,7 @@ def chunk_and_embed_all(
                        If provided, overrides provider/model.
         provider: Optional embedding provider (e.g., "openai", "voyage")
         model: Optional embedding model (e.g., "text-embedding-3-small")
+        parser_name: Optional parser ID to filter documents by (e.g., "marker", "nougat", "docling").
 
     Returns:
         Dictionary with:
@@ -426,8 +432,8 @@ def chunk_and_embed_all(
         ```
     """
     
-    logger.info(f"Starting chunk_and_embed_all for source_id: {source_id}")
-    
+    logger.info(f"Starting chunk_and_embed_all for source_id: {source_id}" + (f", parser_name: {parser_name}" if parser_name else ""))
+
     with get_db_session() as session:
         # Build query based on chunk strategy
         # For "summary" strategy, find documents with summaries but without summary chunks
@@ -438,6 +444,9 @@ def chunk_and_embed_all(
             Document.text != "",
             Document.doc_type != "image"
         )
+
+        if parser_name is not None:
+            query = query.filter(Document.parser_id == parser_name)
         
         # Determine the actual strategy name that will be created
         chunk_strategy = chunk_strategy or get_embedding_config()['chunk_strategy']
@@ -460,29 +469,30 @@ def chunk_and_embed_all(
                 )
             ).filter(Chunk.id.is_(None))
         else:
-            # For other strategies: find documents without chunks of this specific strategy
-            # This allows creating multiple strategies for the same documents (e.g., tokens and tokens_no_gist)
-            from sqlalchemy import and_
-            query = query.outerjoin(
-                Chunk,
-                and_(
-                    Document.id == Chunk.document_id,
-                    Chunk.chunk_strategy == strategy_full_name
-                )
-            ).filter(Chunk.id.is_(None))
+            if not force:
+                # For other strategies: find documents without chunks of this specific strategy
+                # This allows creating multiple strategies for the same documents (e.g., tokens and tokens_no_gist)
+                from sqlalchemy import and_
+                query = query.outerjoin(
+                    Chunk,
+                    and_(
+                        Document.id == Chunk.document_id,
+                        Chunk.chunk_strategy == strategy_full_name
+                    )
+                ).filter(Chunk.id.is_(None))
         
         documents = query.all()
         
         if not documents:
-            logger.info(f"No documents found for source_id: {source_id} that need chunking")
+            logger.info(f"No documents found for source_id: {source_id}" + (f", parser_name: {parser_name}" if parser_name else "") + " that need chunking")
             return {
                 "processed": 0,
                 "chunked": 0,
                 "skipped": 0,
                 "errors": 0,
             }
-        
-        logger.info(f"Found {len(documents)} document(s) for source_id: {source_id} that need chunking")
+
+        logger.info(f"Found {len(documents)} document(s) for source_id: {source_id}" + (f", parser_name: {parser_name}" if parser_name else "") + " that need chunking")
 
         processed = 0
         chunked = 0
@@ -493,6 +503,12 @@ def chunk_and_embed_all(
         for doc in tqdm(documents, desc="Chunking and embedding", unit="doc"):
             try:
                 processed += 1
+
+                # Drop existing chunks for this strategy if force mode
+                if force:
+                    dropped = doc.drop_chunks(chunk_strategy=strategy_full_name)
+                    if dropped:
+                        logger.debug(f"Dropped {dropped} existing chunks for document {doc.id}")
 
                 # Chunk and embed the document using the document method
                 logger.debug(f"Chunking and embedding document {doc.id} ({doc.doc_id or doc.id})")
@@ -853,6 +869,8 @@ def summarize_all(
     embedding_name: Optional[str] = None,
     embedding_provider: Optional[str] = None,
     embedding_model: Optional[str] = None,
+    parser_name: Optional[str] = None,
+    batch_size: int = 10,
 ) -> Dict[str, Any]:
     """Generate summaries for all documents from a source that don't have them yet.
 
@@ -867,6 +885,7 @@ def summarize_all(
         embedding_name: Optional embedding name for summary chunk (used if embed_summary_chunk=True)
         embedding_provider: Optional embedding provider (used if embed_summary_chunk=True and embedding_name not provided)
         embedding_model: Optional embedding model (used if embed_summary_chunk=True and embedding_name not provided)
+        parser_name: Optional parser ID to filter documents by (e.g., "marker", "nougat", "docling").
 
     Returns:
         Dictionary with:
@@ -890,7 +909,7 @@ def summarize_all(
     """
     # Summary module availability is checked by doc.generate_summary()
 
-    logger.info(f"Starting summarize_all for source_id: {source_id}")
+    logger.info(f"Starting summarize_all for source_id: {source_id}" + (f", parser_name: {parser_name}" if parser_name else ""))
 
     with get_db_session() as session:
         # Find documents without summaries
@@ -907,10 +926,13 @@ def summarize_all(
             Document.doc_type != "image"
         )
 
+        if parser_name is not None:
+            query = query.filter(Document.parser_id == parser_name)
+
         documents = query.all()
 
         if not documents:
-            logger.info(f"No documents found for source_id: {source_id} that need summarization")
+            logger.info(f"No documents found for source_id: {source_id}" + (f", parser_name: {parser_name}" if parser_name else "") + " that need summarization")
             return {
                 "processed": 0,
                 "summarized": 0,
@@ -944,6 +966,9 @@ def summarize_all(
                 )
 
                 summarized += 1
+                if summarized % batch_size == 0:
+                    session.commit()
+                    logger.debug(f"Committed batch of {batch_size} summaries")
                 logger.debug(f"Successfully generated summary for document {doc.id}")
 
                 # Optionally create summary chunk

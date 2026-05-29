@@ -8,9 +8,13 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
 fi
 
 DO_UPDATE=false
+DO_DB=true
 for arg in "$@"; do
     if [[ "$arg" == "--pull" ]] || [[ "$arg" == "--update" ]]; then
         DO_UPDATE=true
+    fi
+    if [[ "$arg" == "--no-db" ]]; then
+        DO_DB=false
     fi
 done
 
@@ -150,10 +154,15 @@ if [[ -n "$PS1" ]]; then
 fi
 
 # --- Start the database ---
-source "$SCRATCH_REPO/scripts/nersc_setup_db.sh"
+if [ "$DO_DB" = true ]; then
+    source "$SCRATCH_REPO/scripts/nersc_setup_db.sh"
+else
+    echo "Skipping database setup (--no-db)"
+fi
 
 # update ALCF credentials (for the moment)
-source "$SCRATCH_REPO/scripts/setup_alcf.sh"
+# Source with explicit empty args so setup_alcf.sh doesn't inherit our flags (--no-db, etc.)
+source "$SCRATCH_REPO/scripts/setup_alcf.sh" --cluster sophia
 
 echo "Environment activated. You are in $SCRATCH_REPO"
 

@@ -54,7 +54,7 @@ submit_job() {
     # We pass the API key so the worker knows it.
     JOB_ID=$(sbatch --parsable --job-name="$JOB_NAME" \
         --output="$LOG_FILE" --error="$LOG_FILE" \
-        -A m5115_g -C gpu -t 01:00:00 \
+        -A m5115_g -C gpu -t 01:00:00 -q regular\
         -N 1 --ntasks-per-node=1 --gpus-per-node=4 \
         --wrap="$0 --worker --api-key $API_KEY")
 

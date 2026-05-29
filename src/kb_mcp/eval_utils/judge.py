@@ -20,18 +20,20 @@ def llm_judge_answer(
     retrieved_context: str,
     expected_answer: Optional[str] = None,
     model: Optional[str] = None,
+    mode: str = "retrieval",
 ) -> Dict:
-    """Use LLM to judge if retrieved context answers the question.
+    """Use LLM to judge if an answer or retrieved context answers the question.
 
-    Generic LLM-as-judge implementation that evaluates whether provided
-    context adequately answers a question. Can be used for any evaluation
-    scenario (KB retrieval, RAG systems, QA systems, etc.).
+    Generic LLM-as-judge implementation. Supports two modes:
+    - "retrieval": judges whether retrieved context contains the answer (semantic/hybrid/fulltext)
+    - "answer": judges whether an LLM-generated answer is correct (llm_only/rag/agentic)
 
     Args:
         question: The question to be answered
-        retrieved_context: Context/information retrieved or provided
+        retrieved_context: Context retrieved or LLM-generated answer to evaluate
         expected_answer: Optional expected answer for comparison
         model: Optional model name (defaults to EVAL_JUDGE_MODEL env var)
+        mode: "retrieval" (default) or "answer"
 
     Returns:
         Dict with:
@@ -40,52 +42,67 @@ def llm_judge_answer(
             "justification": str,  # Explanation of judgment
             "time_seconds": float,  # Time taken for judgment
         }
-
-    Example:
-        ```python
-        result = llm_judge_answer(
-            question="What is the flux?",
-            retrieved_context="The measured flux is 42 units.",
-            expected_answer="42 units"
-        )
-        print(result["is_hit"])  # True
-        print(result["justification"])  # "The context clearly states..."
-        ```
     """
     if model is None:
         eval_config = get_eval_config()
         model = eval_config['judge_model']
 
-    client = get_openai_client()
+    client = get_openai_client(model)
 
-    # Build prompt
-    prompt_parts = [
-        "Evaluate whether the following retrieved context adequately answers the question.",
-        "",
-        f"Question: {question}",
-        "",
-        f"Retrieved Context:\n{retrieved_context}",
-    ]
-
-    if expected_answer:
+    if mode == "answer":
+        prompt_parts = [
+            "Evaluate whether the following answer correctly answers the question.",
+            "",
+            f"Question: {question}",
+            "",
+            f"Answer:\n{retrieved_context}",
+        ]
+        if expected_answer:
+            prompt_parts.extend([
+                "",
+                f"Expected Answer: {expected_answer}",
+            ])
         prompt_parts.extend([
             "",
-            f"Expected Answer: {expected_answer}",
+            "Assess whether:",
+            "1. The answer directly addresses the question",
+            "2. The answer is factually accurate",
+            "3. The answer is sufficiently complete",
+            "",
+            "Respond with ONLY a valid JSON object:",
+            "{",
+            '  "is_hit": true or false,',
+            '  "justification": "Brief explanation of your assessment"',
+            "}"
         ])
-
-    prompt_parts.extend([
-        "",
-        "Assess whether:",
-        "1. The context contains information that answers the question",
-        "2. The answer is accurate and relevant",
-        "3. The answer is complete enough to be useful",
-        "",
-        "Respond with ONLY a valid JSON object:",
-        "{",
-        '  "is_hit": true or false,',
-        '  "justification": "Brief explanation of your assessment"',
-        "}"
-    ])
+        system_prompt = "You are an evaluation judge assessing whether an LLM-generated answer correctly answers a question. Always respond with valid JSON."
+    else:
+        prompt_parts = [
+            "Evaluate whether the following retrieved context adequately answers the question.",
+            "",
+            f"Question: {question}",
+            "",
+            f"Retrieved Context:\n{retrieved_context}",
+        ]
+        if expected_answer:
+            prompt_parts.extend([
+                "",
+                f"Expected Answer: {expected_answer}",
+            ])
+        prompt_parts.extend([
+            "",
+            "Assess whether:",
+            "1. The context contains information that answers the question",
+            "2. The answer is accurate and relevant",
+            "3. The answer is complete enough to be useful",
+            "",
+            "Respond with ONLY a valid JSON object:",
+            "{",
+            '  "is_hit": true or false,',
+            '  "justification": "Brief explanation of your assessment"',
+            "}"
+        ])
+        system_prompt = "You are an evaluation judge assessing whether retrieved context answers questions. Always respond with valid JSON."
 
     prompt = "\n".join(prompt_parts)
 
@@ -96,7 +113,7 @@ def llm_judge_answer(
             messages=[
                 {
                     "role": "system",
-                    "content": "You are an evaluation judge assessing whether retrieved context answers questions. Always respond with valid JSON."
+                    "content": system_prompt,
                 },
                 {
                     "role": "user",

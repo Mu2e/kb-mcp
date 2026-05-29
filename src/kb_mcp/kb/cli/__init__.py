@@ -38,6 +38,7 @@ class GroupedHelpFormatter(argparse.RawDescriptionHelpFormatter):
                 ("Knowledge Graph", ["graph"]),
                 ("Evaluation & Benchmarking", ["eval"]),
                 ("Tools & Statistics", ["tools", "stats", "logs"]),
+                ("Parser Comparison", ["compare"]),  # web: /web/compare
             ]
 
             for group_name, command_names in command_groups:
@@ -84,6 +85,7 @@ def main():
     from . import tools_commands
     from . import source_commands
     from . import graph_commands
+    from . import compare_commands
 
     # Set up commands from each module
     document_commands.setup_commands(subparsers)
@@ -93,6 +95,7 @@ def main():
     tools_commands.setup_commands(subparsers)
     source_commands.setup_commands(subparsers)
     graph_commands.setup_commands(subparsers)
+    compare_commands.setup_commands(subparsers)
 
     args = parser.parse_args()
 
@@ -202,6 +205,23 @@ def main():
                 cmd_process_document(args)
             elif args.graph_command == "extract-all":
                 cmd_extract_all(args)
+            else:
+                parser.print_help()
+                sys.exit(1)
+        elif args.command == "compare":
+            from .compare_commands import cmd_compare_run, cmd_compare_categorize, cmd_compare_categories_list, cmd_compare_list, cmd_compare_get, cmd_compare_export
+            if args.compare_command == "run":
+                cmd_compare_run(args)
+            elif args.compare_command == "categorize":
+                cmd_compare_categorize(args)
+            elif args.compare_command == "categories-list":
+                cmd_compare_categories_list(args)
+            elif args.compare_command == "list":
+                cmd_compare_list(args)
+            elif args.compare_command == "get":
+                cmd_compare_get(args)
+            elif args.compare_command == "export":
+                cmd_compare_export(args)
             else:
                 parser.print_help()
                 sys.exit(1)

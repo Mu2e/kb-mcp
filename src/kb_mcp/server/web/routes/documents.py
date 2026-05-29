@@ -660,7 +660,7 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
             <div class="card">
                 <h2>Raw Document</h2>
                 <table>
-                    <tr><th>Raw Document ID</th><td><code>{raw_doc.id}</code></td></tr>
+                    <tr><th>Raw Document ID</th><td><code><a href="/web/raw/{raw_doc.id}">{raw_doc.id}</a></code></td></tr>
                     <tr><th>Host File Path</th><td>{file_path_display}</td></tr>
                     <tr><th>File Size</th><td>{raw_doc.file_size if raw_doc.file_size else "N/A"} bytes</td></tr>
                 </table>
@@ -2112,7 +2112,7 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
                     </p>
                 </div>
             """
-            
+
             return HTMLResponse(
                 html_templates.base_template(
                     title="Upload Error",
@@ -2120,6 +2120,287 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
                     username=username
                 ),
                 status_code=500
+            )
+
+    @app.route("/web/raw/{raw_doc_id}")
+    async def raw_document_detail(request: Request):
+        """Show details for a raw document, its parsed versions, and any parser comparison."""
+        session_data, redirect = await require_auth_html(request, session_manager)
+        if redirect:
+            return redirect
+        username = session_data.get("username")
+        raw_doc_id = request.path_params["raw_doc_id"]
+
+        try:
+            from ....kb.database import get_db_session
+            from ....kb.db_models import RawDocument, Document as DocumentModel
+            from ....kb.compare import get_comparison, get_latest_categories
+
+            with get_db_session() as session:
+                raw_doc = session.query(RawDocument).filter(RawDocument.id == raw_doc_id).first()
+                if not raw_doc:
+                    return HTMLResponse(
+                        html_templates.base_template(
+                            "Not Found",
+                            f'<div class="error-box"><h2>Not Found</h2><p>Raw document <code>{html_escape(raw_doc_id)}</code> not found.</p><p><a href="/web">← Back</a></p></div>',
+                            None,
+                            username,
+                        ),
+                        status_code=404,
+                    )
+
+                # Detach fields before session closes
+                rdoc_id = raw_doc.id
+                rdoc_source_id = raw_doc.source_id
+                rdoc_doc_id = raw_doc.doc_id
+                rdoc_file_path = raw_doc.file_path
+                rdoc_hostname = raw_doc.hostname
+                rdoc_uri = raw_doc.uri
+                rdoc_source_type = raw_doc.source_type
+                rdoc_file_size = raw_doc.file_size
+                rdoc_content_hash = raw_doc.content_hash
+                rdoc_created_time = raw_doc.created_time
+
+                siblings = session.query(DocumentModel).filter(
+                    DocumentModel.raw_document_id == raw_doc_id,
+                    DocumentModel.doc_type == "text",
+                ).order_by(DocumentModel.parser_id).all()
+
+                sibling_data = [
+                    {
+                        "id": s.id,
+                        "doc_id": s.doc_id or s.id,
+                        "parser_id": s.parser_id or "unknown",
+                    }
+                    for s in siblings
+                ]
+
+            # Fetch comparison and source-level categories (both return plain dicts)
+            comparison = get_comparison(raw_doc_id)
+            categories = get_latest_categories(rdoc_source_id) if rdoc_source_id else None
+
+            # --- Build HTML ---
+
+            file_path_display = html_escape(
+                f"{rdoc_hostname}:{rdoc_file_path}" if rdoc_hostname and rdoc_file_path
+                else rdoc_file_path or "N/A"
+            )
+
+            siblings_rows = ""
+            for s in sibling_data:
+                siblings_rows += (
+                    f'<li><a href="/web/document/{s["id"]}">'
+                    f'{html_escape(s["doc_id"])}</a> ({html_escape(s["parser_id"])})</li>'
+                )
+
+            info_card = f"""
+<div class="card">
+    <h2>Raw Document</h2>
+    <table>
+        <tr><th>Raw Document ID</th><td><code>{html_escape(rdoc_id)}</code></td></tr>
+        <tr><th>Source</th><td>{html_escape(rdoc_source_id or "")}</td></tr>
+        <tr><th>Doc ID</th><td>{html_escape(rdoc_doc_id or "")}</td></tr>
+        <tr><th>Host File Path</th><td>{file_path_display}</td></tr>
+        {'<tr><th>URI</th><td>' + html_escape(rdoc_uri) + '</td></tr>' if rdoc_uri else ''}
+        <tr><th>Source Type</th><td>{html_escape(rdoc_source_type or "")}</td></tr>
+        <tr><th>File Size</th><td>{f"{rdoc_file_size:,} bytes" if rdoc_file_size else "N/A"}</td></tr>
+        {'<tr><th>Content Hash</th><td><code>' + html_escape(rdoc_content_hash) + '</code></td></tr>' if rdoc_content_hash else ''}
+        {'<tr><th>Created</th><td>' + html_escape(str(rdoc_created_time)[:19]) + '</td></tr>' if rdoc_created_time else ''}
+    </table>
+    <h3 style="margin-top: 20px; margin-bottom: 10px;">All Documents from this Raw File ({len(sibling_data)})</h3>
+    <ul>{siblings_rows}</ul>
+</div>"""
+
+            if comparison:
+                comp_parsers = html_escape(", ".join(comparison["parser_ids"] or []))
+                comp_model = html_escape(comparison["model"] or "")
+                comp_created = html_escape(str(comparison["created_time"])[:19]) if comparison["created_time"] else ""
+                comp_text = html_escape(comparison["comparison"] or "")
+
+                doc_desc_html = ""
+                if comparison.get("document_description"):
+                    doc_desc_html = f"""
+    <h3 style="margin-top: 24px; margin-bottom: 10px;">Document Description</h3>
+    <p style="color: #444; line-height: 1.6;">{html_escape(comparison["document_description"])}</p>"""
+
+                comp_elapsed = comparison.get("meta", {}) or {}
+                comp_elapsed = comp_elapsed.get("elapsed_seconds")
+                comp_elapsed_html = f"<tr><th>LLM time</th><td>{comp_elapsed}s</td></tr>" if comp_elapsed else ""
+
+                comparison_card = f"""
+<div class="card">
+    <h2>Parser Comparison</h2>
+    <table>
+        <tr><th>Parsers compared</th><td>{comp_parsers}</td></tr>
+        <tr><th>Model</th><td>{comp_model}</td></tr>
+        <tr><th>Run at</th><td>{comp_created}</td></tr>
+        {comp_elapsed_html}
+    </table>
+    {doc_desc_html}
+    <h3 style="margin-top: 24px; margin-bottom: 10px;">Analysis</h3>
+    <pre style="white-space: pre-wrap; background: #f8f8f8; padding: 16px; border-radius: 4px; border: 1px solid #ddd; font-size: 0.9em;">{comp_text}</pre>
+</div>"""
+            else:
+                comparison_card = """
+<div class="card">
+    <h2>Parser Comparison</h2>
+    <p style="color: #999;">No comparison available yet. Run <code>kb compare run --raw-document-id """ + html_escape(rdoc_id) + """</code> to generate one.</p>
+</div>"""
+
+            # Source-level parser recommendations card
+            if categories:
+                cat_text = html_escape(categories["categories_text"] or "")
+                cat_model = html_escape(categories["model"] or "")
+                cat_created = html_escape(str(categories["created_time"])[:19]) if categories["created_time"] else ""
+                cat_n = categories["num_comparisons"] or "?"
+                cat_extra = f'<p style="color:#666; font-style:italic;">Focus: {html_escape(categories["prompt_extra"])}</p>' if categories.get("prompt_extra") else ""
+                categories_card = f"""
+<div class="card">
+    <h2>Parser Recommendations <span style="font-size:0.75em; color:#999;">(source-level, {cat_n} docs)</span></h2>
+    <table style="margin-bottom:12px;">
+        <tr><th>Model</th><td>{cat_model}</td></tr>
+        <tr><th>Run at</th><td>{cat_created}</td></tr>
+    </table>
+    {cat_extra}
+    <pre style="white-space: pre-wrap; background: #f8f8f8; padding: 16px; border-radius: 4px; border: 1px solid #ddd; font-size: 0.9em;">{cat_text}</pre>
+</div>"""
+            else:
+                categories_card = """
+<div class="card">
+    <h2>Parser Recommendations</h2>
+    <p style="color: #999;">No source-level categorization yet. Run <code>kb compare categorize --source-id """ + html_escape(rdoc_source_id or "") + """</code>.</p>
+</div>"""
+
+            content = f"""
+<p><a href="/web">← Back to Document List</a></p>
+{info_card}
+{comparison_card}
+{categories_card}
+"""
+            return HTMLResponse(
+                html_templates.base_template(
+                    f"Raw: {rdoc_doc_id or rdoc_id}",
+                    content,
+                    None,
+                    username,
+                )
+            )
+
+        except Exception as e:
+            logger.error(f"Error fetching raw document {raw_doc_id}: {e}", exc_info=True)
+            error_msg = html_escape(str(e))
+            return HTMLResponse(
+                html_templates.base_template(
+                    "Error",
+                    f'<div class="error-box"><h2>Error</h2><p>{error_msg}</p><p><a href="/web">← Back</a></p></div>',
+                    None,
+                    username,
+                ),
+                status_code=500,
+            )
+
+    @app.route("/web/compare")
+    async def compare_page(request: Request):
+        """List all parser categorization runs, grouped by source, expandable."""
+        session_data, redirect = await require_auth_html(request, session_manager)
+        if redirect:
+            return redirect
+        username = session_data.get("username")
+
+        try:
+            from ....kb.compare import list_categories
+            from ....kb.database import get_db_session
+            from ....kb.db_models import ParserCategories
+
+            rows = list_categories()
+
+            if not rows:
+                content = """
+<div class="card">
+    <h2>Parser Categorization Runs</h2>
+    <p style="color: #999;">No categorization runs found. Run <code>kb compare categorize --source-id &lt;source&gt;</code> to generate one.</p>
+</div>"""
+                return HTMLResponse(html_templates.base_template("Parser Categories", content, None, username))
+
+            # Group by source_id, preserving order (most recent first within each source)
+            from collections import OrderedDict
+            by_source = OrderedDict()
+            for r in rows:
+                src = r["source_id"]
+                if src not in by_source:
+                    by_source[src] = []
+                by_source[src].append(r)
+
+            # Fetch full categories_text for all rows in one query
+            with get_db_session() as db:
+                all_rows = db.query(ParserCategories).order_by(ParserCategories.created_time.desc()).all()
+                text_by_id = {r.id: (r.categories_text or "") for r in all_rows}
+
+            source_cards = ""
+            for src, runs in by_source.items():
+                run_items = ""
+                for i, r in enumerate(runs):
+                    created = str(r["created_time"] or "")[:19]
+                    model = html_escape(r["model"] or "")
+                    n = r["num_comparisons"] or "?"
+                    elapsed = (r.get("meta") or {}).get("elapsed_seconds")
+                    elapsed_str = f" · {elapsed}s" if elapsed else ""
+                    extra = f' · <em>{html_escape(r["prompt_extra"][:60])}</em>' if r.get("prompt_extra") else ""
+                    cat_text = html_escape(text_by_id.get(r["id"], "(no text)"))
+                    title_str = html_escape(r["title"]) if r.get("title") else f"{created} · {model}"
+                    open_attr = " open" if i == 0 else ""
+
+                    # Prompt section (collapsible)
+                    full_prompt = html_escape(text_by_id.get(r["id"] + "_prompt", ""))
+                    prompt_html = ""
+                    with get_db_session() as db2:
+                        prow = db2.query(ParserCategories).filter(ParserCategories.id == r["id"]).first()
+                        if prow and prow.prompt:
+                            prompt_html = f"""
+    <details style="margin-top: 12px;">
+        <summary style="cursor: pointer; color: #666; font-size: 0.85em;">Show prompt</summary>
+        <pre style="white-space: pre-wrap; background: #f0f0f0; padding: 12px; border-radius: 4px; font-size: 0.8em; margin-top: 8px;">{html_escape(prow.prompt)}</pre>
+    </details>"""
+
+                    run_items += f"""
+<details{open_attr} style="margin-bottom: 12px; border: 1px solid #ddd; border-radius: 6px; padding: 0;">
+    <summary style="cursor: pointer; padding: 12px 16px; background: #f8f8f8; border-radius: 6px; list-style: none; display: flex; justify-content: space-between; align-items: center;">
+        <span>
+            <strong>{title_str}</strong>
+            <span style="color: #999; font-size: 0.85em; margin-left: 12px;">{created} · {model} · {n} docs{elapsed_str}{extra}</span>
+        </span>
+        <span style="color: #bbb; font-size: 0.8em;">{r["id"][:8]}…</span>
+    </summary>
+    <div style="padding: 16px;">
+        <pre style="white-space: pre-wrap; background: #fdfdfd; padding: 16px; border-radius: 4px; border: 1px solid #eee; font-size: 0.88em; margin: 0;">{cat_text}</pre>
+        {prompt_html}
+    </div>
+</details>"""
+
+                source_cards += f"""
+<div class="card">
+    <h2>{html_escape(src)} <span style="font-size: 0.7em; color: #999; font-weight: normal;">({len(runs)} run{"s" if len(runs) != 1 else ""})</span></h2>
+    {run_items}
+</div>"""
+
+            content = f"""
+<p><a href="/web">← Back to Document List</a></p>
+<h1 style="margin-bottom: 24px;">Parser Categorization Runs</h1>
+{source_cards}
+"""
+            return HTMLResponse(html_templates.base_template("Parser Categories", content, None, username))
+
+        except Exception as e:
+            logger.error(f"Error in compare_page: {e}", exc_info=True)
+            error_msg = html_escape(str(e))
+            return HTMLResponse(
+                html_templates.base_template(
+                    "Error",
+                    f'<div class="error-box"><h2>Error</h2><p>{error_msg}</p><p><a href="/web">← Back</a></p></div>',
+                    None,
+                    username,
+                ),
+                status_code=500,
             )
 
     # Logs, statistics, and eval routes moved to separate files

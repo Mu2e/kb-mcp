@@ -7,6 +7,7 @@ def get_default_nav_items() -> list[tuple[str, str]]:
         ("/", "Home"),
         ("/web", "Knowledge Base Explorer"),
         ("/web/eval", "Evaluations"),
+        ("/web/compare", "Parser Compare"),
         ("/web/statistics", "Statistics"),
         ("/web/logs", "Logs"),
         ("/web/upload", "Upload"),

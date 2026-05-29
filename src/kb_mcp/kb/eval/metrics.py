@@ -207,7 +207,11 @@ def get_summary_stats(
     with get_db_session(session) as session:
         # Build base filter
         base_filter = EvalResult.run_id == run_id
-        
+
+        # Check run's search type — llm_only has no retrieval so doc stats are meaningless
+        run = session.query(EvalRun).filter_by(id=run_id).first()
+        is_llm_only = run and getattr(run, "search_type", None) == "llm_only"
+
         # Apply audit filter if specified - use subquery to get valid question IDs
         if audit_type:
             audited_question_ids = select(EvalAudit.question_id).where(
@@ -215,19 +219,24 @@ def get_summary_stats(
                 EvalAudit.is_valid == True  # noqa: E712
             ).distinct()
             base_filter = base_filter & (EvalResult.question_id.in_(audited_question_ids))
-        
+
         # Compute both document match and judge stats in one pass using aggregation
-        # Count document hits
-        doc_hits = session.query(func.count(EvalResult.id)).filter(
-            base_filter,
-            EvalResult.is_hit == True  # noqa: E712
-        ).scalar() or 0
-        
-        # Count document total (with is_hit set)
-        doc_total = session.query(func.count(EvalResult.id)).filter(
-            base_filter,
-            EvalResult.is_hit.isnot(None)
-        ).scalar() or 0
+        # Skip retrieval stats for llm_only runs (is_hit is always False there, not meaningful)
+        if is_llm_only:
+            doc_hits = 0
+            doc_total = 0
+        else:
+            # Count document hits
+            doc_hits = session.query(func.count(EvalResult.id)).filter(
+                base_filter,
+                EvalResult.is_hit == True  # noqa: E712
+            ).scalar() or 0
+
+            # Count document total (with is_hit set)
+            doc_total = session.query(func.count(EvalResult.id)).filter(
+                base_filter,
+                EvalResult.is_hit.isnot(None)
+            ).scalar() or 0
         
         # Count judge hits
         judge_hits = session.query(func.count(EvalResult.id)).filter(

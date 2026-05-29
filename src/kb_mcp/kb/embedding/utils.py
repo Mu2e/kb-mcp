@@ -154,32 +154,28 @@ def get_embedder(
             f"Set EMBEDDING_MODEL env var or pass model parameter."
         )
 
-    # Check cache first (only if no kwargs, as kwargs might change behavior)
-    # Use thread-safe access to cache
     cache_key = (provider_lower, model)
+    embedder_class = EMBEDDER_CLASSES[provider_lower]
+
     if not kwargs:
+        # Hold the lock for the entire check-and-load to prevent concurrent model
+        # initialisation (sentence-transformers hits a meta-tensor race under parallel loads)
         with _EMBEDDER_CACHE_LOCK:
             if cache_key in _EMBEDDER_CACHE:
                 logger.debug(f"Using cached embedder for {provider_lower}/{model}")
                 return _EMBEDDER_CACHE[cache_key]
+            try:
+                embedder = embedder_class(model_name=model, **kwargs)
+            except Exception as e:
+                logger.error(f"Error creating embedder '{provider}': {e}")
+                raise
+            _EMBEDDER_CACHE[cache_key] = embedder
+            logger.debug(f"Cached embedder instance for {provider_lower}/{model}")
+            return embedder
 
-    embedder_class = EMBEDDER_CLASSES[provider_lower]
-
+    # kwargs present — skip cache, load directly
     try:
-        embedder = embedder_class(model_name=model, **kwargs)
-        # Cache the embedder instance (only if no kwargs, as kwargs might change behavior)
-        # Use thread-safe access to cache
-        if not kwargs:
-            with _EMBEDDER_CACHE_LOCK:
-                # Double-check pattern: another thread might have created it while we were loading
-                if cache_key not in _EMBEDDER_CACHE:
-                    _EMBEDDER_CACHE[cache_key] = embedder
-                    logger.debug(f"Cached embedder instance for {provider_lower}/{model}")
-                else:
-                    # Another thread created it, use the cached one instead
-                    logger.debug(f"Using embedder cached by another thread for {provider_lower}/{model}")
-                    embedder = _EMBEDDER_CACHE[cache_key]
-        return embedder
+        return embedder_class(model_name=model, **kwargs)
     except Exception as e:
         logger.error(f"Error creating embedder '{provider}': {e}")
         raise

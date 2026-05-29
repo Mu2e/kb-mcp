@@ -197,6 +197,8 @@ def cmd_chunk_and_embed_all(args):
         from ..tools import chunk_and_embed_all
 
         print(f"Chunking and embedding all documents for source_id: {args.source_id}")
+        if args.parser_name:
+            print(f"Filtering by parser: {args.parser_name}")
         if args.strategy:
             print(f"Using chunking strategy: {args.strategy}")
         if args.no_gist:
@@ -225,6 +227,8 @@ def cmd_chunk_and_embed_all(args):
             embedding_name=args.embedding_name,
             provider=args.provider,
             model=args.model,
+            parser_name=args.parser_name,
+            force=args.force,
         )
 
         print(f"\n  Completed:")
@@ -271,6 +275,8 @@ def cmd_summarize_all(args):
         from ..tools import summarize_all
 
         print(f"Generating summaries for all documents from source_id: {args.source_id}")
+        if args.parser_name:
+            print(f"Filtering by parser: {args.parser_name}")
         if args.model:
             print(f"Using model: {args.model}")
         if not args.no_summary_chunk:
@@ -286,6 +292,8 @@ def cmd_summarize_all(args):
             embedding_name=args.embedding_name,
             embedding_provider=args.provider,
             embedding_model=args.embedding_model,
+            parser_name=args.parser_name,
+            batch_size=args.batch_size,
         )
 
         print(f"\n  Completed:")
@@ -709,6 +717,62 @@ def cmd_extract_all(args):
         sys.exit(1)
 
 
+def cmd_count_tokens(args):
+    """Count tokens across all text documents matching the given filters."""
+    try:
+        from ..db_models import Document
+        from ..database import get_db_session
+        from ...chunking.chunking import count_tokens
+
+        with get_db_session() as session:
+            query = session.query(Document).filter(
+                Document.text.isnot(None),
+                Document.text != "",
+                Document.doc_type != "image",
+            )
+            if args.source_id:
+                query = query.filter(Document.source_id == args.source_id)
+            if args.parser_name:
+                query = query.filter(Document.parser_id == args.parser_name)
+
+            documents = query.all()
+
+        if not documents:
+            print("No documents found matching the given filters.")
+            return
+
+        print(f"Counting tokens for {len(documents)} document(s)...")
+        token_counts = [count_tokens(doc.text) for doc in documents]
+        char_counts = [len(doc.text) for doc in documents]
+
+        def stats(counts):
+            total = sum(counts)
+            mean = total / len(counts)
+            s = sorted(counts)
+            n = len(s)
+            median = s[n // 2] if n % 2 else (s[n // 2 - 1] + s[n // 2]) / 2
+            std = (sum((c - mean) ** 2 for c in counts) / len(counts)) ** 0.5
+            return total, mean, std, median, s[0], s[-1]
+
+        tt, tm, ts, tmed, tmin, tmax = stats(token_counts)
+        ct, cm, cs, cmed, cmin, cmax = stats(char_counts)
+
+        print(f"\n  {'':14}  {'Tokens':>14}  {'Chars':>14}")
+        print(f"  {'Documents':<14}  {len(documents):>14,}  {len(documents):>14,}")
+        print(f"  {'Total':<14}  {tt:>14,}  {ct:>14,}")
+        print(f"  {'Mean':<14}  {tm:>14,.1f}  {cm:>14,.1f}")
+        print(f"  {'Std':<14}  {ts:>14,.1f}  {cs:>14,.1f}")
+        print(f"  {'Median':<14}  {tmed:>14,.1f}  {cmed:>14,.1f}")
+        print(f"  {'Min':<14}  {tmin:>14,}  {cmin:>14,}")
+        print(f"  {'Max':<14}  {tmax:>14,}  {cmax:>14,}")
+
+    except Exception as e:
+        print(f"Error: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+
 def setup_commands(subparsers):
     """Set up tools and utility commands."""
     # Drop command (top-level, for documents)
@@ -806,6 +870,10 @@ def setup_commands(subparsers):
     )
     chunk_embed_all_parser.add_argument("source_id", help="Source identifier to process documents for")
     chunk_embed_all_parser.add_argument(
+        "--parser-name",
+        help="Only process documents parsed by this parser (e.g., 'marker', 'nougat', 'docling', 'azure')"
+    )
+    chunk_embed_all_parser.add_argument(
         "--strategy",
         help="Chunking strategy (e.g., 'tokens' or 'slide'). If not specified, uses default."
     )
@@ -836,6 +904,11 @@ def setup_commands(subparsers):
         action="store_true",
         help="Don't prepend section path to chunks (creates separate strategy with _no_section suffix)"
     )
+    chunk_embed_all_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Re-chunk and re-embed documents that already have chunks (drops existing chunks first)"
+    )
     chunk_embed_all_parser.set_defaults(func=cmd_chunk_and_embed_all)
 
     summarize_all_parser = tools_subparsers.add_parser(
@@ -843,6 +916,10 @@ def setup_commands(subparsers):
         help="Generate summaries for all documents from a source that don't have them yet"
     )
     summarize_all_parser.add_argument("source_id", help="Source identifier to process documents for")
+    summarize_all_parser.add_argument(
+        "--parser-name",
+        help="Only process documents parsed by this parser (e.g., 'marker', 'nougat', 'docling', 'azure')"
+    )
     summarize_all_parser.add_argument(
         "--model",
         help="Model name for summary generation (overrides SUMMARY_MODEL env var)"
@@ -869,7 +946,24 @@ def setup_commands(subparsers):
         "--embedding-model",
         help="Embedding model name for summary chunks (e.g., 'text-embedding-3-small')"
     )
+    summarize_all_parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=10,
+        help="Commit to DB every N successfully summarized documents (default: 10)"
+    )
     summarize_all_parser.set_defaults(func=cmd_summarize_all)
+
+    count_tokens_parser = tools_subparsers.add_parser(
+        "count-tokens",
+        help="Count total tokens across all text documents matching the given filters"
+    )
+    count_tokens_parser.add_argument("--source-id", help="Filter by source ID")
+    count_tokens_parser.add_argument(
+        "--parser-name",
+        help="Filter by parser (e.g., 'marker', 'nougat', 'docling')"
+    )
+    count_tokens_parser.set_defaults(func=cmd_count_tokens)
 
     list_tables_parser = tools_subparsers.add_parser("list-tables", help="List all database tables")
     list_tables_parser.add_argument("--json", action="store_true", help="Output as JSON")

@@ -36,6 +36,49 @@ def _to_utc_iso(dt: datetime | None) -> str | None:
     return iso_str + 'Z'
 
 
+def _render_agentic_conversation(conversation: list) -> str:
+    """Render the agentic conversation (tool calls + results) as collapsible HTML."""
+    if not conversation:
+        return ""
+
+    role_colors = {"system": "#f5f5f5", "user": "#e8f4e8", "assistant": "#e8f0ff", "tool": "#fff8e1"}
+    role_labels = {"system": "System", "user": "User", "assistant": "Assistant", "tool": "Tool Result"}
+
+    turns_html = ""
+    for i, msg in enumerate(conversation):
+        role = msg.get("role", "unknown")
+        color = role_colors.get(role, "#fafafa")
+        label = role_labels.get(role, role.title())
+
+        # Build content display
+        content_parts = []
+        if msg.get("content"):
+            content_parts.append(html_escape(str(msg["content"])))
+        if msg.get("tool_calls"):
+            for tc in msg["tool_calls"]:
+                fn = tc.get("function", {})
+                content_parts.append(f'<em>Tool call:</em> <code>{html_escape(fn.get("name", "?"))}({html_escape(fn.get("arguments", ""))})</code>')
+
+        content_html = "<br>".join(content_parts) if content_parts else "<em>(empty)</em>"
+
+        turns_html += f"""
+        <div style="margin-bottom: 6px; padding: 8px 12px; background: {color}; border-radius: 4px; border-left: 3px solid #ccc;">
+            <div style="font-size: 11px; font-weight: 600; color: #666; margin-bottom: 4px; text-transform: uppercase;">{label}</div>
+            <div style="font-size: 13px; white-space: pre-wrap; word-break: break-word;">{content_html}</div>
+        </div>"""
+
+    unique_id = f"agentic-conv-{id(conversation)}"
+    return f"""
+    <div style="margin-top: 15px;">
+        <strong>Agentic Conversation</strong>
+        <span onclick="document.getElementById('{unique_id}').style.display = document.getElementById('{unique_id}').style.display === 'none' ? 'block' : 'none'"
+              style="margin-left: 8px; cursor: pointer; color: #2196F3; font-size: 13px;">[toggle]</span>
+        <div id="{unique_id}" style="display: none; margin-top: 8px; border: 1px solid #ddd; border-radius: 4px; padding: 8px; max-height: 600px; overflow-y: auto;">
+            {turns_html}
+        </div>
+    </div>"""
+
+
 def setup_eval_routes(app, session_manager: WebSessionManager, require_auth_html):
     """Register evaluation web routes.
 
@@ -841,6 +884,18 @@ def setup_eval_routes(app, session_manager: WebSessionManager, require_auth_html
             llm_judge_hits = summary_stats_llm.get("judge_hits", 0)
             llm_judge_misses = summary_stats_llm.get("judge_misses", 0)
             llm_judge_hit_rate = summary_stats_llm.get("judge_hit_rate", 0.0) * 100 if "judge_hit_rate" in summary_stats_llm else 0.0
+
+            # Compute "with answer" stats inline from loaded results
+            answered_results = [r for r in results if r.meta and r.meta.get("llm_answer")]
+            ans_doc_total = len(answered_results)
+            ans_doc_hits = sum(1 for r in answered_results if r.is_hit)
+            ans_doc_misses = ans_doc_total - ans_doc_hits
+            ans_doc_hit_rate = (ans_doc_hits / ans_doc_total * 100) if ans_doc_total > 0 else 0.0
+            ans_judge_results = [r for r in answered_results if r.is_judge_hit is not None]
+            ans_judge_total = len(ans_judge_results)
+            ans_judge_hits = sum(1 for r in ans_judge_results if r.is_judge_hit)
+            ans_judge_misses = ans_judge_total - ans_judge_hits
+            ans_judge_hit_rate = (ans_judge_hits / ans_judge_total * 100) if ans_judge_total > 0 else 0.0
             
             summary_html = f"""
         <div class="card" style="margin-top: 20px;">
@@ -852,6 +907,7 @@ def setup_eval_routes(app, session_manager: WebSessionManager, require_auth_html
                         <th style="text-align: center; padding: 10px; font-weight: 600; background-color: #e8f4f8;">All Questions</th>
                         <th style="text-align: center; padding: 10px; font-weight: 600; background-color: #fff3cd;">Human Review<br/>(Valid Only)</th>
                         <th style="text-align: center; padding: 10px; font-weight: 600; background-color: #d1ecf1;">LLM Review<br/>(Valid Only)</th>
+                        <th style="text-align: center; padding: 10px; font-weight: 600; background-color: #e8f5e9;">With Answer</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -860,49 +916,57 @@ def setup_eval_routes(app, session_manager: WebSessionManager, require_auth_html
                         <td style="padding: 8px; text-align: center; font-weight: 600;">{all_doc_total}</td>
                         <td style="padding: 8px; text-align: center; font-weight: 600;">{human_doc_total}</td>
                         <td style="padding: 8px; text-align: center; font-weight: 600;">{llm_doc_total}</td>
+                        <td style="padding: 8px; text-align: center; font-weight: 600;">{ans_doc_total}</td>
                     </tr>
                     <tr style="border-bottom: 1px solid #eee;">
                         <td style="padding: 8px; font-weight: 600; padding-left: 20px;">Document Match Hits</td>
                         <td style="padding: 8px; text-align: center;">{all_doc_hits}</td>
                         <td style="padding: 8px; text-align: center;">{human_doc_hits}</td>
                         <td style="padding: 8px; text-align: center;">{llm_doc_hits}</td>
+                        <td style="padding: 8px; text-align: center;">{ans_doc_hits}</td>
                     </tr>
                     <tr style="border-bottom: 1px solid #eee;">
                         <td style="padding: 8px; font-weight: 600; padding-left: 20px;">Document Match Misses</td>
                         <td style="padding: 8px; text-align: center;">{all_doc_misses}</td>
                         <td style="padding: 8px; text-align: center;">{human_doc_misses}</td>
                         <td style="padding: 8px; text-align: center;">{llm_doc_misses}</td>
+                        <td style="padding: 8px; text-align: center;">{ans_doc_misses}</td>
                     </tr>
                     <tr style="border-bottom: 2px solid #ddd; background-color: #f9f9f9;">
                         <td style="padding: 8px; font-weight: 700;">Document Match Hit Rate</td>
                         <td style="padding: 8px; text-align: center; font-weight: 600;"><strong>{all_doc_hit_rate:.1f}%</strong></td>
                         <td style="padding: 8px; text-align: center; font-weight: 600;"><strong>{human_doc_hit_rate:.1f}%</strong></td>
                         <td style="padding: 8px; text-align: center; font-weight: 600;"><strong>{llm_doc_hit_rate:.1f}%</strong></td>
+                        <td style="padding: 8px; text-align: center; font-weight: 600;"><strong>{ans_doc_hit_rate:.1f}%</strong></td>
                     </tr>
                     <tr style="border-bottom: 2px solid #ddd; background-color: #f0f7ff;">
                         <td style="padding: 8px; font-weight: 700; padding-top: 15px;">LLM Judge Evaluated</td>
                         <td style="padding: 8px; text-align: center; font-weight: 600; padding-top: 15px;">{all_judge_total if all_judge_total > 0 else "—"}</td>
                         <td style="padding: 8px; text-align: center; font-weight: 600; padding-top: 15px;">{human_judge_total if human_judge_total > 0 else "—"}</td>
                         <td style="padding: 8px; text-align: center; font-weight: 600; padding-top: 15px;">{llm_judge_total if llm_judge_total > 0 else "—"}</td>
+                        <td style="padding: 8px; text-align: center; font-weight: 600; padding-top: 15px;">{ans_judge_total if ans_judge_total > 0 else "—"}</td>
                     </tr>
                     {f'''<tr style="border-bottom: 1px solid #eee;">
                         <td style="padding: 8px; font-weight: 600; padding-left: 20px;">LLM Judge Hits</td>
                         <td style="padding: 8px; text-align: center;">{all_judge_hits}</td>
                         <td style="padding: 8px; text-align: center;">{human_judge_hits}</td>
                         <td style="padding: 8px; text-align: center;">{llm_judge_hits}</td>
+                        <td style="padding: 8px; text-align: center;">{ans_judge_hits}</td>
                     </tr>
                     <tr style="border-bottom: 1px solid #eee;">
                         <td style="padding: 8px; font-weight: 600; padding-left: 20px;">LLM Judge Misses</td>
                         <td style="padding: 8px; text-align: center;">{all_judge_misses}</td>
                         <td style="padding: 8px; text-align: center;">{human_judge_misses}</td>
                         <td style="padding: 8px; text-align: center;">{llm_judge_misses}</td>
+                        <td style="padding: 8px; text-align: center;">{ans_judge_misses}</td>
                     </tr>
                     <tr style="border-bottom: 1px solid #eee; background-color: #f0f7ff;">
                         <td style="padding: 8px; font-weight: 700;">LLM Judge Hit Rate</td>
                         <td style="padding: 8px; text-align: center; font-weight: 600;"><strong>{all_judge_hit_rate:.1f}%</strong></td>
                         <td style="padding: 8px; text-align: center; font-weight: 600;"><strong>{human_judge_hit_rate:.1f}%</strong></td>
                         <td style="padding: 8px; text-align: center; font-weight: 600;"><strong>{llm_judge_hit_rate:.1f}%</strong></td>
-                    </tr>''' if all_judge_total > 0 or human_judge_total > 0 or llm_judge_total > 0 else ''}
+                        <td style="padding: 8px; text-align: center; font-weight: 600;"><strong>{ans_judge_hit_rate:.1f}%</strong></td>
+                    </tr>''' if all_judge_total > 0 or human_judge_total > 0 or llm_judge_total > 0 or ans_judge_total > 0 else ''}
                 </tbody>
             </table>
         </div>
@@ -918,6 +982,7 @@ def setup_eval_routes(app, session_manager: WebSessionManager, require_auth_html
                         <th style="text-align: left; padding: 10px; font-weight: 600;">Question</th>
                         <th style="text-align: left; padding: 10px; font-weight: 600;">Doc Hit</th>
                         <th style="text-align: left; padding: 10px; font-weight: 600;">Judge Hit</th>
+                        <th style="text-align: left; padding: 10px; font-weight: 600;">Answer</th>
                         <th style="text-align: left; padding: 10px; font-weight: 600;">Rank</th>
                         <th style="text-align: left; padding: 10px; font-weight: 600;">Similarity</th>
                         <th style="text-align: left; padding: 10px; font-weight: 600;">Retrieval Time</th>
@@ -955,12 +1020,18 @@ def setup_eval_routes(app, session_manager: WebSessionManager, require_auth_html
                     
                     # Retrieval time
                     retrieval_time_display = f"{result.retrieval_time_seconds:.3f}s" if result.retrieval_time_seconds else "—"
-                    
+
+                    # Answer present
+                    has_answer = bool(result.meta and result.meta.get("llm_answer"))
+                    answer_display = "✓" if has_answer else "—"
+                    answer_color = "#4caf50" if has_answer else "#bbb"
+
                     results_html += f"""
-                    <tr style="border-bottom: 1px solid #eee;">
+                    <tr class="result-row" data-has-answer="{'true' if has_answer else 'false'}" style="border-bottom: 1px solid #eee;">
                         <td style="padding: 12px 10px; cursor: pointer;" onclick="window.location.href='/web/eval/question/{result.question_id}'" onmouseover="this.style.backgroundColor='#f8f9fa'" onmouseout="this.style.backgroundColor='transparent'">{question_link}</td>
                         <td style="padding: 12px 10px; color: {doc_hit_color}; font-weight: 600;">{doc_hit_display}</td>
                         <td style="padding: 12px 10px; color: {judge_hit_color}; font-weight: 600;">{judge_hit_display}</td>
+                        <td style="padding: 12px 10px; color: {answer_color}; font-weight: 600;">{answer_display}</td>
                         <td style="padding: 12px 10px; color: #666;">{rank_display}</td>
                         <td style="padding: 12px 10px; color: #666;">{similarity_display}</td>
                         <td style="padding: 12px 10px; color: #666;">{retrieval_time_display}</td>
@@ -979,15 +1050,31 @@ def setup_eval_routes(app, session_manager: WebSessionManager, require_auth_html
         content = f"""
         <h1>Evaluation Run</h1>
         <p><a href="/web/eval">← Back to Evaluation Overview</a></p>
-        
+
         {run_info}
         {summary_html}
-        
+
         <div class="card" style="margin-top: 20px;">
-            <h2>Results ({len(results)})</h2>
+            <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px;">
+                <h2 style="margin: 0;">Results ({len(results)})</h2>
+                <label style="display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 14px; color: #555;">
+                    <input type="checkbox" id="filterAnswered" onchange="filterResults()" style="width: 16px; height: 16px; cursor: pointer;">
+                    Show only results with an answer
+                </label>
+            </div>
             {results_html}
         </div>
         <script>
+        function filterResults() {{
+            const onlyAnswered = document.getElementById('filterAnswered').checked;
+            document.querySelectorAll('tr.result-row').forEach(function(row) {{
+                if (onlyAnswered && row.getAttribute('data-has-answer') !== 'true') {{
+                    row.style.display = 'none';
+                }} else {{
+                    row.style.display = '';
+                }}
+            }});
+        }}
         // Format UTC timestamps on page load
         document.addEventListener('DOMContentLoaded', function() {{
             document.querySelectorAll('.utc-timestamp').forEach(function(element) {{
@@ -1118,6 +1205,8 @@ def setup_eval_routes(app, session_manager: WebSessionManager, require_auth_html
                 </tbody>
             </table>
             {f'<div style="margin-top: 15px;"><strong>Judge Justification:</strong><div style="margin-top: 8px; padding: 12px; background: #f9f9f9; border: 1px solid #ddd; border-radius: 4px; white-space: pre-wrap; font-size: 14px;">{html_escape(result.justification)}</div></div>' if result.justification else ''}
+            {f'<div style="margin-top: 15px;"><strong>LLM Answer</strong> <span style="color: #999; font-size: 12px;">({result.meta.get("llm_answer_time", 0):.2f}s)</span>:<div style="margin-top: 8px; padding: 12px; background: #f0f7ff; border: 1px solid #b3d7ff; border-radius: 4px; white-space: pre-wrap; font-size: 14px;">{html_escape(result.meta.get("llm_answer", ""))}</div></div>' if result.meta and result.meta.get("llm_answer") else ''}
+            {_render_agentic_conversation(result.meta.get("agentic_conversation")) if result.meta and result.meta.get("agentic_conversation") else ''}
         </div>
         """
             
