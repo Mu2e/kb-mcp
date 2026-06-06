@@ -823,6 +823,67 @@ class Document(Base):
         return cls.from_dict(doc_data)
 
 
+class PrivacyFilter(Base):
+    """Table 'privacy_filters' storing LLM-based privacy classification results.
+
+    Each row is one privacy assessment for a raw document. The filter scans
+    the parsed text (from a specified parser, default marker) and classifies
+    it as 'public', 'needs_review', or 'private'.
+
+    Attributes:
+        id (str): Primary key (UUID).
+        raw_document_id (str): FK → documents_raw.id — the source file assessed.
+        document_id (str): FK → documents.id — the parsed document text was read from.
+        label (str): Classification result: 'public', 'needs_review', or 'private'.
+        reasoning (str): LLM explanation of why this label was assigned.
+        model (str): LLM model used for the assessment.
+        created_time (datetime): When this assessment was created.
+        meta (dict): Additional metadata (token counts, prompt, etc.).
+    """
+
+    __tablename__ = "privacy_filters"
+
+    LABEL_PUBLIC = "public"
+    LABEL_NEEDS_REVIEW = "needs_review"
+    LABEL_PRIVATE = "private"
+    VALID_LABELS = {LABEL_PUBLIC, LABEL_NEEDS_REVIEW, LABEL_PRIVATE}
+
+    id = Column(
+        String(36),
+        primary_key=True,
+        default=lambda: str(uuid.uuid4()),
+        index=True,
+    )
+    raw_document_id = Column(
+        String(36),
+        ForeignKey("documents_raw.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    document_id = Column(
+        String(36),
+        ForeignKey("documents.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    label = Column(String(32), nullable=False, index=True)
+    reasoning = Column(Text, nullable=True)
+    model = Column(String(256), nullable=True)
+    created_time = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=func.now(),
+        server_default=func.now(),
+    )
+    meta = Column(JSONB, nullable=True, default=dict)
+
+    raw_document = relationship("RawDocument")
+    document = relationship("Document")
+
+    def __repr__(self) -> str:
+        return f"<PrivacyFilter(id={self.id}, raw_document_id={self.raw_document_id}, label={self.label})>"
+
+
 class ParserComparison(Base):
     """Table 'parser_comparisons' storing LLM-generated comparisons of parser outputs.
 

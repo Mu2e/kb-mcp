@@ -110,6 +110,7 @@ def get_llm_config() -> dict:
             * `image_llm_description` (bool): Use LLM for image descriptions (Env: `PARSE_IMAGE_DESCRIPTION_MODEL`).
             * `graph_relation_extraction_model` (str): Graph relation extraction model (Env: `GRAPH_EXTRACTION_MODEL`, defaults to DEFAULT_LLM_MODEL).
             * `parser_comparison_model` (str): Parser comparison model (Env: `PARSER_COMP_MODEL`, defaults to DEFAULT_LLM_MODEL).
+            * `privacy_filter_model` (str): Privacy classification model (Env: `PRIVACY_FILTER_MODEL`, defaults to DEFAULT_LLM_MODEL).
     """
     base_url_models = json.loads(os.getenv("OPENAI_BASE_URL_MODELS", "{}"))
     return {
@@ -123,6 +124,7 @@ def get_llm_config() -> dict:
         'image_description_model': os.getenv("PARSE_IMAGE_DESCRIPTION_MODEL", get_default_llm_model()),
         'graph_relation_extraction_model': os.getenv("GRAPH_EXTRACTION_MODEL", get_default_llm_model()),
         'parser_comparison_model': os.getenv("PARSER_COMP_MODEL", get_default_llm_model()),
+        'privacy_filter_model': os.getenv("PRIVACY_FILTER_MODEL", get_default_llm_model()),
     }
 
 # Graph

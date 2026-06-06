@@ -672,6 +672,257 @@ def cmd_db_kill_idle(args):
     print(f"Terminated {terminated} session(s).")
 
 
+def cmd_filter_all(args):
+    """Run the LLM privacy filter over all unclassified raw documents."""
+    try:
+        from ..tools import filter_all
+
+        print(f"Running privacy filter for source_id: {args.source_id or 'all'}")
+        if args.parser_name:
+            print(f"  Using parser: {args.parser_name}")
+        if args.model:
+            print(f"  Using model: {args.model}")
+
+        result = filter_all(
+            source_id=args.source_id,
+            parser_name=args.parser_name or "marker",
+            model=args.model,
+            batch_size=args.batch_size,
+            limit=getattr(args, "limit", None),
+            delay=args.delay,
+        )
+
+        print(f"\n  Completed:")
+        print(f"  Processed:    {result['processed']}")
+        print(f"  Classified:   {result['filtered']}")
+        print(f"  Skipped:      {result['skipped']} (no parsed text or already classified)")
+        if result['errors'] > 0:
+            print(f"  Errors:       {result['errors']}")
+        print(f"\n  Labels assigned in this run:")
+        for label, count in result['by_label'].items():
+            print(f"    {label:<16} {count}")
+    except Exception as e:
+        print(f"Error: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+
+def cmd_filter_list(args):
+    """List documents by privacy label."""
+    try:
+        from ..database import get_db_session
+        from ..db_models import PrivacyFilter, RawDocument
+        from sqlalchemy import func
+
+        # Determine which label to show
+        if args.private:
+            label = PrivacyFilter.LABEL_PRIVATE
+        elif args.review:
+            label = PrivacyFilter.LABEL_NEEDS_REVIEW
+        else:
+            label = PrivacyFilter.LABEL_PUBLIC
+
+        with get_db_session() as session:
+            query = (
+                session.query(PrivacyFilter, RawDocument)
+                .join(RawDocument, PrivacyFilter.raw_document_id == RawDocument.id)
+                .filter(PrivacyFilter.label == label)
+            )
+            if args.source_id:
+                query = query.filter(RawDocument.source_id == args.source_id)
+            query = query.order_by(RawDocument.source_id, RawDocument.doc_id)
+            if args.limit:
+                query = query.limit(args.limit)
+            rows = query.all()
+
+        if not rows:
+            print(f"No {label} documents found.")
+            return
+
+        if args.json:
+            import json
+            out = [
+                {
+                    "raw_document_id": pf.raw_document_id,
+                    "source_id": rd.source_id,
+                    "doc_id": rd.doc_id,
+                    "label": pf.label,
+                    "reasoning": pf.reasoning,
+                    "model": pf.model,
+                    "classified_time": str(pf.created_time)[:19] if pf.created_time else None,
+                }
+                for pf, rd in rows
+            ]
+            print(json.dumps(out, indent=2))
+            return
+
+        print(f"{'Source':<24}  {'Doc ID':<36}  {'Raw Document ID':<36}  Reasoning")
+        print("-" * 140)
+        for pf, rd in rows:
+            reasoning = (pf.reasoning or "")[:60].replace("\n", " ")
+            if pf.reasoning and len(pf.reasoning) > 60:
+                reasoning += "…"
+            print(f"{(rd.source_id or ''):<24}  {(rd.doc_id or ''):<36}  {rd.id:<36}  {reasoning}")
+
+    except Exception as e:
+        print(f"Error: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+
+def cmd_filter_stats(args):
+    """Show privacy filter classification statistics."""
+    try:
+        from ..database import get_db_session
+        from ..db_models import PrivacyFilter, RawDocument
+        from sqlalchemy import func
+
+        with get_db_session() as session:
+            total_raw = session.query(func.count(RawDocument.id))
+            if args.source_id:
+                total_raw = total_raw.filter(RawDocument.source_id == args.source_id)
+            total_raw = total_raw.scalar()
+
+            pf_q = session.query(PrivacyFilter)
+            if args.source_id:
+                pf_q = pf_q.join(RawDocument, PrivacyFilter.raw_document_id == RawDocument.id)\
+                            .filter(RawDocument.source_id == args.source_id)
+
+            total_classified = pf_q.count()
+
+            # Counts per label (exclude sentinel error/skipped rows from "classified" tally)
+            label_counts = dict(
+                session.query(PrivacyFilter.label, func.count(PrivacyFilter.id))
+                .join(RawDocument, PrivacyFilter.raw_document_id == RawDocument.id)
+                .filter(RawDocument.source_id == args.source_id if args.source_id else True)
+                .group_by(PrivacyFilter.label)
+                .all()
+            )
+
+            # Error sentinels (meta->error = true)
+            from sqlalchemy import cast
+            from sqlalchemy.dialects.postgresql import JSONB as PG_JSONB
+            try:
+                error_count = (
+                    session.query(func.count(PrivacyFilter.id))
+                    .join(RawDocument, PrivacyFilter.raw_document_id == RawDocument.id)
+                    .filter(
+                        RawDocument.source_id == args.source_id if args.source_id else True,
+                        PrivacyFilter.meta["error"].astext == "true",
+                    )
+                    .scalar() or 0
+                )
+            except Exception:
+                error_count = 0
+
+            # Per-source breakdown
+            by_source = (
+                session.query(
+                    RawDocument.source_id,
+                    PrivacyFilter.label,
+                    func.count(PrivacyFilter.id),
+                )
+                .join(RawDocument, PrivacyFilter.raw_document_id == RawDocument.id)
+                .filter(RawDocument.source_id == args.source_id if args.source_id else True)
+                .group_by(RawDocument.source_id, PrivacyFilter.label)
+                .order_by(RawDocument.source_id, PrivacyFilter.label)
+                .all()
+            )
+
+        unclassified = total_raw - total_classified
+
+        if args.json:
+            import json
+            print(json.dumps({
+                "total_raw": total_raw,
+                "total_classified": total_classified,
+                "unclassified": unclassified,
+                "label_counts": label_counts,
+                "error_sentinels": error_count,
+            }, indent=2))
+            return
+
+        scope = f" (source: {args.source_id})" if args.source_id else " (all sources)"
+        print(f"Privacy Filter Statistics{scope}")
+        print("=" * 42)
+        print(f"  Total raw documents:  {total_raw}")
+        print(f"  Classified:           {total_classified}")
+        print(f"  Unclassified:         {unclassified}")
+        if error_count:
+            print(f"  Error sentinels:      {error_count}  (needs_review, error=True in meta)")
+        print()
+
+        labels = [PrivacyFilter.LABEL_PUBLIC, PrivacyFilter.LABEL_NEEDS_REVIEW, PrivacyFilter.LABEL_PRIVATE]
+        for label in labels:
+            count = label_counts.get(label, 0)
+            pct = f"{count / total_classified * 100:.1f}%" if total_classified else "-"
+            print(f"  {label:<16} {count:>6}  ({pct})")
+
+        if not args.source_id and by_source:
+            # Pivot by source
+            from collections import defaultdict
+            src_data = defaultdict(dict)
+            for src, label, cnt in by_source:
+                src_data[src][label] = cnt
+
+            print()
+            print(f"  {'Source':<28}  {'public':>8}  {'needs_review':>12}  {'private':>8}  {'total':>6}")
+            print("  " + "-" * 68)
+            for src in sorted(src_data):
+                pub = src_data[src].get(PrivacyFilter.LABEL_PUBLIC, 0)
+                nr  = src_data[src].get(PrivacyFilter.LABEL_NEEDS_REVIEW, 0)
+                prv = src_data[src].get(PrivacyFilter.LABEL_PRIVATE, 0)
+                tot = pub + nr + prv
+                print(f"  {src:<28}  {pub:>8}  {nr:>12}  {prv:>8}  {tot:>6}")
+
+    except Exception as e:
+        print(f"Error: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+
+def cmd_export(args):
+    """Export documents from a source into a folder hierarchy."""
+    try:
+        from ..tools import export_source
+
+        print(f"Exporting source_id: {args.source_id} → {args.output_dir}")
+        if args.include_private:
+            print(f"  Including private documents (→ {args.private_subdir}/)")
+        if args.include_needs_review:
+            print(f"  Including needs_review documents (→ {args.needs_review_subdir}/)")
+        if args.parser_name:
+            print(f"  Preferred parser for summaries: {args.parser_name}")
+
+        result = export_source(
+            source_id=args.source_id,
+            output_dir=args.output_dir,
+            parser_name=args.parser_name or "marker",
+            include_private=args.include_private,
+            include_needs_review=args.include_needs_review,
+            private_subdir=args.private_subdir,
+            needs_review_subdir=args.needs_review_subdir,
+        )
+
+        total = result['exported_public'] + result['exported_needs_review'] + result['exported_private']
+        print(f"\n  Completed ({total} document(s) exported):")
+        print(f"  Public:             {result['exported_public']}")
+        print(f"  Needs review:       {result['exported_needs_review']}"
+              + (" (exported)" if args.include_needs_review else " (skipped)"))
+        print(f"  Private:            {result['exported_private']}"
+              + (" (exported)" if args.include_private else " (skipped)"))
+        if result['errors'] > 0:
+            print(f"  Errors:             {result['errors']}")
+    except Exception as e:
+        print(f"Error: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+
 def cmd_extract_all(args):
     """Extract knowledge graph relations from all documents matching filters."""
     from ..graph import extract_all
@@ -953,6 +1204,104 @@ def setup_commands(subparsers):
         help="Commit to DB every N successfully summarized documents (default: 10)"
     )
     summarize_all_parser.set_defaults(func=cmd_summarize_all)
+
+    filter_all_parser = tools_subparsers.add_parser(
+        "filter-all",
+        help="Run the LLM privacy filter over all unclassified raw documents"
+    )
+    filter_all_parser.add_argument(
+        "--source-id",
+        help="Only process documents from this source (default: all sources)"
+    )
+    filter_all_parser.add_argument(
+        "--parser-name",
+        default="marker",
+        help="Parser whose text to use for classification (default: marker)"
+    )
+    filter_all_parser.add_argument(
+        "--model",
+        help="LLM model for classification (overrides PRIVACY_FILTER_MODEL env var)"
+    )
+    filter_all_parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=10,
+        help="Documents per batch; each batch is locked so parallel workers don't overlap (default: 10)"
+    )
+    filter_all_parser.add_argument(
+        "--limit", "-N",
+        type=int,
+        metavar="N",
+        help="Stop after processing N documents total (useful for testing)"
+    )
+    filter_all_parser.add_argument(
+        "--delay",
+        type=float,
+        default=0.0,
+        metavar="SECONDS",
+        help="Seconds to sleep between batches to avoid rate limits (default: 0)"
+    )
+    filter_all_parser.set_defaults(func=cmd_filter_all)
+
+    filter_list_parser = tools_subparsers.add_parser(
+        "filter-list",
+        help="List documents by privacy label"
+    )
+    label_group = filter_list_parser.add_mutually_exclusive_group()
+    label_group.add_argument("--public", action="store_true", help="List public documents (default)")
+    label_group.add_argument("--review", action="store_true", help="List needs_review documents")
+    label_group.add_argument("--private", action="store_true", help="List private documents")
+    filter_list_parser.add_argument("--source-id", help="Filter to a single source")
+    filter_list_parser.add_argument("--limit", type=int, help="Maximum number of results")
+    filter_list_parser.add_argument("--json", action="store_true", help="Output as JSON")
+    filter_list_parser.set_defaults(func=cmd_filter_list)
+
+    filter_stats_parser = tools_subparsers.add_parser(
+        "filter-stats",
+        help="Show privacy filter classification statistics"
+    )
+    filter_stats_parser.add_argument(
+        "--source-id",
+        help="Filter stats to a single source (default: all sources)"
+    )
+    filter_stats_parser.add_argument(
+        "--json", action="store_true",
+        help="Output as JSON"
+    )
+    filter_stats_parser.set_defaults(func=cmd_filter_stats)
+
+    export_parser = tools_subparsers.add_parser(
+        "export",
+        help="Export documents from a source into a folder hierarchy"
+    )
+    export_parser.add_argument("source_id", help="Source identifier to export")
+    export_parser.add_argument("output_dir", help="Root output directory (created if missing)")
+    export_parser.add_argument(
+        "--parser-name",
+        default="marker",
+        help="Preferred parser for summary/gist/title text (default: marker)"
+    )
+    export_parser.add_argument(
+        "--include-private",
+        action="store_true",
+        help="Also export private documents into a separate subfolder"
+    )
+    export_parser.add_argument(
+        "--include-needs-review",
+        action="store_true",
+        help="Also export needs_review documents into a separate subfolder"
+    )
+    export_parser.add_argument(
+        "--private-subdir",
+        default="private",
+        help="Subfolder name for private documents (default: private)"
+    )
+    export_parser.add_argument(
+        "--needs-review-subdir",
+        default="needs_review",
+        help="Subfolder name for needs_review documents (default: needs_review)"
+    )
+    export_parser.set_defaults(func=cmd_export)
 
     count_tokens_parser = tools_subparsers.add_parser(
         "count-tokens",

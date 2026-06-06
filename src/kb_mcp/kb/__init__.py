@@ -1,10 +1,10 @@
 """Knowledge base module for document storage and retrieval."""
 
 from .documents import add_document, add_source, get, get_count, delete_document
-from .db_models import Document, Source
+from .db_models import Document, Source, PrivacyFilter
 from .database import get_db_session, get_db_session_ephemeral, init_db
 from .utils import list_sources, get_metadata_keys
-from .tools import ingest, parse_all, chunk_and_embed_all, image_chunk_and_embed_all, embed_all
+from .tools import ingest, parse_all, chunk_and_embed_all, image_chunk_and_embed_all, embed_all, filter_all, export_source
 
 # Internal imports (not exported in __all__ but available for internal use)
 from .documents import add_parsed, add_parsed_many, get_or_create_parser, get_or_create_raw_document, insert_raw_document, get_options, get_children  # noqa: F401
@@ -46,6 +46,13 @@ __all__ = [
     "Source",
     "Chunk",
     "EmbeddingConfig",
+    "PrivacyFilter",
+
+    # Privacy filtering
+    "filter_all",
+
+    # Export
+    "export_source",
 
     # Statistics
     "get_statistics",

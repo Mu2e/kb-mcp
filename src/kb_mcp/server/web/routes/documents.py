@@ -2175,6 +2175,24 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
                     for s in siblings
                 ]
 
+                # Privacy filter — fetch most recent result if present
+                from ....kb.db_models import PrivacyFilter as PrivacyFilterModel
+                pf_row = (
+                    session.query(PrivacyFilterModel)
+                    .filter(PrivacyFilterModel.raw_document_id == raw_doc_id)
+                    .order_by(PrivacyFilterModel.created_time.desc())
+                    .first()
+                )
+                privacy_data = (
+                    {
+                        "label": pf_row.label,
+                        "reasoning": pf_row.reasoning,
+                        "model": pf_row.model,
+                        "created_time": str(pf_row.created_time)[:19] if pf_row.created_time else "",
+                    }
+                    if pf_row else None
+                )
+
             # Fetch comparison and source-level categories (both return plain dicts)
             comparison = get_comparison(raw_doc_id)
             categories = get_latest_categories(rdoc_source_id) if rdoc_source_id else None
@@ -2209,6 +2227,37 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
     </table>
     <h3 style="margin-top: 20px; margin-bottom: 10px;">All Documents from this Raw File ({len(sibling_data)})</h3>
     <ul>{siblings_rows}</ul>
+</div>"""
+
+            # --- Privacy card ---
+            _LABEL_COLORS = {
+                "public": ("#d4edda", "#155724", "Public"),
+                "needs_review": ("#fff3cd", "#856404", "Needs Review"),
+                "private": ("#f8d7da", "#721c24", "Private"),
+            }
+            if privacy_data:
+                bg, fg, label_text = _LABEL_COLORS.get(
+                    privacy_data["label"], ("#f0f0f0", "#333", privacy_data["label"])
+                )
+                reasoning_html = (
+                    f'<p style="margin: 10px 0 0 0; color: #444; line-height: 1.5;">'
+                    f'{html_escape(privacy_data["reasoning"])}</p>'
+                    if privacy_data.get("reasoning") else ""
+                )
+                privacy_card = f"""
+<div class="card">
+    <h2>Privacy Classification</h2>
+    <div style="display: inline-block; padding: 6px 14px; border-radius: 4px; background: {bg}; color: {fg}; font-weight: bold; font-size: 1.05em;">{html_escape(label_text)}</div>
+    {reasoning_html}
+    <p style="margin: 10px 0 0 0; font-size: 0.85em; color: #999;">
+        Model: {html_escape(privacy_data.get("model") or "N/A")} &nbsp;·&nbsp; Run at: {html_escape(privacy_data.get("created_time") or "N/A")}
+    </p>
+</div>"""
+            else:
+                privacy_card = f"""
+<div class="card">
+    <h2>Privacy Classification</h2>
+    <p style="color: #999;">Not yet classified. Run <code>kb tools filter-all --source-id {html_escape(rdoc_source_id or "")}</code> to classify.</p>
 </div>"""
 
             if comparison:
@@ -2274,6 +2323,7 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
             content = f"""
 <p><a href="/web">← Back to Document List</a></p>
 {info_card}
+{privacy_card}
 {comparison_card}
 {categories_card}
 """
