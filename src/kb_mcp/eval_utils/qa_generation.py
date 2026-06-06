@@ -40,7 +40,7 @@ def generate_qa_pairs_keypoint(
         eval_config = get_eval_config()
         model = eval_config['gen_model']
 
-    client = get_openai_client()
+    client = get_openai_client(model)
 
     # Truncate text if too long
     max_input_chars = 32000  # ~8k tokens
@@ -176,7 +176,7 @@ def generate_qa_pairs_persona(
     if personas is None:
         personas = ['early_career', 'established_worker', 'experienced_professional']
 
-    client = get_openai_client()
+    client = get_openai_client(model)
 
     # Truncate text if too long
     max_input_chars = 32000

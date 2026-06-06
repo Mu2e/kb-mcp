@@ -98,6 +98,10 @@ def _parse_elasticsearch_filter(
                 raise ValueError("term query must have exactly one field")
 
             field, value = next(iter(term_query.items()))
+            # Check if this is a direct Document column vs metadata field
+            direct_columns = {"insert_time", "creating_time", "update_time", "source_id", "doc_type", "doc_id"}
+            if field in direct_columns:
+                return getattr(doc_alias, field) == value
             return build_meta_filter(field, value, operator="==")
 
         # Handle terms query: match any value (OR)
@@ -110,8 +114,14 @@ def _parse_elasticsearch_filter(
             if not isinstance(values, list):
                 raise ValueError("terms query value must be a list")
 
-            # Create OR condition for multiple values
-            conditions = [build_meta_filter(field, value, operator="==") for value in values]
+            # Check if this is a direct Document column vs metadata field
+            direct_columns = {"insert_time", "creating_time", "update_time", "source_id", "doc_type", "doc_id"}
+            if field in direct_columns:
+                # Create OR condition for direct column
+                conditions = [getattr(doc_alias, field) == value for value in values]
+            else:
+                # Create OR condition for metadata field
+                conditions = [build_meta_filter(field, value, operator="==") for value in values]
             return or_(*conditions) if len(conditions) > 1 else conditions[0]
 
         # Handle range query
@@ -124,9 +134,9 @@ def _parse_elasticsearch_filter(
             if not isinstance(range_params, dict):
                 raise ValueError("range parameters must be a dictionary")
 
-            # Check if this is a direct Document column (insert_time, creating_time, update_time)
+            # Check if this is a direct Document column (insert_time, creating_time, update_time, source_id, doc_type, doc_id)
             # vs a metadata field
-            direct_columns = {"insert_time", "creating_time", "update_time"}
+            direct_columns = {"insert_time", "creating_time", "update_time", "source_id", "doc_type", "doc_id"}
             is_direct_column = field in direct_columns
 
             conditions = []
@@ -373,13 +383,26 @@ def get_filters_pgvector(
         else:
             param_values = list(compiled.params) if compiled.params else []
 
-        # Replace each %s with a named parameter
+        # Replace each %s with a named parameter in PostgreSQL format
         for value in param_values:
             param_name = f"filter_{counter}"
             params[param_name] = str(value) if value is not None else None
-            # Replace first occurrence of %s
-            sql = sql.replace('%s', f':{param_name}', 1)
+            # Replace first occurrence of %s with PostgreSQL-style named parameter
+            sql = sql.replace('%s', f'%({param_name})s', 1)
             counter += 1
+
+    # Also convert any :param style parameters (from direct columns) to %(param)s style
+    import re
+    # Find all :param_name patterns and convert to %(param_name)s
+    def convert_param(match):
+        param_name = match.group(1)
+        # If this param is in compiled.params, add it to our params dict
+        if hasattr(compiled, 'params') and isinstance(compiled.params, dict):
+            if param_name in compiled.params:
+                params[param_name] = compiled.params[param_name]
+        return f'%({param_name})s'
+
+    sql = re.sub(r':([a-zA-Z_][a-zA-Z0-9_]*)', convert_param, sql)
 
     return sql, params
 

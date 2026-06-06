@@ -320,9 +320,9 @@ def cmd_deduplicate(args):
         count = 0
         for keep_id, by_id_dups, _ in duplicates:
             if by_id_dups:
-                keep_doc = get(uuid=keep_id)
+                keep_doc = get(uid=keep_id)
                 for dup_id in by_id_dups[:10 - count]:  # Show up to 10 total
-                    dup_doc = get(uuid=dup_id)
+                    dup_doc = get(uid=dup_id)
                     if keep_doc and dup_doc:
                         print(f"    • Keep: {keep_id[:8]}... ({keep_doc.source_id}/{keep_doc.doc_id})")
                         print(f"      Duplicate: {dup_id[:8]}... ({dup_doc.source_id}/{dup_doc.doc_id})")
@@ -339,9 +339,9 @@ def cmd_deduplicate(args):
         count = 0
         for keep_id, _, by_hash_dups in duplicates:
             if by_hash_dups:
-                keep_doc = get(uuid=keep_id)
+                keep_doc = get(uid=keep_id)
                 for dup_id in by_hash_dups[:10 - count]:  # Show up to 10 total
-                    dup_doc = get(uuid=dup_id)
+                    dup_doc = get(uid=dup_id)
                     if keep_doc and dup_doc:
                         hash_preview = keep_doc.content_hash[:16] if keep_doc.content_hash else 'N/A'
                         print(f"    • Keep: {keep_id[:8]}... (hash: {hash_preview}...)")

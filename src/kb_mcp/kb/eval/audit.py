@@ -117,14 +117,14 @@ def audit_question(
         # Get source document if available
         source_document = None
         if question.source_document_id:
-            source_document = get(uuid=question.source_document_id, session=session)
+            source_document = get(uid=question.source_document_id, session=session)
 
         # Get model
         if model is None:
             eval_config = get_eval_config()
             model = eval_config['gen_model']
 
-        client = get_openai_client()
+        client = get_openai_client(model)
 
         # Build audit prompt
         prompt_template = """Evaluate the following evaluation question for quality:

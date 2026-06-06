@@ -67,7 +67,7 @@ def generate_questions_from_documents(
 
         for doc_id in doc_iterator:
             # Get document
-            doc = get(uuid=doc_id, session=session)
+            doc = get(uid=doc_id, session=session)
             if not doc:
                 doc_iterator.set_postfix_str("Document not found", refresh=False)
                 logger.warning(f"Document not found: {doc_id}")
@@ -155,7 +155,7 @@ def generate_questions_from_documents(
             source_ids = set()
             for q in all_questions:
                 if q.source_document_id:
-                    doc = get(uuid=q.source_document_id, session=session)
+                    doc = get(uid=q.source_document_id, session=session)
                     if doc:
                         source_ids.add(doc.source_id)
 

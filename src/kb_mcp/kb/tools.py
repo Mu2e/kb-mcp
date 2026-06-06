@@ -352,6 +352,12 @@ def parse_all(
                     parsed += 1
                     logger.debug(f"Successfully parsed {result['num_documents']} document(s) from {raw_doc.file_path}")
 
+                except FileNotFoundError as e:
+                    # For marker-preloaded, this means Marker output doesn't exist
+                    # Skip this document and don't retry
+                    skipped += 1
+                    logger.debug(f"Skipping raw document {raw_doc.id}: {e}")
+                    continue
                 except Exception as e:
                     errors += 1
                     logger.error(f"Error parsing raw document {raw_doc.id}: {e}", exc_info=True)
