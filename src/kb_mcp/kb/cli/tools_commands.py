@@ -426,30 +426,68 @@ def cmd_get_raw(args):
 
 
 def cmd_drop_raw(args):
-    """Delete a raw document."""
+    """Delete raw document(s) by ID or source_id."""
+    from ..db_models import RawDocument
+    from ..database import get_db_session
+
+    source_id = getattr(args, "source_id", None)
+    raw_document_id = getattr(args, "raw_document_id", None)
+
+    if not source_id and not raw_document_id:
+        print("Error: provide either a raw_document_id or --source-id")
+        sys.exit(1)
+
     try:
-        # Get confirmation unless --yes is specified
-        if not args.yes:
-            message = f"Delete raw document {args.raw_document_id}?"
-            if args.delete_linked:
-                message += " (This will also delete all linked documents and their chunks/embeddings)"
-            message += " [y/N]: "
-            confirmation = input(message)
-            if confirmation.lower() not in ['y', 'yes']:
-                print("Cancelled.")
+        if source_id:
+            # Bulk delete by source_id
+            with get_db_session() as session:
+                raw_docs = session.query(RawDocument).filter(
+                    RawDocument.source_id == source_id
+                ).all()
+
+            if not raw_docs:
+                print(f"No raw documents found for source_id '{source_id}'")
                 return
 
-        result = delete_raw_document(args.raw_document_id, delete_linked_documents=args.delete_linked)
+            if not args.yes:
+                linked_note = " and all linked documents/chunks/embeddings" if args.delete_linked else ""
+                confirmation = input(
+                    f"Delete {len(raw_docs)} raw document(s) for source '{source_id}'{linked_note}? [y/N]: "
+                )
+                if confirmation.lower() not in ['y', 'yes']:
+                    print("Cancelled.")
+                    return
 
-        print(f" Deleted raw document {args.raw_document_id}")
-        if args.delete_linked:
-            if result.get("deleted_documents", 0) > 0:
-                print(f"  (Also deleted {result['deleted_documents']} linked document(s) and their chunks/embeddings)")
-            elif result.get("document_count", 0) == 0:
-                print(f"  (No linked documents found)")
+            total_deleted_docs = 0
+            for raw_doc in raw_docs:
+                result = delete_raw_document(raw_doc.id, delete_linked_documents=args.delete_linked)
+                total_deleted_docs += result.get("deleted_documents", 0)
+
+            print(f"Deleted {len(raw_docs)} raw document(s) for source '{source_id}'")
+            if args.delete_linked and total_deleted_docs > 0:
+                print(f"  (Also deleted {total_deleted_docs} linked document(s) and their chunks/embeddings)")
+
         else:
-            if result.get("document_count", 0) > 0:
-                print(f"  (Set raw_document_id to NULL in {result['document_count']} related document(s))")
+            # Single delete by UUID
+            if not args.yes:
+                message = f"Delete raw document {raw_document_id}?"
+                if args.delete_linked:
+                    message += " (This will also delete all linked documents and their chunks/embeddings)"
+                message += " [y/N]: "
+                confirmation = input(message)
+                if confirmation.lower() not in ['y', 'yes']:
+                    print("Cancelled.")
+                    return
+
+            result = delete_raw_document(raw_document_id, delete_linked_documents=args.delete_linked)
+            print(f"Deleted raw document {raw_document_id}")
+            if args.delete_linked:
+                if result.get("deleted_documents", 0) > 0:
+                    print(f"  (Also deleted {result['deleted_documents']} linked document(s) and their chunks/embeddings)")
+            else:
+                if result.get("document_count", 0) > 0:
+                    print(f"  (Set raw_document_id to NULL in {result['document_count']} related document(s))")
+
     except ValueError as e:
         print(f"Error: {e}")
         sys.exit(1)
@@ -674,8 +712,9 @@ def setup_commands(subparsers):
     get_raw_parser.add_argument("document_id", help="Document ID (UUID)")
     get_raw_parser.set_defaults(func=cmd_get_raw)
 
-    drop_raw_parser = tools_subparsers.add_parser("drop-raw", help="Delete a raw document by ID")
-    drop_raw_parser.add_argument("raw_document_id", help="Raw document ID (UUID)")
+    drop_raw_parser = tools_subparsers.add_parser("drop-raw", help="Delete raw document(s) by ID or source")
+    drop_raw_parser.add_argument("raw_document_id", nargs="?", help="Raw document ID (UUID)")
+    drop_raw_parser.add_argument("--source-id", help="Delete all raw documents for this source_id")
     drop_raw_parser.add_argument("--yes", action="store_true", help="Skip confirmation prompt")
     drop_raw_parser.add_argument(
         "--delete-linked",

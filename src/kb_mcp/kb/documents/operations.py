@@ -654,6 +654,8 @@ def add_document(
             "source_id": source_id,
             "doc_id": doc_id,
         }
+        if uri:
+            parse_data["uri"] = uri
         if meta:
             parse_data["meta"] = meta
 
