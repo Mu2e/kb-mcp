@@ -30,6 +30,7 @@ def cmd_eval_generate(args):
                 num_questions_per_doc=num_questions,
                 generation_method=args.strategy,
                 model=args.model,
+                name=args.name,
             )
         else:
             # For document-specific generation, we'd need document_ids
@@ -78,18 +79,31 @@ def cmd_eval_audit(args):
             # Automated LLM auditing
             print("Running automated LLM audit...\n")
             from tqdm import tqdm
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            import threading
 
-            for question in tqdm(questions, desc="Auditing questions", unit="question"):
-                try:
-                    audit = audit_question(
-                        question_id=question.id,
-                        model=args.model,
-                    )
-                    status = "✓ Valid" if audit.is_valid else "✗ Invalid"
-                    print(f"{status}: {question.id[:8]}... - {audit.comments[:80] if audit.comments else 'No comments'}")
-                except Exception as e:
-                    print(f"Error auditing {question.id}: {e}")
-                    continue
+            workers = getattr(args, "workers", 1)
+            print_lock = threading.Lock()
+
+            def _audit(question):
+                return question, audit_question(question_id=question.id, model=args.model)
+
+            with tqdm(total=len(questions), desc="Auditing questions", unit="question") as pbar:
+                with ThreadPoolExecutor(max_workers=workers) as executor:
+                    futures = {executor.submit(_audit, q): q for q in questions}
+                    for future in as_completed(futures):
+                        try:
+                            question, audit = future.result()
+                            status = "✓ Valid" if audit.is_valid else "✗ Invalid"
+                            with print_lock:
+                                tqdm.write(f"{status}: {question.id[:8]}... - {audit.comments[:80] if audit.comments else 'No comments'}")
+                        except Exception as e:
+                            q = futures[future]
+                            with print_lock:
+                                tqdm.write(f"Error auditing {q.id}: {e}")
+                        finally:
+                            pbar.update(1)
+
             print(f"\nCompleted auditing {len(questions)} questions")
         else:
             # Interactive human auditing
@@ -152,6 +166,8 @@ def cmd_eval_run(args):
         search_filters = {}
         if args.search_source_id:
             search_filters["source_id"] = args.search_source_id
+        if args.search_parser_name:
+            search_filters["parser_id"] = args.search_parser_name
 
         # Build judge strategy
         judge_strategy = None
@@ -166,12 +182,15 @@ def cmd_eval_run(args):
             description=args.description,
             generation_id=args.generation_id,
             audit_filters=audit_filters or None,
+            search_type=args.search_type,
             embedding_name=args.embedding_name,
             chunking_strategy=args.chunking_strategy,
             max_results=args.max_results,
             search_filters=search_filters or None,
+            answer_model=args.answer_model,
             judge_strategy=judge_strategy,
             use_llm_judge=args.use_judge,
+            workers=args.workers,
         )
 
         print(f"Evaluation complete!")
@@ -200,16 +219,27 @@ def cmd_eval_stats(args):
         )
 
         print(f"Evaluation Statistics for Run: {stats['run_id']}")
-        print(f"  Total questions: {stats['total_questions']}")
-        print(f"  Hits: {stats['hits']}")
-        print(f"  Misses: {stats['misses']}")
-        print(f"  Hit rate: {stats['hit_rate']:.2%}")
 
-        if stats['rank_distribution']:
-            print(f"\n  Rank distribution:")
-            for rank in sorted(stats['rank_distribution'].keys()):
-                count = stats['rank_distribution'][rank]
-                print(f"    Rank {rank}: {count}")
+        if stats['total_questions'] > 0:
+            print(f"\n  Retrieval stats:")
+            print(f"    Total questions: {stats['total_questions']}")
+            print(f"    Hits: {stats['hits']}")
+            print(f"    Misses: {stats['misses']}")
+            print(f"    Hit rate: {stats['hit_rate']:.2%}")
+            if stats['rank_distribution']:
+                print(f"    Rank distribution:")
+                for rank in sorted(stats['rank_distribution'].keys()):
+                    print(f"      Rank {rank}: {stats['rank_distribution'][rank]}")
+
+        if "judge_total_questions" in stats:
+            print(f"\n  Judge stats:")
+            print(f"    Total questions: {stats['judge_total_questions']}")
+            print(f"    Hits: {stats['judge_hits']}")
+            print(f"    Misses: {stats['judge_misses']}")
+            print(f"    Hit rate: {stats['judge_hit_rate']:.2%}")
+
+        if stats['total_questions'] == 0 and "judge_total_questions" not in stats:
+            print("  No results found for this run.")
 
     except Exception as e:
         print(f"Error getting stats: {e}")
@@ -298,9 +328,10 @@ def setup_commands(subparsers):
 
     # eval generate
     eval_generate_parser = eval_subparsers.add_parser("generate", help="Generate evaluation questions from documents")
+    eval_generate_parser.add_argument("--name", help="Optional name for this generation run")
     eval_generate_parser.add_argument("--num-questions", type=int, default=1, help="Number of questions to generate per document (default: 1)")
     eval_generate_parser.add_argument("--num-documents", type=int, default=10, help="Number of documents to process (default: 10, use --num-documents 0 for all)")
-    eval_generate_parser.add_argument("--strategy", default="keypoint", choices=["keypoint", "persona"], help="Question generation strategy")
+    eval_generate_parser.add_argument("--strategy", default="keypoint", choices=["keypoint", "persona", "agentic"], help="Question generation strategy")
     eval_generate_parser.add_argument("--model", help="LLM model to use for generation")
     eval_generate_parser.add_argument("--source-id", help="Filter to specific source")
     eval_generate_parser.add_argument("--doc-id", help="Filter to specific document")
@@ -313,12 +344,14 @@ def setup_commands(subparsers):
     eval_audit_parser.add_argument("--limit", type=int, default=20, help="Max questions to audit")
     eval_audit_parser.add_argument("--llm", action="store_true", help="Use LLM for automated auditing instead of interactive")
     eval_audit_parser.add_argument("--model", help="LLM model to use for auditing (if --llm)")
+    eval_audit_parser.add_argument("--workers", type=int, default=1, metavar="N", help="Number of parallel LLM audit calls (default: 1, only applies with --llm)")
     eval_audit_parser.set_defaults(func=cmd_eval_audit)
 
     # eval run
     eval_run_parser = eval_subparsers.add_parser("run", help="Run an evaluation")
     eval_run_parser.add_argument("--name", help="Name for this run")
     eval_run_parser.add_argument("--description", help="Description for this run")
+    eval_run_parser.add_argument("--search-type", default="semantic", choices=["semantic", "fulltext", "hybrid", "rag", "agentic", "llm_only"], help="Search/answer mode (default: semantic)")
     eval_run_parser.add_argument("--generation-id", help="Filter to questions from specific generation")
     eval_run_parser.add_argument("--include-invalid", action="store_true", help="Include questions marked as invalid")
     eval_run_parser.add_argument("--audit-type", help="Filter by audit type (e.g., 'llm_judge', 'human_review')")
@@ -326,8 +359,11 @@ def setup_commands(subparsers):
     eval_run_parser.add_argument("--chunking-strategy", help="Chunking strategy to use for search (e.g., 'summary', 'tokens', 'tokens_1000_200')")
     eval_run_parser.add_argument("--max-results", type=int, default=10, help="Max search results to retrieve")
     eval_run_parser.add_argument("--search-source-id", help="Filter search to specific source")
+    eval_run_parser.add_argument("--search-parser-name", help="Filter search to specific parser (e.g., 'marker', 'docling')")
     eval_run_parser.add_argument("--use-judge", action="store_true", help="Run LLM judge on results")
     eval_run_parser.add_argument("--judge-model", help="LLM model for judge (if --use-judge)")
+    eval_run_parser.add_argument("--answer-model", help="LLM model for answer generation in rag/agentic/llm_only modes (default: EVAL_GEN_MODEL)")
+    eval_run_parser.add_argument("--workers", type=int, default=1, metavar="N", help="Number of parallel question evaluations (default: 1)")
     eval_run_parser.set_defaults(func=cmd_eval_run)
 
     # eval stats

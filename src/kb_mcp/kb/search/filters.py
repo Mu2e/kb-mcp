@@ -388,6 +388,7 @@ def build_where_clause(
     source_id: Optional[str] = None,
     doc_type: Optional[str] = None,
     chunking_strategy: Optional[str] = None,
+    parser_id: Optional[str] = None,
     filter: Optional[Dict[str, Any]] = None,
     skip_kwargs: Optional[Set[str]] = None,
     **kwargs
@@ -437,6 +438,11 @@ def build_where_clause(
     if doc_type:
         where_parts.append("d.doc_type = :doc_type")
         filter_params_dict["doc_type"] = doc_type
+
+    # Handle parser_id filter
+    if parser_id:
+        where_parts.append("d.parser_id = :parser_id")
+        filter_params_dict["parser_id"] = parser_id
 
     # Handle chunking_strategy filter
     if chunking_strategy:

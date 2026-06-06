@@ -185,21 +185,23 @@ def parse(
         text_extraction_start = time.time()
         image_dicts = []
 
-        if parser_name == "marker":
-            #if mime_type != "text/plain":
-            #if mime_type == "text/plain":
-            #    parser = get_parser(file_path, doc_type="text/plain")
-            #else:
-            if True:
-                # Marker-pdf implementation
-                if mime_type != "application/pdf":
-                    raise NotImplementedError(f"Marker parser only supports PDF, got {mime_type}")
-                
-                from .parser_marker import MarkerParser
-                parser = MarkerParser(file_path, mime_type)
+        _PDF_PARSERS = {
+            "marker": ("kb_mcp.parser.parser_marker", "MarkerParser"),
+            "docling": ("kb_mcp.parser.parser_docling", "DoclingParser"),
+            "nougat": ("kb_mcp.parser.parser_nougat", "NougatParser"),
+            "unstructured": ("kb_mcp.parser.parser_unstructured", "UnstructuredParser"),
+            "azure": ("kb_mcp.parser.parser_azure", "AzureParser"),
+        }
+
+        if parser_name in _PDF_PARSERS:
+            if mime_type != "application/pdf":
+                raise NotImplementedError(f"{parser_name} parser only supports PDF, got {mime_type}")
+            module_path, class_name = _PDF_PARSERS[parser_name]
+            import importlib
+            mod = importlib.import_module(module_path)
+            parser = getattr(mod, class_name)(file_path, mime_type)
         else:
             # Standard implementation
-            # Get appropriate parser
             parser = get_parser(file_path, doc_type=mime_type)
             
             
@@ -228,12 +230,17 @@ def parse(
             # Replace placeholders in main text with descriptions
             import re
             
-            # Map of image_name to its generated description
-            image_descriptions = {
-                img_dict["meta"].get("image_name"): img_dict["text"]
-                for img_dict in image_dicts
-                if "text" in img_dict and img_dict["text"] and img_dict["meta"].get("image_name")
-            }
+            # Map image_name to generated description and metadata.
+            image_descriptions = {}
+            image_meta_by_name = {}
+            for img_dict in image_dicts:
+                if "text" not in img_dict or not img_dict["text"]:
+                    continue
+                image_name = img_dict.get("meta", {}).get("image_name")
+                if not image_name:
+                    continue
+                image_descriptions[image_name] = img_dict["text"]
+                image_meta_by_name[image_name] = img_dict.get("meta", {})
 
             def replace_image_placeholder(match):
                 alt_text = match.group(1)
@@ -241,8 +248,15 @@ def parse(
                 
                 description = image_descriptions.get(image_name)
                 if description:
-                    # Update alt text with description
-                    return f"![{description}]({image_name})"
+                    image_meta = image_meta_by_name.get(image_name, {})
+                    image_number = image_meta.get("image_number")
+                    if image_number is not None:
+                        image_tag = f"[image_id:{image_name} image_num:{image_number}]"
+                    else:
+                        image_tag = f"[image_id:{image_name}]"
+
+                    # Keep a stable image tag in the text for traceability.
+                    return f"![{description}]({image_name}) {image_tag}"
                 
                 return match.group(0) # No change if no description
 
@@ -257,7 +271,15 @@ def parse(
                         description = img_dict["text"]
                         placeholder = f"[Image {img_number}]"
                         if placeholder in text:
-                            text = text.replace(placeholder, f"[{placeholder}: {description}]")
+                            image_name = img_dict.get("meta", {}).get("image_name")
+                            if image_name:
+                                tag = f"[image_id:{image_name} image_num:{img_number}]"
+                                text = text.replace(
+                                    placeholder,
+                                    f"[{placeholder}: {description}] {tag}"
+                                )
+                            else:
+                                text = text.replace(placeholder, f"[{placeholder}: {description}]")
         
         # Filter images if needed (placeholder for future filtering logic)
         # For now, keep all images that have binary data (i.e., are real image dicts)

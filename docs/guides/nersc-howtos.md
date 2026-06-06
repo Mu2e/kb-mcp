@@ -1,7 +1,19 @@
 # NERSC HOW TOs
 
+## Import Scanned PDFs from a Local Directory
+
+Register all PDFs under a directory (recursively) without parsing them.
+Metadata is derived from folder names and filenames.
+
+```bash
+kb-import local-pdf /path/to/scanned/docs --source-id sld-scanned
+```
+
+This only registers the files as `RawDocument`s (no text extraction yet).
+Then follow the steps below to parse them with Marker on GPU nodes.
+
 ## Parse Documents with Marker on GPU nodes
-These instructions are inteneed to re-parse all documents (that we already added with `kb-import`) with Marker parser. The marker parse needs GPUs (otherwise its painfully slow).
+These instructions are intended to re-parse all documents (that we already added with `kb-import`) with Marker parser. The marker parse needs GPUs (otherwise its painfully slow).
 
 Log in and run the default setup to make sure we have the database running.
 ```bash
@@ -18,7 +30,7 @@ On the node, default setup and activate special marker (can not be part of the `
 cd 
 source nersc_setup.sh
 . ./scripts/nersc_setup_marker.sh
-./scripts/run_on_4gpus.sh kb tools parse-all inspire-hep --extract-images --describe-images --parser-name marker
+./scripts/run_on_4gpus.sh kb tools parse-all sld-scanned --extract-images --describe-images --parser-name marker
 ```
 
 ## Extract graph relations 
@@ -34,6 +46,3 @@ Start the vLLM, this takes 5 to 10min to start up. The job duration defaults to 
 ```
 
 And run `n` jobs in parallel:
-```
-
-```

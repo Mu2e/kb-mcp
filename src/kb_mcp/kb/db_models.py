@@ -821,3 +821,174 @@ class Document(Base):
         
         # Use from_dict to create the document (reuses validation logic)
         return cls.from_dict(doc_data)
+
+
+class PrivacyFilter(Base):
+    """Table 'privacy_filters' storing LLM-based privacy classification results.
+
+    Each row is one privacy assessment for a raw document. The filter scans
+    the parsed text (from a specified parser, default marker) and classifies
+    it as 'public', 'needs_review', or 'private'.
+
+    Attributes:
+        id (str): Primary key (UUID).
+        raw_document_id (str): FK → documents_raw.id — the source file assessed.
+        document_id (str): FK → documents.id — the parsed document text was read from.
+        label (str): Classification result: 'public', 'needs_review', or 'private'.
+        reasoning (str): LLM explanation of why this label was assigned.
+        model (str): LLM model used for the assessment.
+        created_time (datetime): When this assessment was created.
+        meta (dict): Additional metadata (token counts, prompt, etc.).
+    """
+
+    __tablename__ = "privacy_filters"
+
+    LABEL_PUBLIC = "public"
+    LABEL_NEEDS_REVIEW = "needs_review"
+    LABEL_PRIVATE = "private"
+    VALID_LABELS = {LABEL_PUBLIC, LABEL_NEEDS_REVIEW, LABEL_PRIVATE}
+
+    id = Column(
+        String(36),
+        primary_key=True,
+        default=lambda: str(uuid.uuid4()),
+        index=True,
+    )
+    raw_document_id = Column(
+        String(36),
+        ForeignKey("documents_raw.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    document_id = Column(
+        String(36),
+        ForeignKey("documents.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    label = Column(String(32), nullable=False, index=True)
+    reasoning = Column(Text, nullable=True)
+    model = Column(String(256), nullable=True)
+    created_time = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=func.now(),
+        server_default=func.now(),
+    )
+    meta = Column(JSONB, nullable=True, default=dict)
+
+    raw_document = relationship("RawDocument")
+    document = relationship("Document")
+
+    def __repr__(self) -> str:
+        return f"<PrivacyFilter(id={self.id}, raw_document_id={self.raw_document_id}, label={self.label})>"
+
+
+class ParserComparison(Base):
+    """Table 'parser_comparisons' storing LLM-generated comparisons of parser outputs.
+
+    Each row compares the extracted text produced by different parsers for a single
+    raw document. Workflow:
+      - Pass 1 (compare run): free-text LLM analysis stored in `comparison`.
+      - Pass 2 (compare categorize): structured categories derived across many
+        comparisons stored in `categories`.
+
+    Attributes:
+        id (str): Primary key (UUID).
+        raw_document_id (str): FK → documents_raw.id — the source file compared.
+        document_ids (list): UUIDs of the Document rows that were compared.
+        parser_ids (list): Parser names that were compared (matches document_ids order).
+        comparison (str): Free-text LLM analysis from pass 1.
+        categories (dict): Structured categories / themes from pass 2 (nullable until run).
+        model (str): LLM model used for the comparison.
+        created_time (datetime): When the comparison was created.
+        meta (dict): Any additional metadata (e.g., token counts, prompt).
+    """
+
+    __tablename__ = "parser_comparisons"
+
+    id = Column(
+        String(36),
+        primary_key=True,
+        default=lambda: str(uuid.uuid4()),
+        index=True,
+    )
+    raw_document_id = Column(
+        String(36),
+        ForeignKey("documents_raw.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    document_ids = Column(JSONB, nullable=False, default=list)
+    parser_ids = Column(JSONB, nullable=False, default=list)
+    document_description = Column(Text, nullable=True)
+    comparison = Column(Text, nullable=True)
+    categories = Column(JSONB, nullable=True)
+    model = Column(String(256), nullable=True)
+    created_time = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=func.now(),
+        server_default=func.now(),
+    )
+    meta = Column(JSONB, nullable=True, default=dict)
+
+    raw_document = relationship("RawDocument")
+
+    def __repr__(self) -> str:
+        parsers = ", ".join(self.parser_ids or [])
+        return f"<ParserComparison(id={self.id}, raw_document_id={self.raw_document_id}, parsers=[{parsers}])>"
+
+
+class ParserCategories(Base):
+    """Table 'parser_categories' storing per-run LLM synthesis across many comparisons.
+
+    Each row is one `kb compare categorize` run. Multiple runs are kept so you can
+    compare syntheses, use different prompts, or focus on different dimensions.
+
+    Attributes:
+        id (str): Primary key (UUID).
+        source_id (str): FK → sources.id — the source this synthesis covers.
+        categories_text (str): Full LLM synthesis output.
+        model (str): LLM model used.
+        num_comparisons (int): Number of ParserComparison rows used as input.
+        comparison_ids (list): UUIDs of the ParserComparison rows used.
+        prompt (str): Full prompt sent to the LLM (for reproducibility).
+        prompt_extra (str): Optional extra instructions appended to the base prompt.
+        created_time (datetime): When this run was created.
+        meta (dict): Elapsed time, token counts, etc.
+    """
+
+    __tablename__ = "parser_categories"
+
+    id = Column(
+        String(36),
+        primary_key=True,
+        default=lambda: str(uuid.uuid4()),
+        index=True,
+    )
+    source_id = Column(
+        String(256),
+        ForeignKey("sources.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    title = Column(Text, nullable=True)
+    categories_text = Column(Text, nullable=True)
+    model = Column(String(256), nullable=True)
+    num_comparisons = Column(Integer, nullable=True)
+    comparison_ids = Column(JSONB, nullable=False, default=list)
+    prompt = Column(Text, nullable=True)
+    prompt_extra = Column(Text, nullable=True)
+    created_time = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=func.now(),
+        server_default=func.now(),
+    )
+    meta = Column(JSONB, nullable=True, default=dict)
+
+    source_ref = relationship("Source")
+
+    def __repr__(self) -> str:
+        return f"<ParserCategories(id={self.id}, source_id={self.source_id}, n={self.num_comparisons})>"

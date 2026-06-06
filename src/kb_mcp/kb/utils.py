@@ -24,25 +24,51 @@ def get_stats() -> Dict[str, Any]:
     with get_db_session() as session:
         # Count documents
         doc_count = session.query(Document).count()
-        
+
         # Count sources
         source_count = session.query(Source).count()
-        
-        # Count by source
+
         from sqlalchemy import func
+        # Count by source
         docs_by_source = (
             session.query(Document.source_id, func.count(Document.id))
             .group_by(Document.source_id)
             .all()
         )
-    
+
+        # Count raw documents
+        from .db_models import RawDocument
+        raw_count = session.query(RawDocument).count()
+        raw_by_source = (
+            session.query(RawDocument.source_id, func.count(RawDocument.id))
+            .group_by(RawDocument.source_id)
+            .all()
+        )
+
+        # Count by source + parser + doc_type (drives the unified table)
+        docs_by_source_parser_type = (
+            session.query(Document.source_id, Document.parser_id, Document.doc_type, func.count(Document.id))
+            .group_by(Document.source_id, Document.parser_id, Document.doc_type)
+            .order_by(Document.source_id, Document.parser_id, Document.doc_type)
+            .all()
+        )
+
     return {
         "total_documents": doc_count,
         "total_sources": source_count,
         "documents_by_source": [
             {"source_id": source_id, "count": count}
             for source_id, count in docs_by_source
-        ]
+        ],
+        "total_raw_documents": raw_count,
+        "raw_documents_by_source": [
+            {"source_id": source_id, "count": count}
+            for source_id, count in raw_by_source
+        ],
+        "documents_by_source_parser_type": [
+            {"source_id": source_id, "parser_id": parser_id or "unknown", "doc_type": doc_type or "unknown", "count": count}
+            for source_id, parser_id, doc_type, count in docs_by_source_parser_type
+        ],
     }
 
 
@@ -118,27 +144,30 @@ def find_all_duplicates(
         if docs_without_hash:
             session.commit()
         
-        # Find duplicates by (source_id, doc_id)
+        # Find duplicates by (source_id, doc_id, parser_id)
+        # parser_id is part of the identity key — same doc parsed by different parsers is intentional
         if by_id:
             id_duplicates = (
                 session.query(
                     Document.source_id,
                     Document.doc_id,
+                    Document.parser_id,
                     func.count(Document.id).label('count')
                 )
                 .filter(Document.source_id.isnot(None), Document.doc_id.isnot(None))
-                .group_by(Document.source_id, Document.doc_id)
+                .group_by(Document.source_id, Document.doc_id, Document.parser_id)
                 .having(func.count(Document.id) > 1)
                 .all()
             )
-            
-            for source_id, doc_id, count in id_duplicates:
-                # Get all documents with this source_id+doc_id
+
+            for source_id, doc_id, parser_id, count in id_duplicates:
+                # Get all documents with this source_id+doc_id+parser_id
                 docs = (
                     session.query(Document)
                     .filter(
                         Document.source_id == source_id,
-                        Document.doc_id == doc_id
+                        Document.doc_id == doc_id,
+                        Document.parser_id == parser_id,
                     )
                     .order_by(Document.insert_time)
                     .all()
@@ -150,24 +179,29 @@ def find_all_duplicates(
                     duplicate_groups[keep_id][0].extend(duplicate_ids)
                     processed_keep_ids.add(keep_id)
         
-        # Find duplicates by content_hash
+        # Find duplicates by (content_hash, parser_id)
+        # Same content from different parsers is intentional, not a duplicate
         if by_hash:
             hash_duplicates = (
                 session.query(
                     Document.content_hash,
+                    Document.parser_id,
                     func.count(Document.id).label('count')
                 )
                 .filter(Document.content_hash.isnot(None))
-                .group_by(Document.content_hash)
+                .group_by(Document.content_hash, Document.parser_id)
                 .having(func.count(Document.id) > 1)
                 .all()
             )
-            
-            for content_hash, count in hash_duplicates:
-                # Get all documents with this content_hash
+
+            for content_hash, parser_id, count in hash_duplicates:
+                # Get all documents with this content_hash + parser_id
                 docs = (
                     session.query(Document)
-                    .filter(Document.content_hash == content_hash)
+                    .filter(
+                        Document.content_hash == content_hash,
+                        Document.parser_id == parser_id,
+                    )
                     .order_by(Document.insert_time)
                     .all()
                 )
@@ -246,7 +280,7 @@ def get_metadata_keys(session=None, limit: int = 1000) -> List[str]:
 
 def deduplicate(
     by_hash: bool = True,
-    by_id: bool = False,
+    by_id: bool = True,
 ) -> Dict[str, Any]:
     """Deduplicate the entire database.
     

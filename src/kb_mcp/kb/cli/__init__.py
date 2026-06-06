@@ -38,6 +38,7 @@ class GroupedHelpFormatter(argparse.RawDescriptionHelpFormatter):
                 ("Knowledge Graph", ["graph"]),
                 ("Evaluation & Benchmarking", ["eval"]),
                 ("Tools & Statistics", ["tools", "stats", "logs"]),
+                ("Parser Comparison", ["compare"]),  # web: /web/compare
             ]
 
             for group_name, command_names in command_groups:
@@ -84,6 +85,7 @@ def main():
     from . import tools_commands
     from . import source_commands
     from . import graph_commands
+    from . import compare_commands
 
     # Set up commands from each module
     document_commands.setup_commands(subparsers)
@@ -93,6 +95,7 @@ def main():
     tools_commands.setup_commands(subparsers)
     source_commands.setup_commands(subparsers)
     graph_commands.setup_commands(subparsers)
+    compare_commands.setup_commands(subparsers)
 
     args = parser.parse_args()
 
@@ -143,7 +146,7 @@ def main():
                 parser.print_help()
                 sys.exit(1)
         elif args.command == "tools":
-            from .tools_commands import cmd_deduplicate, cmd_chunk_and_embed_all, cmd_summarize_all, cmd_list_tables, cmd_drop_table, cmd_get_raw, cmd_drop_raw, cmd_extract_all
+            from .tools_commands import cmd_deduplicate, cmd_chunk_and_embed_all, cmd_summarize_all, cmd_list_tables, cmd_drop_table, cmd_list_raw, cmd_get_raw, cmd_drop_raw, cmd_extract_all
             if args.tools_command == "deduplicate":
                 cmd_deduplicate(args)
             elif args.tools_command == "chunk-and-embed-all":
@@ -154,6 +157,8 @@ def main():
                 cmd_list_tables(args)
             elif args.tools_command == "drop-table":
                 cmd_drop_table(args)
+            elif args.tools_command == "list-raw":
+                cmd_list_raw(args)
             elif args.tools_command == "get-raw":
                 cmd_get_raw(args)
             elif args.tools_command == "drop-raw":
@@ -200,6 +205,23 @@ def main():
                 cmd_process_document(args)
             elif args.graph_command == "extract-all":
                 cmd_extract_all(args)
+            else:
+                parser.print_help()
+                sys.exit(1)
+        elif args.command == "compare":
+            from .compare_commands import cmd_compare_run, cmd_compare_categorize, cmd_compare_categories_list, cmd_compare_list, cmd_compare_get, cmd_compare_export
+            if args.compare_command == "run":
+                cmd_compare_run(args)
+            elif args.compare_command == "categorize":
+                cmd_compare_categorize(args)
+            elif args.compare_command == "categories-list":
+                cmd_compare_categories_list(args)
+            elif args.compare_command == "list":
+                cmd_compare_list(args)
+            elif args.compare_command == "get":
+                cmd_compare_get(args)
+            elif args.compare_command == "export":
+                cmd_compare_export(args)
             else:
                 parser.print_help()
                 sys.exit(1)

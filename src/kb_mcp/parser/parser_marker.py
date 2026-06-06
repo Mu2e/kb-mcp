@@ -82,6 +82,26 @@ class MarkerParser(BaseParser):
             # Parse document
             rendered = converter(str(self.file_path))
             text = rendered.markdown
+
+            # Track where each image is referenced in markdown text.
+            # This enables downstream workflows to map image documents back
+            # to approximate positions in the parent text.
+            image_reference_info = {}
+            image_tag_pattern = re.compile(r"!\[[^\]]*\]\(([^)]+)\)")
+            image_ref_counter = 0
+            for match in image_tag_pattern.finditer(text):
+                image_ref_counter += 1
+                image_ref_name = Path(match.group(1)).name
+
+                ref_info = image_reference_info.get(image_ref_name)
+                if ref_info is None:
+                    image_reference_info[image_ref_name] = {
+                        "first_index": image_ref_counter,
+                        "first_char": match.start(),
+                        "all_positions": [match.start()],
+                    }
+                else:
+                    ref_info["all_positions"].append(match.start())
             
             image_dicts = []
             
@@ -115,6 +135,7 @@ class MarkerParser(BaseParser):
                         "parent_id": parent_data.get("id"),
                         "meta": {
                             "image_name": img_name,
+                            "parent_doc_id": parent_data.get("id", parent_data.get("doc_id")),
                             "parser": "marker",
                         }
                     }
@@ -132,6 +153,13 @@ class MarkerParser(BaseParser):
                     image_num_match = re.search(r'Figure_(\d+)', img_name)
                     if image_num_match:
                         img_dict["meta"]["image_number"] = int(image_num_match.group(1))
+
+                    # Add reference position metadata from markdown, if found.
+                    image_ref = image_reference_info.get(Path(img_name).name)
+                    if image_ref:
+                        img_dict["meta"]["image_ref_index"] = image_ref["first_index"]
+                        img_dict["meta"]["image_ref_char_start"] = image_ref["first_char"]
+                        img_dict["meta"]["image_ref_count"] = len(image_ref["all_positions"])
                     
                     image_dicts.append(img_dict)
                     

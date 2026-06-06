@@ -117,32 +117,45 @@ def audit_question(
         # Get source document if available
         source_document = None
         if question.source_document_id:
-            source_document = get(uuid=question.source_document_id, session=session)
+            source_document = get(uid=question.source_document_id, session=session)
 
         # Get model
         if model is None:
             eval_config = get_eval_config()
             model = eval_config['gen_model']
 
-        client = get_openai_client()
+        client = get_openai_client(model)
 
         # Build audit prompt
-        prompt_template = """Evaluate the following evaluation question for quality:
+        prompt_template = """Evaluate the following evaluation question for use in a knowledge base retrieval benchmark for high-energy physics experiments.
 
 Question: {question}
 {source_context}
 
-Assess whether this question is:
-1. Clear and unambiguous
-2. Answerable from the provided document (if available)
-3. Well-formed and grammatically correct
-4. Specific enough to have a definite answer
-5. Not too broad or vague
+A good evaluation question must satisfy ALL of the following criteria:
+
+1. **Self-contained**: The question makes sense without reading the source document. It must not rely on implicit context like "the dewar", "the module", "Table 3", "the klystron mentioned above", or "the device described earlier". A reader with general HEP knowledge should understand what is being asked.
+
+2. **Externally motivated**: This is a question someone working on or studying the experiment would plausibly ask from the outside — about physics, detector design, computing systems, experimental methods, or engineering choices. It is NOT a reading-comprehension quiz on one specific document.
+
+3. **Answerable from the knowledge base**: The answer should be findable in technical documents about the experiment (detector notes, technical reports, proceedings). It should have a specific, factual answer.
+
+4. **Well-formed**: Clear, grammatically correct, and specific enough to have a definite answer.
+
+Examples of GOOD questions:
+- "What gas mixture is used in the Mu2e straw tracker?"
+- "What is the readout scheme for the BaBar electromagnetic calorimeter?"
+- "What clock frequency does the ATLAS Level-1 trigger operate at?"
+
+Examples of BAD questions (fail self-containedness):
+- "What is the maximum voltage of the forty feedthroughs in the dewar?" (assumes knowledge of which dewar)
+- "What range of insertion trials is shown in Table 3?" (pure document reference)
+- "What material is used for the component described in section 2.3?" (document-internal reference)
 
 Respond with ONLY a valid JSON object:
 {{
   "is_valid": true or false,
-  "comments": "Brief explanation of your decision"
+  "comments": "Brief explanation. If invalid, state which criterion fails and why."
 }}"""
 
         # Add source context if available
@@ -167,7 +180,7 @@ Respond with ONLY a valid JSON object:
             messages=[
                 {
                     "role": "system",
-                    "content": "You are a helpful assistant that evaluates question quality for knowledge base evaluation. Always respond with valid JSON."
+                    "content": "You are an expert evaluator for high-energy physics knowledge base benchmarks. Your job is to assess whether questions are suitable for retrieval evaluation — they must be self-contained, externally motivated, and not rely on implicit document context. Always respond with valid JSON."
                 },
                 {
                     "role": "user",
@@ -179,7 +192,16 @@ Respond with ONLY a valid JSON object:
 
         # Parse response
         content = response.choices[0].message.content.strip()
-        result = json.loads(content)
+        try:
+            result = json.loads(content)
+        except json.JSONDecodeError:
+            # Strip markdown code fences if present and retry
+            cleaned = content.strip("`").removeprefix("json").strip()
+            try:
+                result = json.loads(cleaned)
+            except json.JSONDecodeError as e:
+                logger.error(f"Failed to parse audit JSON for question {question_id}: {e}\nContent: {content}")
+                result = {"is_valid": False, "comments": f"Audit failed: malformed LLM response"}
 
         is_valid = result.get("is_valid", False)
         comments = result.get("comments", "")
@@ -209,9 +231,8 @@ Respond with ONLY a valid JSON object:
 
         # Refresh and expunge if we own the session (to prevent DetachedInstanceError)
         if should_close:
-            session.flush()
+            session.commit()
             session.refresh(audit)
-            
 
         logger.info(f"LLM audit for question {question_id}: valid={is_valid} (model: {model})")
         return audit

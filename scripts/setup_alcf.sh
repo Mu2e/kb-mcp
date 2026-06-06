@@ -14,7 +14,7 @@ Options:
     --env FILE      Path to the user-specific .env file (default: .env.local)
     --cluster NAME  Cluster name: 'sophia' or 'metis' (default: sophia)
     --list-models   Skip setup and only list available models for the cluster
-    -h, --help      Show this help message and exit
+    -h, --help      Show this help message and return
 
 Description:
     This script checks if we have an active ALCF token and updates a user-specific
@@ -62,13 +62,13 @@ LIST_MODELS=false
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --env)      [[ -z "$2" ]] && { echo "Error: --env requires a value"; show_help; exit 1; }
+        --env)      [[ -z "$2" ]] && { echo "Error: --env requires a value"; show_help; return 1; }
                     ENV_FILE="$2"; shift 2 ;;
-        --cluster)  [[ -z "$2" ]] && { echo "Error: --cluster requires a value"; show_help; exit 1; }
+        --cluster)  [[ -z "$2" ]] && { echo "Error: --cluster requires a value"; show_help; return 1; }
                     CLUSTER="$2"; shift 2 ;;
         --list-models) LIST_MODELS=true; shift ;;
-        -h|--help) show_help; exit 0 ;;
-        *)          echo "Error: Unknown option '$1'"; show_help; exit 1 ;;
+        -h|--help) show_help; return 0 ;;
+        *)          echo "Error: Unknown option '$1'"; show_help; return 1 ;;
     esac
 done
 
@@ -77,7 +77,7 @@ if [[ "$CLUSTER" != "sophia" ]] && [[ "$CLUSTER" != "metis" ]]; then
     echo "Error: Invalid cluster '$CLUSTER'. Must be 'sophia' or 'metis'."
     echo ""
     show_help
-    exit 1
+    return 1
 fi
 
 # Only do setup if not in list-only mode
@@ -93,8 +93,8 @@ if [ "$LIST_MODELS" = false ]; then
     #python inference_auth_token.py authenticate
 
     if ! TOKEN=$(python inference_auth_token.py get_access_token 2>&1); then
-        python inference_auth_token.py authenticate || exit 1
-        TOKEN=$(python inference_auth_token.py get_access_token) || exit 1
+        python inference_auth_token.py authenticate || return 1
+        TOKEN=$(python inference_auth_token.py get_access_token) || return 1
     fi
 
     # Set base URL based on cluster
@@ -134,7 +134,7 @@ if [ "$LIST_MODELS" = false ]; then
             }
             { print }
         ' "$TARGET_FILE" > "$TARGET_FILE.tmp" && mv "$TARGET_FILE.tmp" "$TARGET_FILE"
-        exit 0
+        return 0
     fi
 
     # Process both OPENAI_API_KEY and OPENAI_BASE_URL

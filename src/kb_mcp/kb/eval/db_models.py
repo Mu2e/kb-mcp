@@ -291,6 +291,7 @@ class EvalRun(Base):
     audit_filters = Column(JSONB, nullable=True)  # e.g., {"verdict": "approved", "audit_type": "human_review"} (JSONB for PostgreSQL, JSON for SQLite)
 
     # Search configuration
+    search_type = Column(String(32), nullable=True, default="semantic")  # "semantic", "fulltext", "hybrid", "rag", "agentic"
     embedding_name = Column(String(64), nullable=True, index=True)
     chunking_strategy = Column(String(128), nullable=True, index=True)
     max_results = Column(Integer, nullable=False, default=10)

@@ -70,11 +70,12 @@ fi
 # Create the database if it doesn't exist
 
 # Only start on Login Nodes
-if [[ $(hostname) != *"login"* ]]; then
-    echo "Database ($DB_HOST) is unreachable and this is not a Login Node."
-    echo "   Please run setup on a Login Node to restart the database."
-    return 1
-fi
+#if [[ $(hostname) != *"login"* ]]; then
+#    echo "Database ($DB_HOST) is unreachable and this is not a Login Node."
+#    echo "   Please run setup on a Login Node to restart the database."
+#    return 1
+#fi
+
 
 # Cleanup
 podman-hpc rm -f $DB_CONTAINER > /dev/null 2>&1
@@ -102,6 +103,24 @@ fi
 # Bind 0.0.0.0 to allow other nodes to connect
 # POSTGRES_PASSWORD is only used if no datafile exists yet (aka the first time)
 echo "Starting container $DB_CONTAINER"
+
+
+if [[ $(hostname) != *"login"* ]]; then
+	JOB_ID="${SLURM_JOB_ID:-local_$(date +%s)}"
+	MY_PODMAN_RAM="/dev/shm/podman_$JOB_ID"
+	mkdir -p "$MY_PODMAN_RAM/storage" "$MY_PODMAN_RAM/run"
+
+	# 2. Minimum Required Exports for NERSC
+	export PODMANHPC_GRAPH_ROOT="$MY_PODMAN_RAM/storage"
+	export PODMANHPC_RUN_ROOT="$MY_PODMAN_RAM/run"
+	export XDG_RUNTIME_DIR="$MY_PODMAN_RAM/run"
+	export TMPDIR="$MY_PODMAN_RAM/run" # Use RAM for temp files too
+
+	# 3. Standard Postgres Setup
+	# Ensure DB_DATA_DIR is passed in or defaulted
+	DB_DATA_DIR="${DB_DATA_DIR:-$PWD/db_data}"
+	mkdir -p "$DB_DATA_DIR"
+    
 podman-hpc run -d --rm \
     --name "$DB_CONTAINER" \
     --userns=keep-id \
@@ -110,6 +129,19 @@ podman-hpc run -d --rm \
     -e POSTGRES_PASSWORD=$DB_PASSWORD \
     -v "$DB_DATA_DIR":/var/lib/postgresql/data \
     "$DB_IMAGE"
+
+else
+
+podman-hpc run -d --rm \
+    --name "$DB_CONTAINER" \
+    --userns=keep-id \
+    --network=host \
+    -e PGPORT=$DB_PORT_EXTERNAL \
+    -e POSTGRES_PASSWORD=$DB_PASSWORD \
+    -v "$DB_DATA_DIR":/var/lib/postgresql/data \
+    "$DB_IMAGE"
+fi
+
 
 echo "Waiting 5s for boot..."
 sleep 5

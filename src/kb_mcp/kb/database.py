@@ -69,8 +69,21 @@ def create_engine_with_config() -> Engine:
 
     # PostgreSQL configuration
     db_config = get_database_config() # for schema setting
-    engine = create_engine(database_url)
-    
+    engine = create_engine(
+        database_url,
+        connect_args={
+            # Kill sessions idle in transaction for more than 30 minutes.
+            # Must be longer than the slowest single document parse (marker on large scanned PDFs).
+            # Prevents stuck locks when a worker process is killed externally.
+            "options": f"-c idle_in_transaction_session_timeout=7200000 -c search_path={db_config['schema']}",
+            # TCP keepalives so PostgreSQL detects dead worker connections quickly.
+            "keepalives": 1,
+            "keepalives_idle": 60,
+            "keepalives_interval": 10,
+            "keepalives_count": 5,
+        },
+    )
+
     @event.listens_for(engine, "connect")
     def set_search_path(dbapi_conn, connection_record):
         """Set schema search_path for PostgreSQL."""
@@ -331,6 +344,7 @@ def init_db(create_tables: bool = True) -> None:
         GraphNodeMap,
         GraphExtractionLog,
     )
+    from .db_models import ParserComparison, ParserCategories  # noqa: F401
 
     engine = get_engine()
     database_url = get_database_url()

@@ -14,6 +14,7 @@ def search_fulltext(
     max_results: int = 10,
     source_id: Optional[str] = None,
     doc_type: Optional[str] = None,
+    parser_id: Optional[str] = None,
     chunking_strategy: Optional[str] = None,
     filter: Optional[Dict[str, Any]] = None,
     session=None,
@@ -100,6 +101,7 @@ def search_fulltext(
             source_id=source_id,
             doc_type=doc_type,
             chunking_strategy=chunking_strategy,
+            parser_id=parser_id,
             filter=filter,
             skip_kwargs={"session", "explain_analyse", "max_results", "embedding_name"},
             **kwargs

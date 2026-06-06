@@ -75,7 +75,7 @@ def summarize(
         llm_config = get_llm_config()
         model = llm_config['summary_model']
 
-    client = get_openai_client()
+    client = get_openai_client(model)
 
     # Truncate text if too long (to avoid context limits)
     # For very large documents, use beginning where abstracts/introductions typically are

@@ -34,6 +34,7 @@ def get_closest(
     source_id: Optional[str] = None,
     doc_type: Optional[str] = None,
     chunking_strategy: Optional[str] = None,
+    parser_id: Optional[str] = None,
     filter: Optional[Dict[str, Any]] = None,
     session=None,
     explain_analyse: bool = False,
@@ -110,6 +111,7 @@ def get_closest(
                 source_id=source_id,
                 doc_type=doc_type,
                 chunking_strategy=chunking_strategy,
+                parser_id=parser_id,
                 filter=filter,
                 explain_analyse=explain_analyse,
                 embedding_time=0.0,  # No embedding time when using embedding directly
@@ -126,6 +128,7 @@ def get_closest(
                 source_id=source_id,
                 doc_type=doc_type,
                 chunking_strategy=chunking_strategy,
+                parser_id=parser_id,
                 filter=filter,
                 embedding_time=0.0,  # No embedding time when using embedding directly
                 start_time=search_start,

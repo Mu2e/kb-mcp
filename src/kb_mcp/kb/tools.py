@@ -1,13 +1,15 @@
 """Tools for batch operations on the knowledge base."""
 
+import json
 import logging
+import shutil
 from pathlib import Path
-from typing import Dict, Any, Optional, Union
+from typing import Dict, Any, List, Optional, Union
 
 from tqdm import tqdm
 
 from .database import get_db_session
-from .db_models import Document
+from .db_models import Document, PrivacyFilter
 from .embedding.db_models import Chunk, get_embedding_table
 from ..chunking.chunking import get_strategy_name
 from ..config import get_embedding_config
@@ -241,6 +243,7 @@ def parse_all(
     describe_images: Optional[bool] = None,
     force_reparse: bool = False,
     batch_size: Optional[int] = None,
+    limit: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Parse all raw documents that don't have corresponding processed documents yet.
 
@@ -258,6 +261,7 @@ def parse_all(
         batch_size: If provided, process in batches with LOCK/SKIP LOCKED for parallel processing.
                    If None, uses default from get_batch_config()['parse_batch_size'].
                    Set to a large value (e.g., 999999) to disable batching and process all at once.
+        limit: If provided, stop after parsing this many documents (useful for testing).
 
     Returns:
         Dictionary with:
@@ -284,7 +288,7 @@ def parse_all(
 
     # Process in batches with lock/commit cycle
     while True:
-        with get_db_session() as session:
+        with get_db_session(auto_expunge=False) as session:
             # Query for RawDocuments that don't have Documents with the specified parser
             # Use NOT EXISTS instead of LEFT JOIN to avoid FOR UPDATE on outer join
             subquery = session.query(Document.id).filter(
@@ -301,7 +305,10 @@ def parse_all(
 
             # For parallel processing: lock a batch of rows
             # SKIP LOCKED allows other workers to grab different rows
-            raw_docs = query.limit(batch_size).with_for_update(skip_locked=True).all()
+            effective_batch = batch_size
+            if limit is not None:
+                effective_batch = min(batch_size, limit - total_processed)
+            raw_docs = query.limit(effective_batch).with_for_update(skip_locked=True).all()
 
             if not raw_docs:
                 # No more documents to process
@@ -310,9 +317,14 @@ def parse_all(
             if total_processed == 0:
                 logger.info(f"Processing documents in batches of {batch_size}")
 
-            for raw_doc in tqdm(raw_docs, desc="Parsing documents", unit="doc", disable=total_processed > 0):
+            # Parse inside the same session so the FOR UPDATE row locks are held
+            # across the whole batch. We commit after each document so results are
+            # saved incrementally — if the process dies mid-batch, already-parsed
+            # documents are preserved. The locks on the remaining rows are released
+            # when the connection drops, freeing them for other workers.
+            batch_num = total_processed // batch_size + 1
+            for raw_doc in tqdm(raw_docs, desc=f"Parsing documents (batch {batch_num})", unit="doc"):
                 try:
-                    # Check if file_path exists
                     if not raw_doc.file_path:
                         logger.warning(f"Raw document {raw_doc.id} has no file_path, skipping")
                         skipped += 1
@@ -320,7 +332,6 @@ def parse_all(
 
                     file_path = Path(raw_doc.file_path)
 
-                    # Check if file exists
                     if not file_path.exists():
                         logger.warning(f"Skipping raw_doc {raw_doc.id}: file not found at {raw_doc.file_path}")
                         skipped += 1
@@ -328,18 +339,16 @@ def parse_all(
 
                     logger.debug(f"Parsing raw document {raw_doc.id}: {raw_doc.file_path}")
 
-                    # Use add_document (files already in KB, don't copy)
-                    # Pass through RawDocument metadata (includes title, authors, etc.)
                     result = add_document(
                         file_path,
                         source_id=raw_doc.source_id,
                         doc_id=raw_doc.doc_id,
-                        meta=raw_doc.meta,  # Pass metadata from RawDocument
+                        meta=raw_doc.meta,
                         parser_name=parser_name,
                         extract_images=extract_images,
                         describe_images=describe_images,
                         force_reparse=force_reparse,
-                        copy_to_kb=False,  # Files already in KB storage
+                        copy_to_kb=False,
                         session=session,
                     )
 
@@ -353,7 +362,10 @@ def parse_all(
                     continue
 
             total_processed += len(raw_docs)
-            # Commit happens here when session context exits, releasing locks
+            # Commit here — releases all FOR UPDATE locks only after the full batch
+            # is parsed and all Document rows are visible to other workers.
+            if limit is not None and total_processed >= limit:
+                break
 
     if total_processed == 0:
         logger.info(f"No unparsed raw documents found{' for source_id: ' + source_id if source_id else ''}")
@@ -379,6 +391,8 @@ def chunk_and_embed_all(
     embedding_name: Optional[str] = None,
     provider: Optional[str] = None,
     model: Optional[str] = None,
+    parser_name: Optional[str] = None,
+    force: bool = False,
 ) -> Dict[str, Any]:
     """Chunk and embed all documents for a source_id that don't have chunks yet.
 
@@ -398,6 +412,7 @@ def chunk_and_embed_all(
                        If provided, overrides provider/model.
         provider: Optional embedding provider (e.g., "openai", "voyage")
         model: Optional embedding model (e.g., "text-embedding-3-small")
+        parser_name: Optional parser ID to filter documents by (e.g., "marker", "nougat", "docling").
 
     Returns:
         Dictionary with:
@@ -419,8 +434,8 @@ def chunk_and_embed_all(
         ```
     """
     
-    logger.info(f"Starting chunk_and_embed_all for source_id: {source_id}")
-    
+    logger.info(f"Starting chunk_and_embed_all for source_id: {source_id}" + (f", parser_name: {parser_name}" if parser_name else ""))
+
     with get_db_session() as session:
         # Build query based on chunk strategy
         # For "summary" strategy, find documents with summaries but without summary chunks
@@ -431,6 +446,9 @@ def chunk_and_embed_all(
             Document.text != "",
             Document.doc_type != "image"
         )
+
+        if parser_name is not None:
+            query = query.filter(Document.parser_id == parser_name)
         
         # Determine the actual strategy name that will be created
         chunk_strategy = chunk_strategy or get_embedding_config()['chunk_strategy']
@@ -453,29 +471,30 @@ def chunk_and_embed_all(
                 )
             ).filter(Chunk.id.is_(None))
         else:
-            # For other strategies: find documents without chunks of this specific strategy
-            # This allows creating multiple strategies for the same documents (e.g., tokens and tokens_no_gist)
-            from sqlalchemy import and_
-            query = query.outerjoin(
-                Chunk,
-                and_(
-                    Document.id == Chunk.document_id,
-                    Chunk.chunk_strategy == strategy_full_name
-                )
-            ).filter(Chunk.id.is_(None))
+            if not force:
+                # For other strategies: find documents without chunks of this specific strategy
+                # This allows creating multiple strategies for the same documents (e.g., tokens and tokens_no_gist)
+                from sqlalchemy import and_
+                query = query.outerjoin(
+                    Chunk,
+                    and_(
+                        Document.id == Chunk.document_id,
+                        Chunk.chunk_strategy == strategy_full_name
+                    )
+                ).filter(Chunk.id.is_(None))
         
         documents = query.all()
         
         if not documents:
-            logger.info(f"No documents found for source_id: {source_id} that need chunking")
+            logger.info(f"No documents found for source_id: {source_id}" + (f", parser_name: {parser_name}" if parser_name else "") + " that need chunking")
             return {
                 "processed": 0,
                 "chunked": 0,
                 "skipped": 0,
                 "errors": 0,
             }
-        
-        logger.info(f"Found {len(documents)} document(s) for source_id: {source_id} that need chunking")
+
+        logger.info(f"Found {len(documents)} document(s) for source_id: {source_id}" + (f", parser_name: {parser_name}" if parser_name else "") + " that need chunking")
 
         processed = 0
         chunked = 0
@@ -486,6 +505,12 @@ def chunk_and_embed_all(
         for doc in tqdm(documents, desc="Chunking and embedding", unit="doc"):
             try:
                 processed += 1
+
+                # Drop existing chunks for this strategy if force mode
+                if force:
+                    dropped = doc.drop_chunks(chunk_strategy=strategy_full_name)
+                    if dropped:
+                        logger.debug(f"Dropped {dropped} existing chunks for document {doc.id}")
 
                 # Chunk and embed the document using the document method
                 logger.debug(f"Chunking and embedding document {doc.id} ({doc.doc_id or doc.id})")
@@ -846,6 +871,8 @@ def summarize_all(
     embedding_name: Optional[str] = None,
     embedding_provider: Optional[str] = None,
     embedding_model: Optional[str] = None,
+    parser_name: Optional[str] = None,
+    batch_size: int = 10,
 ) -> Dict[str, Any]:
     """Generate summaries for all documents from a source that don't have them yet.
 
@@ -860,6 +887,7 @@ def summarize_all(
         embedding_name: Optional embedding name for summary chunk (used if embed_summary_chunk=True)
         embedding_provider: Optional embedding provider (used if embed_summary_chunk=True and embedding_name not provided)
         embedding_model: Optional embedding model (used if embed_summary_chunk=True and embedding_name not provided)
+        parser_name: Optional parser ID to filter documents by (e.g., "marker", "nougat", "docling").
 
     Returns:
         Dictionary with:
@@ -883,7 +911,7 @@ def summarize_all(
     """
     # Summary module availability is checked by doc.generate_summary()
 
-    logger.info(f"Starting summarize_all for source_id: {source_id}")
+    logger.info(f"Starting summarize_all for source_id: {source_id}" + (f", parser_name: {parser_name}" if parser_name else ""))
 
     with get_db_session() as session:
         # Find documents without summaries
@@ -900,10 +928,13 @@ def summarize_all(
             Document.doc_type != "image"
         )
 
+        if parser_name is not None:
+            query = query.filter(Document.parser_id == parser_name)
+
         documents = query.all()
 
         if not documents:
-            logger.info(f"No documents found for source_id: {source_id} that need summarization")
+            logger.info(f"No documents found for source_id: {source_id}" + (f", parser_name: {parser_name}" if parser_name else "") + " that need summarization")
             return {
                 "processed": 0,
                 "summarized": 0,
@@ -937,6 +968,9 @@ def summarize_all(
                 )
 
                 summarized += 1
+                if summarized % batch_size == 0:
+                    session.commit()
+                    logger.debug(f"Committed batch of {batch_size} summaries")
                 logger.debug(f"Successfully generated summary for document {doc.id}")
 
                 # Optionally create summary chunk
@@ -984,5 +1018,415 @@ def summarize_all(
     )
 
     return result
+
+
+def filter_all(
+    source_id: Optional[str] = None,
+    parser_name: str = "marker",
+    model: Optional[str] = None,
+    batch_size: int = 10,
+    limit: Optional[int] = None,
+    delay: float = 0.0,
+) -> Dict[str, Any]:
+    """Run the LLM privacy filter over all raw documents that haven't been classified yet.
+
+    For each unfiltered RawDocument, finds the corresponding parsed Document (from
+    `parser_name`, default 'marker') and sends its text to the privacy classifier.
+    Results are stored in the `privacy_filters` table.
+
+    Already-filtered documents (those with an existing PrivacyFilter row) are skipped.
+
+    Supports parallel workers: each batch is locked with FOR UPDATE SKIP LOCKED so
+    multiple `filter_all` processes can run concurrently without double-processing.
+
+    Args:
+        source_id: Optional source identifier. If None, processes all sources.
+        parser_name: Parser whose text to use for classification (default: 'marker').
+        model: LLM model to use (overrides PRIVACY_FILTER_MODEL env var).
+        batch_size: Number of documents to lock and process per batch (default: 10).
+        limit: Stop after classifying this many documents total (useful for testing).
+
+    Returns:
+        Dictionary with:
+        - processed: Number of raw documents examined
+        - filtered: Number that were successfully classified
+        - skipped: Number skipped (no parsed text found)
+        - errors: Number of failures
+        - by_label: Dict mapping label → count for this run
+    """
+    from sqlalchemy import and_
+    from .db_models import RawDocument
+    from ..privacy import classify_privacy
+
+    logger.info(
+        f"Starting filter_all - source_id: {source_id or 'all'}, parser: {parser_name}, "
+        f"batch_size: {batch_size}"
+    )
+
+    processed = 0
+    filtered = 0
+    skipped = 0
+    errors = 0
+    by_label: Dict[str, int] = {
+        PrivacyFilter.LABEL_PUBLIC: 0,
+        PrivacyFilter.LABEL_NEEDS_REVIEW: 0,
+        PrivacyFilter.LABEL_PRIVATE: 0,
+    }
+
+    while True:
+        with get_db_session(auto_expunge=False) as session:
+            # Find RawDocuments without a PrivacyFilter row using NOT EXISTS
+            already_filtered = session.query(PrivacyFilter.raw_document_id).filter(
+                PrivacyFilter.raw_document_id == RawDocument.id
+            ).exists()
+
+            query = session.query(RawDocument).filter(~already_filtered)
+            if source_id:
+                query = query.filter(RawDocument.source_id == source_id)
+
+            effective_batch = batch_size
+            if limit is not None:
+                remaining = limit - (filtered + skipped + errors)
+                if remaining <= 0:
+                    break
+                effective_batch = min(batch_size, remaining)
+
+            # SKIP LOCKED: parallel workers each grab a different batch
+            raw_docs = (
+                query
+                .order_by(RawDocument.source_id, RawDocument.doc_id)
+                .limit(effective_batch)
+                .with_for_update(skip_locked=True)
+                .all()
+            )
+
+            if not raw_docs:
+                break
+
+            batch_num = (processed // batch_size) + 1
+            for raw_doc in tqdm(raw_docs, desc=f"Privacy filtering (batch {batch_num})", unit="doc"):
+                processed += 1
+                try:
+                    parsed_doc = session.query(Document).filter(
+                        and_(
+                            Document.raw_document_id == raw_doc.id,
+                            Document.parser_id == parser_name,
+                            Document.doc_type != "image",
+                            Document.text.isnot(None),
+                            Document.text != "",
+                        )
+                    ).first()
+
+                    if parsed_doc is None:
+                        logger.debug(
+                            f"No parsed text found for raw_doc {raw_doc.id} "
+                            f"(parser={parser_name}), skipping"
+                        )
+                        skipped += 1
+                        # Insert a sentinel so parallel workers don't re-attempt this doc.
+                        # Label needs_review means a human can decide later.
+                        pf = PrivacyFilter(
+                            raw_document_id=raw_doc.id,
+                            document_id=None,
+                            label=PrivacyFilter.LABEL_NEEDS_REVIEW,
+                            reasoning="No parsed text available for this parser; requires manual review.",
+                            model=None,
+                            meta={"parser_name": parser_name, "skipped": True},
+                        )
+                        session.add(pf)
+                        continue
+
+                    result = classify_privacy(parsed_doc.text, model=model)
+
+                    pf = PrivacyFilter(
+                        raw_document_id=raw_doc.id,
+                        document_id=parsed_doc.id,
+                        label=result["label"],
+                        reasoning=result["reasoning"],
+                        model=result["model"],
+                        meta={
+                            "time_seconds": result["time_seconds"],
+                            "parser_name": parser_name,
+                        },
+                    )
+                    session.add(pf)
+                    filtered += 1
+                    by_label[result["label"]] = by_label.get(result["label"], 0) + 1
+
+                except Exception as e:
+                    errors += 1
+                    logger.error(f"Error classifying raw_doc {raw_doc.id}: {e}", exc_info=True)
+                    # Write a sentinel so this doc isn't re-attempted in the next batch loop.
+                    # Without this, failed docs loop forever because no PrivacyFilter row exists.
+                    try:
+                        pf_err = PrivacyFilter(
+                            raw_document_id=raw_doc.id,
+                            document_id=parsed_doc.id if parsed_doc else None,
+                            label=PrivacyFilter.LABEL_NEEDS_REVIEW,
+                            reasoning=f"Classification failed with error: {type(e).__name__}: {e}",
+                            model=model,
+                            meta={"parser_name": parser_name, "error": True},
+                        )
+                        session.add(pf_err)
+                    except Exception as inner_e:
+                        logger.error(f"Failed to write error sentinel for {raw_doc.id}: {inner_e}")
+
+            # Commit releases the FOR UPDATE locks, making results visible to other workers
+            session.commit()
+
+        if limit is not None and (filtered + skipped + errors) >= limit:
+            break
+
+        if delay > 0:
+            import time
+            logger.debug(f"Sleeping {delay}s between batches")
+            time.sleep(delay)
+
+    logger.info(
+        f"Completed filter_all - processed: {processed}, filtered: {filtered}, "
+        f"skipped: {skipped}, errors: {errors}, labels: {by_label}"
+    )
+
+    return {
+        "processed": processed,
+        "filtered": filtered,
+        "skipped": skipped,
+        "errors": errors,
+        "by_label": by_label,
+    }
+
+
+def export_source(
+    source_id: str,
+    output_dir: Union[str, Path],
+    parser_name: str = "marker",
+    include_private: bool = False,
+    include_needs_review: bool = False,
+    private_subdir: str = "private",
+    needs_review_subdir: str = "needs_review",
+) -> Dict[str, Any]:
+    """Export documents from a source into a folder hierarchy.
+
+    For each raw document, creates a subfolder at:
+        <output_dir>/<doc_id>/
+
+    Folder contents (text only, no images):
+        original.pdf          — copy of the raw file (if available and is a PDF)
+        text_<parser>.md/txt  — extracted text for each available parser
+        description.txt       — document description from parser comparison (if available)
+        summary.txt           — LLM-generated summary (from the marker-parsed document)
+        gist.txt              — LLM-generated gist
+        title.txt             — extracted title and/or LLM-generated title
+        metadata.json         — all metadata fields
+
+    Privacy filtering controls which documents are exported:
+        - public documents → <output_dir>/<doc_id>/
+        - needs_review documents → <output_dir>/<needs_review_subdir>/<doc_id>/  (if include_needs_review)
+        - private documents → <output_dir>/<private_subdir>/<doc_id>/  (if include_private)
+
+    If a document has no PrivacyFilter entry it is treated as needs_review.
+
+    Args:
+        source_id: Source identifier to export.
+        output_dir: Root directory to write export into (created if it doesn't exist).
+        parser_name: Preferred parser for summary/gist/title (default: 'marker').
+        include_private: If True, also export private documents into a separate subfolder.
+        include_needs_review: If True, also export needs_review documents into a separate subfolder.
+        private_subdir: Subfolder name for private documents (default: 'private').
+        needs_review_subdir: Subfolder name for needs_review documents (default: 'needs_review').
+
+    Returns:
+        Dictionary with:
+        - exported_public: Number of public documents exported
+        - exported_needs_review: Number of needs_review documents exported (0 if include_needs_review=False)
+        - exported_private: Number of private documents exported (0 if include_private=False)
+        - skipped_private: Number of private documents skipped
+        - skipped_needs_review: Number of needs_review documents skipped
+        - errors: Number of documents that failed during export
+    """
+    from .db_models import RawDocument
+
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    exported_public = 0
+    exported_needs_review = 0
+    exported_private = 0
+    skipped_private = 0
+    skipped_needs_review = 0
+    errors = 0
+
+    with get_db_session() as session:
+        raw_docs = (
+            session.query(RawDocument)
+            .filter(RawDocument.source_id == source_id)
+            .order_by(RawDocument.doc_id)
+            .all()
+        )
+
+        if not raw_docs:
+            logger.info(f"No raw documents found for source_id: {source_id}")
+            return {
+                "exported_public": 0,
+                "exported_needs_review": 0,
+                "exported_private": 0,
+                "skipped_private": 0,
+                "skipped_needs_review": 0,
+                "errors": 0,
+            }
+
+        logger.info(f"Exporting {len(raw_docs)} raw document(s) for source_id: {source_id}")
+
+        for raw_doc in tqdm(raw_docs, desc="Exporting", unit="doc"):
+            try:
+                # Determine privacy label
+                pf = (
+                    session.query(PrivacyFilter)
+                    .filter(PrivacyFilter.raw_document_id == raw_doc.id)
+                    .order_by(PrivacyFilter.created_time.desc())
+                    .first()
+                )
+                label = pf.label if pf else PrivacyFilter.LABEL_NEEDS_REVIEW
+
+                # Parser comparison description (most recent)
+                from .db_models import ParserComparison
+                pc = (
+                    session.query(ParserComparison)
+                    .filter(
+                        ParserComparison.raw_document_id == raw_doc.id,
+                        ParserComparison.document_description.isnot(None),
+                    )
+                    .order_by(ParserComparison.created_time.desc())
+                    .first()
+                )
+                document_description = pc.document_description if pc else None
+
+                # Routing decision
+                if label == PrivacyFilter.LABEL_PRIVATE:
+                    if not include_private:
+                        skipped_private += 1
+                        continue
+                    doc_root = output_dir / private_subdir
+                elif label == PrivacyFilter.LABEL_NEEDS_REVIEW:
+                    if not include_needs_review:
+                        skipped_needs_review += 1
+                        continue
+                    doc_root = output_dir / needs_review_subdir
+                else:
+                    doc_root = output_dir
+
+                # Sanitize doc_id for filesystem use
+                safe_doc_id = (raw_doc.doc_id or raw_doc.id).replace("/", "_").replace("\\", "_")
+                doc_dir = doc_root / safe_doc_id
+                doc_dir.mkdir(parents=True, exist_ok=True)
+
+                # 1. Copy original file if available and accessible
+                if raw_doc.file_path:
+                    src_path = Path(raw_doc.file_path)
+                    if src_path.exists():
+                        ext = src_path.suffix.lower()
+                        dest_name = f"original{ext}" if ext else "original"
+                        shutil.copy2(src_path, doc_dir / dest_name)
+
+                # 2. Write extracted text for each available parser (text only, skip images)
+                parsed_docs = (
+                    session.query(Document)
+                    .filter(
+                        Document.raw_document_id == raw_doc.id,
+                        Document.doc_type != "image",
+                        Document.text.isnot(None),
+                        Document.text != "",
+                    )
+                    .all()
+                )
+
+                preferred_doc = None
+                for doc in parsed_docs:
+                    p_name = doc.parser_id or "unknown"
+                    ext = ".md" if p_name == "marker" else ".txt"
+                    (doc_dir / f"text_{p_name}{ext}").write_text(doc.text, encoding="utf-8")
+                    if p_name == parser_name:
+                        preferred_doc = doc
+
+                # Fall back to any doc if preferred parser not found
+                if preferred_doc is None and parsed_docs:
+                    preferred_doc = parsed_docs[0]
+
+                # 3. Summary, gist, title from preferred doc
+                if document_description:
+                    (doc_dir / "description.txt").write_text(document_description, encoding="utf-8")
+
+                if preferred_doc:
+                    if preferred_doc.summary:
+                        (doc_dir / "summary.txt").write_text(preferred_doc.summary, encoding="utf-8")
+                    if preferred_doc.gist:
+                        (doc_dir / "gist.txt").write_text(preferred_doc.gist, encoding="utf-8")
+
+                    title_parts: List[str] = []
+                    if preferred_doc.title:
+                        title_parts.append(f"title: {preferred_doc.title}")
+                    if preferred_doc.title_gen:
+                        title_parts.append(f"title_gen: {preferred_doc.title_gen}")
+                    if title_parts:
+                        (doc_dir / "title.txt").write_text("\n".join(title_parts), encoding="utf-8")
+
+                # 4. Metadata JSON
+                raw_meta = raw_doc.meta or {}
+                doc_meta = preferred_doc.meta or {} if preferred_doc else {}
+                meta: Dict[str, Any] = {
+                    "raw_document_id": raw_doc.id,
+                    "source_id": raw_doc.source_id,
+                    "doc_id": raw_doc.doc_id,
+                    "source_type": raw_doc.source_type,
+                    "file_size": raw_doc.file_size,
+                    # fields from raw_meta / doc_meta worth surfacing
+                    "filename": doc_meta.get("filename") or raw_meta.get("filename"),
+                    "authors": doc_meta.get("authors") or raw_meta.get("authors"),
+                    "publication_date": doc_meta.get("publication_date") or raw_meta.get("publication_date"),
+                    "parsers_available": [d.parser_id for d in parsed_docs if d.parser_id],
+                }
+                # remove None-valued keys to keep the file clean
+                meta = {k: v for k, v in meta.items() if v is not None}
+                if document_description:
+                    meta["description"] = document_description
+                if preferred_doc:
+                    meta["title"] = preferred_doc.title
+                    meta["title_gen"] = preferred_doc.title_gen
+                    meta["summary"] = preferred_doc.summary
+                    meta["gist"] = preferred_doc.gist
+
+                (doc_dir / "metadata.json").write_text(
+                    json.dumps(meta, indent=2, ensure_ascii=False, default=str),
+                    encoding="utf-8",
+                )
+
+                # Increment counters
+                if label == PrivacyFilter.LABEL_PRIVATE:
+                    exported_private += 1
+                elif label == PrivacyFilter.LABEL_NEEDS_REVIEW:
+                    exported_needs_review += 1
+                else:
+                    exported_public += 1
+
+            except Exception as e:
+                errors += 1
+                logger.error(f"Error exporting raw_doc {raw_doc.id}: {e}", exc_info=True)
+                continue
+
+    logger.info(
+        f"Export complete for source_id: {source_id}. "
+        f"public={exported_public}, needs_review={exported_needs_review}, "
+        f"private={exported_private}, skipped_private={skipped_private}, "
+        f"skipped_needs_review={skipped_needs_review}, errors={errors}"
+    )
+
+    return {
+        "exported_public": exported_public,
+        "exported_needs_review": exported_needs_review,
+        "exported_private": exported_private,
+        "skipped_private": skipped_private,
+        "skipped_needs_review": skipped_needs_review,
+        "errors": errors,
+    }
 
 
