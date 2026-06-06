@@ -383,7 +383,7 @@ def cmd_deduplicate(args):
         for keep_id, by_id_dups, _ in duplicates:
             if by_id_dups:
                 keep_doc = get(uid=keep_id)
-                for dup_id in by_id_dups[:10 - count]:
+                for dup_id in by_id_dups[:10 - count]:  # Show up to 10 total
                     dup_doc = get(uid=dup_id)
                     if keep_doc and dup_doc:
                         print(f"    • Keep: {keep_id[:8]}... ({_doc_label(keep_doc)})")

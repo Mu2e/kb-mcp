@@ -1,7 +1,7 @@
 import asyncio
 import json
 import logging
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Callable
 
 from mcp import ClientSession
 from openai import AsyncOpenAI
@@ -22,13 +22,15 @@ class BaseAgent:
         agent_id: str = "Base",
         max_depth: int = 2,
         run_id: str = None,
+        callback: Optional[Callable] = None,
     ):
         self.session = session
         self.client = client
         self.depth = depth
         self.agent_id = agent_id
         self.max_depth = max_depth
-        
+        self.callback = callback
+
         # Generate a run_id if not provided (timestamp)
         if run_id is None:
             import time
@@ -41,12 +43,35 @@ class BaseAgent:
         self.usage = None
         self.domain_context = ""
 
+    async def emit_event(self, event: Dict[str, Any]):
+        """Emit an event via callback if available."""
+        if self.callback:
+            if asyncio.iscoroutinefunction(self.callback):
+                await self.callback(event)
+            else:
+                self.callback(event)
+
     def info(self, info: str):
         prefix = "  " * self.depth
         tokens = 0
         if self.usage and hasattr(self.usage, 'total_tokens'):
             tokens = self.usage.total_tokens
         logger.info(f"{prefix}{self.agent_id} ({(tokens//1e3): 4.1f}k): {info}")
+
+        # Emit event via callback if available
+        if self.callback:
+            event = {
+                'type': 'info',
+                'agent_id': self.agent_id,
+                'depth': self.depth,
+                'message': info,
+                'tokens': tokens
+            }
+            # Create task for async callback (don't block)
+            if asyncio.iscoroutinefunction(self.callback):
+                asyncio.create_task(self.callback(event))
+            else:
+                self.callback(event)
 
     async def initialize_tools(self):
         """Fetch tools from MCP server."""

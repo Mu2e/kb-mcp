@@ -506,7 +506,9 @@ def add_document(
 
     file_path = Path(file_path)
 
-    if not file_path.exists():
+    # For marker-preloaded parser, we don't need the actual file to exist
+    # We only use the filename stem to find pre-existing Marker output
+    if parser_name != "marker-preloaded" and not file_path.exists():
         raise FileNotFoundError(f"File not found: {file_path}")
 
     # Initialize result dictionary
@@ -545,18 +547,30 @@ def add_document(
         result["copied"] = True
         result["copied_path"] = str(dest_path)
 
+    # Get parser name from parameter or config (need this early for marker-preloaded check)
+    if parser_name is None:
+        from ...config import get_parser_config
+        parser_name = get_parser_config()['parser']
+
     # Calculate file hash and metadata
     import hashlib
     import socket
     from ...parser.utils import detect_mime_type
 
-    with open(actual_file_path, "rb") as f:
-        file_content = f.read()
-        content_hash = hashlib.sha256(file_content).hexdigest()
+    # For marker-preloaded, we don't have the original file
+    # Use a placeholder hash and assume PDF type
+    if parser_name == "marker-preloaded":
+        content_hash = hashlib.sha256(str(actual_file_path).encode()).hexdigest()
+        file_size = 0
+        source_type = "application/pdf"
+    else:
+        with open(actual_file_path, "rb") as f:
+            file_content = f.read()
+            content_hash = hashlib.sha256(file_content).hexdigest()
 
-    file_stat = actual_file_path.stat()
-    file_size = file_stat.st_size
-    source_type = detect_mime_type(actual_file_path)
+        file_stat = actual_file_path.stat()
+        file_size = file_stat.st_size
+        source_type = detect_mime_type(actual_file_path)
 
     # Prepare URI
     if uri is None:
@@ -565,11 +579,6 @@ def add_document(
     # Prepare metadata
     raw_meta = dict(meta) if meta else {}
     raw_meta["filename"] = actual_file_path.name
-
-    # Get parser name from parameter or config
-    if parser_name is None:
-        from ...config import get_parser_config
-        parser_name = get_parser_config()['parser']
 
     # Try to insert RawDocument - returns ID if inserted, None if already exists
     with get_db_session(session) as db_session:

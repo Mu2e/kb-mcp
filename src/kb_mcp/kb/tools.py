@@ -338,6 +338,18 @@ def parse_all(
                         continue
 
                     logger.debug(f"Parsing raw document {raw_doc.id}: {raw_doc.file_path}")
+                    # For marker-preloaded parser, we don't need the original PDF file
+                    # We only need the filename stem to find the Marker output directory
+                    if parser_name != "marker-preloaded":
+                        # Check if file exists (only for parsers that need the actual file)
+                        if not file_path.exists():
+                            logger.warning(f"Skipping raw_doc {raw_doc.id}: file not found at {raw_doc.file_path}")
+                            skipped += 1
+                            continue
+                        logger.debug(f"Parsing raw document {raw_doc.id}: {raw_doc.file_path}")
+                    else:
+                        # For marker-preloaded, log the expected output directory instead
+                        logger.debug(f"Parsing raw document {raw_doc.id} from stem: {file_path.stem}")
 
                     result = add_document(
                         file_path,
@@ -356,6 +368,12 @@ def parse_all(
                     parsed += 1
                     logger.debug(f"Successfully parsed {result['num_documents']} document(s) from {raw_doc.file_path}")
 
+                except FileNotFoundError as e:
+                    # For marker-preloaded, this means Marker output doesn't exist
+                    # Skip this document and don't retry
+                    skipped += 1
+                    logger.debug(f"Skipping raw document {raw_doc.id}: {e}")
+                    continue
                 except Exception as e:
                     errors += 1
                     logger.error(f"Error parsing raw document {raw_doc.id}: {e}", exc_info=True)

@@ -162,7 +162,7 @@ def cmd_eval_run(args):
         if args.audit_type:
             audit_filters["audit_type"] = args.audit_type
 
-        # Build search filters
+        # Build search filters (Elasticsearch query DSL format)
         search_filters = {}
         if args.search_source_id:
             search_filters["source_id"] = args.search_source_id

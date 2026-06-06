@@ -1074,8 +1074,15 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
             content = f"""
             <h1>Document Details</h1>
             <p><a href="/web">← Back to Document List</a></p>
-            
+
             {message_html if message_html else ''}
+
+            <div style="margin: 20px 0;">
+                <a href="/web/chat?doc_id={doc.id}&title={html_escape(doc.title or doc.title_gen or doc.doc_id or 'Unknown')}"
+                   style="display: inline-block; padding: 12px 24px; background: #2196F3; color: white; text-decoration: none; border-radius: 4px; font-weight: 500;">
+                    Chat with this document
+                </a>
+            </div>
 
             <div class="card">
                 <h2>Document Information</h2>

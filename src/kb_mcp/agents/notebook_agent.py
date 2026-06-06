@@ -118,7 +118,15 @@ class NotebookAgent(BaseAgent):
 
             prefix = "  "*self.depth
             tool_results_map = await asyncio.gather(*[self._execute_tool(tc, prefix, model) for tc in message.tool_calls])
-            
+
+            # Emit tool call event
+            await self.emit_event({
+                'type': 'tool_call',
+                'iteration': self.iteration,
+                'tools': [tc.function.name for tc in message.tool_calls],
+                'count': len(message.tool_calls)
+            })
+
             for i, result_parts in enumerate(tool_results_map):
                 tc = message.tool_calls[i]
                 fname = tc.function.name
@@ -202,6 +210,14 @@ class NotebookAgent(BaseAgent):
                 usage_str = f"{update_response.usage.total_tokens/1e3:.2f}k"
             
             self.info(f"processed {usage_str} to update notebook with new length: {len(self.notebook)} chars")
+
+            # Emit notebook update event
+            await self.emit_event({
+                'type': 'notebook_update',
+                'iteration': self.iteration,
+                'notebook': self.notebook,
+                'action': self.call_log[-1] if self.call_log else None
+            })
 
             # Dump notebook for spying
             try:

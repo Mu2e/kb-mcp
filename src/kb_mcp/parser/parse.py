@@ -128,8 +128,10 @@ def parse(
     else:
         # Parse from file path
         file_path = Path(file_path)
-        
-        if not file_path.exists():
+
+        # For marker-preloaded, we don't need the actual file to exist
+        # We only use the filename stem to find pre-existing Marker output
+        if parser_name != "marker-preloaded" and not file_path.exists():
             raise FileNotFoundError(f"File not found: {file_path}")
         
         # Prepare document data
@@ -150,20 +152,29 @@ def parse(
     try:
         # Detect MIME type if not provided in data
         if "source_type" not in doc_data:
-            mime_type = detect_mime_type(file_path)
+            if parser_name == "marker-preloaded":
+                # For marker-preloaded, assume PDF
+                mime_type = "application/pdf"
+            else:
+                mime_type = detect_mime_type(file_path)
             doc_data["source_type"] = mime_type
         else:
             mime_type = doc_data["source_type"]
-        print("DEBUG: ", file_path)
-        print("DEBUG: ", detect_mime_type(file_path))
-        print("DEBUG: ", mime_type)
 
         # Add file metadata to meta dict
-        file_stat = file_path.stat()
-        doc_data.setdefault("meta", {}).update({
-            "filename": file_path.name,
-            "filepath": str(file_path.absolute()),
-            "filesize": file_stat.st_size,
+        if parser_name == "marker-preloaded":
+            # For marker-preloaded, we don't have the file, use placeholders
+            doc_data.setdefault("meta", {}).update({
+                "filename": file_path.name,
+                "filepath": str(file_path.absolute()),
+                "filesize": 0,
+            })
+        else:
+            file_stat = file_path.stat()
+            doc_data.setdefault("meta", {}).update({
+                "filename": file_path.name,
+                "filepath": str(file_path.absolute()),
+                "filesize": file_stat.st_size,
             })
         if "uri" not in doc_data:
             doc_data["uri"] = f"file://{file_path.absolute()}"
@@ -200,6 +211,18 @@ def parse(
             import importlib
             mod = importlib.import_module(module_path)
             parser = getattr(mod, class_name)(file_path, mime_type)
+        if parser_name == "marker":
+            #if mime_type != "text/plain":
+            #if mime_type == "text/plain":
+            #    parser = get_parser(file_path, doc_type="text/plain")
+            #else:
+            if True:
+                # Marker-pdf implementation
+                if mime_type != "application/pdf":
+                    raise NotImplementedError(f"Marker parser only supports PDF, got {mime_type}")
+
+                from .parser_marker import MarkerParser
+                parser = MarkerParser(file_path, mime_type)
         else:
             # Standard implementation
             parser = get_parser(file_path, doc_type=mime_type)

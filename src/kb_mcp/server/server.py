@@ -56,6 +56,12 @@ from ..config import get_server_config
 _server_config = get_server_config()
 BASE_URL = _server_config['base_url']
 PORT = _server_config['port']
+if PORT == 8888:
+    raise ValueError(
+        "Port 8888 is reserved and must not be used by this server. "
+        "Port 8888 is commonly used by Jupyter notebooks, which would cause conflicts. "
+        "Please set a different port via the PORT environment variable."
+    )
 HOST = _server_config['host']
 USE_HTTPS = _server_config['use_https']
 
@@ -251,6 +257,18 @@ app.add_route("/status", status_responder)
 # Setup web routes (OAuth protected web interface for interactive tools)
 # This now includes admin and API routes
 setup_web_routes(app, oauth_provider, web_session_manager)
+
+
+# Startup event to initialize background tasks
+@app.on_event("startup")
+async def startup_event():
+    """Start background tasks when the server starts."""
+    import asyncio
+
+    # Start chat cleanup task if it exists
+    if hasattr(app.state, 'chat_cleanup_task'):
+        asyncio.create_task(app.state.chat_cleanup_task())
+        logger.info("Started chat session cleanup background task")
 
 
 def main():
