@@ -1,9 +1,10 @@
 """Core knowledge base models."""
 
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import (
     JSON,
@@ -489,6 +490,7 @@ class Document(Base):
         include_title: bool = True,
         include_gist: bool = True,
         include_summary: bool = True,
+        include_metadata: bool = False,
         model: Optional[str] = None,
     ) -> "Document":
         """Generate and save AI summary, gist, and/or title for this document.
@@ -550,6 +552,7 @@ class Document(Base):
                 include_title=include_title,
                 include_gist=include_gist,
                 include_summary=include_summary,
+                include_metadata=include_metadata,
                 model=model,
             )
 
@@ -563,6 +566,66 @@ class Document(Base):
                 doc.gist = result["gist"]
             if include_summary and "summary" in result:
                 doc.summary = result["summary"]
+
+            if include_metadata and isinstance(result.get("metadata"), dict):
+                md = result["metadata"]
+
+                # Normalize and merge structured metadata into document.meta.
+                meta_target = dict(doc.meta) if isinstance(doc.meta, dict) else {}
+
+                if isinstance(md.get("event_datetime"), str) and md["event_datetime"].strip():
+                    dt_raw = md["event_datetime"].strip()
+                    try:
+                        dt_val = datetime.fromisoformat(dt_raw.replace("Z", "+00:00"))
+                        if dt_val.tzinfo is None:
+                            dt_val = dt_val.replace(tzinfo=timezone.utc)
+                        else:
+                            dt_val = dt_val.astimezone(timezone.utc)
+                        if not doc.creating_time:
+                            doc.creating_time = dt_val
+                        meta_target["event_datetime"] = dt_val.isoformat()
+                    except ValueError:
+                        pass
+
+                if isinstance(md.get("event_date"), str) and md["event_date"].strip():
+                    event_date = md["event_date"].strip()
+                    meta_target["event_date"] = event_date
+                    if not doc.creating_time:
+                        try:
+                            # When only a date is available, anchor creating_time at midnight Central time.
+                            central_midnight = datetime.fromisoformat(event_date).replace(
+                                hour=0,
+                                minute=0,
+                                second=0,
+                                microsecond=0,
+                                tzinfo=ZoneInfo("America/Chicago"),
+                            )
+                            doc.creating_time = central_midnight.astimezone(timezone.utc)
+                        except ValueError:
+                            pass
+
+                if isinstance(md.get("event_name"), str) and md["event_name"].strip():
+                    event_name = md["event_name"].strip()
+                    meta_target["event_name"] = event_name
+                    if include_title and not doc.title:
+                        # Promote the event name when the document itself does not provide a title.
+                        doc.title = event_name
+
+                for key in ["event_participants", "event_organizations", "event_topics", "event_decisions", "event_action_items", "event_tags"]:
+                    value = md.get(key)
+                    if isinstance(value, list) and value:
+                        meta_target[key] = [str(v).strip() for v in value if str(v).strip()]
+
+                if isinstance(md.get("event_location"), str) and md["event_location"].strip():
+                    meta_target["event_location"] = md["event_location"].strip()
+
+                if include_title and not doc.title and isinstance(result.get("title"), str) and result["title"].strip():
+                    # Promote extracted title to primary title when missing.
+                    doc.title = result["title"].strip()
+
+                if meta_target:
+                    meta_target["metadata_enriched"] = True
+                    doc.meta = meta_target
 
             # Create log entry using the actual model that was used
             log_entry = SummaryLog(

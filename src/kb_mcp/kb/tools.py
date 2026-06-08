@@ -31,6 +31,7 @@ def ingest(
     uri: Optional[str] = None,
     meta: Optional[Dict] = None,
     generate_summary: bool = True,
+    summary_include_metadata: bool = False,
     chunk_and_embed: bool = True,
     create_summary_chunks: bool = True,
     chunk_strategy: Optional[str] = None,
@@ -77,6 +78,7 @@ def ingest(
         - num_documents: Number of documents created
         - parsed: Whether documents were parsed
         - num_summaries: Number of summaries generated (if generate_summary=True)
+        - num_metadata_enriched: Number of documents with structured metadata enrichment
         - num_chunks: Total number of chunks created (if chunk_and_embed=True)
         - num_text_chunks: Number of text document chunks (if chunk_and_embed=True)
         - num_summary_chunks: Number of summary chunks (if chunk_and_embed=True and generate_summary=True)
@@ -142,6 +144,7 @@ def ingest(
         # Initialize result dictionary by merging add_result with additional fields
         result = add_result | {
             "num_summaries": 0,
+            "num_metadata_enriched": 0,
             "num_chunks": 0,
             "num_text_chunks": 0,
             "num_summary_chunks": 0,
@@ -177,8 +180,11 @@ def ingest(
                         include_title=True,
                         include_gist=True,
                         include_summary=True,
+                        include_metadata=summary_include_metadata,
                     )
                     result["num_summaries"] += 1
+                    if summary_include_metadata and isinstance(doc.meta, dict) and doc.meta.get("metadata_enriched"):
+                        result["num_metadata_enriched"] += 1
                     logger.info(f"Generated summary for document {doc.id}")
                 except Exception as e:
                     logger.warning(f"Could not generate summary for document {doc.id}: {e}")

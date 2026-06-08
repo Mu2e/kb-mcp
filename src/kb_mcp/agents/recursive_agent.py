@@ -85,7 +85,15 @@ class RecursiveAgent(BaseAgent):
             )
 
             if hasattr(response, 'usage') and response.usage:
-                self.usage = response.usage
+                turn_usage = self.record_usage(response.usage, stage="manager_loop")
+                await self.emit_event({
+                    "type": "token_usage",
+                    "agent_id": self.agent_id,
+                    "depth": self.depth,
+                    "stage": "manager_loop",
+                    "turn": turn_usage,
+                    "token_overview": self.get_token_overview(),
+                })
 
             message = response.choices[0].message
             

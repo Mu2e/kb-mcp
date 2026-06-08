@@ -95,7 +95,16 @@ class NotebookAgent(BaseAgent):
              
             # Track usage
             if hasattr(response, 'usage') and response.usage:
-                self.usage = response.usage
+                turn_usage = self.record_usage(response.usage, stage="notebook_action")
+                await self.emit_event({
+                    'type': 'token_usage',
+                    'iteration': self.iteration,
+                    'agent_id': self.agent_id,
+                    'depth': self.depth,
+                    'stage': 'notebook_action',
+                    'turn': turn_usage,
+                    'token_overview': self.get_token_overview(),
+                })
             
             message = response.choices[0].message
             
@@ -124,6 +133,14 @@ class NotebookAgent(BaseAgent):
                 'type': 'tool_call',
                 'iteration': self.iteration,
                 'tools': [tc.function.name for tc in message.tool_calls],
+                'tool_calls': [
+                    {
+                        'id': tc.id,
+                        'name': tc.function.name,
+                        'arguments': tc.function.arguments,
+                    }
+                    for tc in message.tool_calls
+                ],
                 'count': len(message.tool_calls)
             })
 
@@ -207,7 +224,17 @@ class NotebookAgent(BaseAgent):
             self.notebook = new_notebook
             usage_str = "N/A"
             if hasattr(update_response, 'usage') and update_response.usage:
+                turn_usage = self.record_usage(update_response.usage, stage="notebook_update")
                 usage_str = f"{update_response.usage.total_tokens/1e3:.2f}k"
+                await self.emit_event({
+                    'type': 'token_usage',
+                    'iteration': self.iteration,
+                    'agent_id': self.agent_id,
+                    'depth': self.depth,
+                    'stage': 'notebook_update',
+                    'turn': turn_usage,
+                    'token_overview': self.get_token_overview(),
+                })
             
             self.info(f"processed {usage_str} to update notebook with new length: {len(self.notebook)} chars")
 
@@ -253,4 +280,15 @@ class NotebookAgent(BaseAgent):
             messages=final_messages,
             temperature=0.1,
         )
+        if hasattr(response, 'usage') and response.usage:
+            turn_usage = self.record_usage(response.usage, stage="notebook_final")
+            await self.emit_event({
+                'type': 'token_usage',
+                'iteration': self.iteration,
+                'agent_id': self.agent_id,
+                'depth': self.depth,
+                'stage': 'notebook_final',
+                'turn': turn_usage,
+                'token_overview': self.get_token_overview(),
+            })
         return response.choices[0].message.content

@@ -1373,6 +1373,13 @@ def setup_commands(subparsers):
     drop_raw_parser = tools_subparsers.add_parser("drop-raw", help="Delete raw document(s) by ID or source")
     drop_raw_parser.add_argument("raw_document_id", nargs="?", help="Raw document ID (UUID)")
     drop_raw_parser.add_argument("--source-id", help="Delete all raw documents for this source_id")
+    drop_raw_parser.add_argument("--yes", action="store_true", help="Skip confirmation prompt")
+    drop_raw_parser.add_argument(
+        "--delete-linked",
+        action="store_true",
+        help="Also delete all documents linked to this raw document (and their chunks/embeddings)"
+    )
+    drop_raw_parser.set_defaults(func=cmd_drop_raw)
     drop_parser_parser = tools_subparsers.add_parser(
         "drop-parser",
         help="Bulk-delete all documents for a parser (and optionally a source)"
@@ -1381,16 +1388,6 @@ def setup_commands(subparsers):
     drop_parser_parser.add_argument("--source-id", help="Restrict deletion to this source ID")
     drop_parser_parser.add_argument("--yes", action="store_true", help="Skip confirmation prompt")
     drop_parser_parser.set_defaults(func=cmd_drop_parser)
-
-    drop_raw_parser = tools_subparsers.add_parser("drop-raw", help="Delete a raw document by ID")
-    drop_raw_parser.add_argument("raw_document_id", help="Raw document ID (UUID)")
-    drop_raw_parser.add_argument("--yes", action="store_true", help="Skip confirmation prompt")
-    drop_raw_parser.add_argument(
-        "--delete-linked",
-        action="store_true",
-        help="Also delete all documents linked to this raw document (and their chunks/embeddings)"
-    )
-    drop_raw_parser.set_defaults(func=cmd_drop_raw)
 
     # DB session management
     db_sessions_parser = tools_subparsers.add_parser("db-sessions", help="List PostgreSQL sessions idle in transaction")

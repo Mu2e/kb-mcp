@@ -41,7 +41,70 @@ class BaseAgent:
         self.tools = []
         self.conversation: List[Dict[str, Any]] = []
         self.usage = None
+        self.token_totals: Dict[str, int] = {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "main_context_tokens": 0,
+            "cached_prompt_tokens": 0,
+            "requests": 0,
+        }
+        self.token_history: List[Dict[str, Any]] = []
         self.domain_context = ""
+
+    def _usage_snapshot(self, usage: Any) -> Dict[str, int]:
+        """Normalize provider usage object into integer token counters."""
+        prompt_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
+        completion_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
+        total_tokens = int(getattr(usage, "total_tokens", 0) or 0)
+
+        prompt_details = getattr(usage, "prompt_tokens_details", None)
+        cached_prompt_tokens = 0
+        if prompt_details is not None:
+            cached_prompt_tokens = int(getattr(prompt_details, "cached_tokens", 0) or 0)
+
+        # "main_context_tokens" represents active input context actually processed this turn.
+        main_context_tokens = max(prompt_tokens - cached_prompt_tokens, 0)
+
+        # Some providers do not set total_tokens.
+        if total_tokens == 0:
+            total_tokens = prompt_tokens + completion_tokens
+
+        return {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": total_tokens,
+            "main_context_tokens": main_context_tokens,
+            "cached_prompt_tokens": cached_prompt_tokens,
+        }
+
+    def record_usage(self, usage: Any, stage: str = "chat_completion") -> Dict[str, int]:
+        """Track per-request and cumulative token usage for UI/telemetry."""
+        snapshot = self._usage_snapshot(usage)
+        self.usage = usage
+        self.token_totals["prompt_tokens"] += snapshot["prompt_tokens"]
+        self.token_totals["completion_tokens"] += snapshot["completion_tokens"]
+        self.token_totals["total_tokens"] += snapshot["total_tokens"]
+        self.token_totals["main_context_tokens"] += snapshot["main_context_tokens"]
+        self.token_totals["cached_prompt_tokens"] += snapshot["cached_prompt_tokens"]
+        self.token_totals["requests"] += 1
+
+        turn = {
+            "stage": stage,
+            **snapshot,
+            "request_index": self.token_totals["requests"],
+        }
+        self.token_history.append(turn)
+        return turn
+
+    def get_token_overview(self) -> Dict[str, Any]:
+        """Return cumulative and per-request usage counters."""
+        latest = self.token_history[-1] if self.token_history else None
+        return {
+            "totals": dict(self.token_totals),
+            "latest": latest,
+            "history": list(self.token_history),
+        }
 
     async def emit_event(self, event: Dict[str, Any]):
         """Emit an event via callback if available."""
@@ -65,7 +128,8 @@ class BaseAgent:
                 'agent_id': self.agent_id,
                 'depth': self.depth,
                 'message': info,
-                'tokens': tokens
+                'tokens': tokens,
+                'token_overview': self.get_token_overview(),
             }
             # Create task for async callback (don't block)
             if asyncio.iscoroutinefunction(self.callback):

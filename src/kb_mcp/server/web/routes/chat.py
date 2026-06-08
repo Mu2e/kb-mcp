@@ -178,6 +178,24 @@ def setup_chat_routes(app, session_manager: WebSessionManager, require_auth_html
             #messages .markdown-content em {{
                 font-style: italic;
             }}
+
+            #chat-status.working::before {{
+                content: '';
+                display: inline-block;
+                width: 8px;
+                height: 8px;
+                margin-right: 8px;
+                border-radius: 50%;
+                background: #1565c0;
+                animation: chatPulse 1s infinite ease-in-out;
+                vertical-align: middle;
+            }}
+
+            @keyframes chatPulse {{
+                0% {{ opacity: 0.35; transform: scale(0.9); }}
+                50% {{ opacity: 1; transform: scale(1.1); }}
+                100% {{ opacity: 0.35; transform: scale(0.9); }}
+            }}
         </style>
         
         <h1>Agent Chat Interface</h1>
@@ -187,16 +205,19 @@ def setup_chat_routes(app, session_manager: WebSessionManager, require_auth_html
                 <!-- Messages will appear here -->
             </div>
 
-            <div id="notebook-section" style="display: none; margin-bottom: 20px;">
-                <button onclick="toggleNotebook()" class="btn">Toggle Notebook</button>
-                <div id="notebook-content" style="display: none; max-height: 300px; overflow-y: auto; padding: 10px; background: #f5f5f5; border: 1px solid #ccc; white-space: pre-wrap; font-family: monospace; font-size: 12px;">
-                </div>
-            </div>
-
             <form id="chat-form" onsubmit="sendMessage(event)">
                 <input type="text" id="message-input" placeholder="Ask a question..." style="width: 80%; padding: 10px;" required>
                 <button type="submit" style="width: 18%; padding: 10px;">Send</button>
             </form>
+            <div id="chat-status" style="margin-top: 12px; font-size: 13px; color: #666;">
+                Status: Ready
+            </div>
+
+            <div id="notebook-section" style="display: none; margin-top: 20px;">
+                <button onclick="toggleNotebook()" class="btn">Toggle Notebook</button>
+                <div id="notebook-content" style="display: none; max-height: 300px; overflow-y: auto; padding: 10px; background: #f5f5f5; border: 1px solid #ccc; white-space: pre-wrap; font-family: monospace; font-size: 12px; margin-top: 10px;">
+                </div>
+            </div>
         </div>
 
         <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
@@ -218,6 +239,7 @@ def setup_chat_routes(app, session_manager: WebSessionManager, require_auth_html
                 }});
                 const data = await response.json();
                 chatSessionId = data.session_id;
+                setStatus('Ready', '#666');
 
                 if (docId) {{
                     addMessage('system', `Loaded document: ${{docTitle}}`);
@@ -257,9 +279,50 @@ def setup_chat_routes(app, session_manager: WebSessionManager, require_auth_html
                 messagesDiv.scrollTop = messagesDiv.scrollHeight;
             }}
 
+            function renderToolCallMessage(data) {{
+                const messagesDiv = document.getElementById('messages');
+                const msgDiv = document.createElement('div');
+                msgDiv.style.marginBottom = '10px';
+                msgDiv.style.padding = '10px';
+                msgDiv.style.borderRadius = '5px';
+                msgDiv.style.backgroundColor = '#fff3e0';
+
+                const toolCalls = Array.isArray(data?.tool_calls) && data.tool_calls.length ? data.tool_calls : [];
+                const toolNames = toolCalls.length ? toolCalls.map((tool) => tool.name || '?') : (Array.isArray(data?.tools) ? data.tools : []);
+                const detailsHtml = toolCalls.length
+                    ? toolCalls.map((tool) => {{
+                        const argsText = tool.arguments || '{{}}';
+                        const escapedArgs = argsText.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+                        const escapedName = (tool.name || '?').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+                        return `
+                            <details style="display: inline; margin-left: 6px;">
+                                <summary style="cursor: pointer; display: inline;"><strong>${{escapedName}}</strong></summary>
+                                <pre style="margin: 8px 0 0; white-space: pre-wrap; word-break: break-word; background: rgba(0,0,0,0.04); padding: 8px; border-radius: 4px;">${{escapedArgs}}</pre>
+                            </details>
+                        `;
+                    }}).join('')
+                    : '';
+
+                msgDiv.innerHTML = `<strong>Calling tools:</strong> ${{toolNames.join(', ') || 'unknown'}}${{detailsHtml ? detailsHtml : ''}}`;
+                messagesDiv.appendChild(msgDiv);
+                messagesDiv.scrollTop = messagesDiv.scrollHeight;
+            }}
+
             function updateNotebook(notebook) {{
                 document.getElementById('notebook-section').style.display = 'block';
                 document.getElementById('notebook-content').textContent = notebook;
+            }}
+
+            function setStatus(text, color = '#666', isWorking = false) {{
+                const statusEl = document.getElementById('chat-status');
+                if (!statusEl) return;
+                statusEl.textContent = `Status: ${{text}}`;
+                statusEl.style.color = color;
+                if (isWorking) {{
+                    statusEl.classList.add('working');
+                }} else {{
+                    statusEl.classList.remove('working');
+                }}
             }}
 
             async function sendMessage(event) {{
@@ -276,6 +339,7 @@ def setup_chat_routes(app, session_manager: WebSessionManager, require_auth_html
                 // Disable form during processing
                 document.getElementById('chat-form').style.opacity = '0.5';
                 document.getElementById('message-input').disabled = true;
+                setStatus('Working on it...', '#1565c0', true);
 
                 // Stream response via SSE
                 const eventSource = new EventSource(
@@ -287,16 +351,33 @@ def setup_chat_routes(app, session_manager: WebSessionManager, require_auth_html
                 eventSource.addEventListener('info', (e) => {{
                     const data = JSON.parse(e.data);
                     console.log('Agent:', data.message);
+                    if (data.message) {{
+                        setStatus(data.message, '#1565c0', true);
+                    }}
+                }});
+
+                eventSource.addEventListener('heartbeat', (e) => {{
+                    setStatus('Working on it...', '#1565c0', true);
                 }});
 
                 eventSource.addEventListener('notebook_update', (e) => {{
                     const data = JSON.parse(e.data);
                     updateNotebook(data.notebook);
+                    setStatus('Working on it...', '#1565c0', true);
                 }});
 
                 eventSource.addEventListener('tool_call', (e) => {{
                     const data = JSON.parse(e.data);
-                    addMessage('system', `Calling tools: ${{data.tools.join(', ')}}`);
+                    renderToolCallMessage(data);
+                    setStatus('Working on it...', '#1565c0', true);
+                }});
+
+                eventSource.addEventListener('token_usage', (e) => {{
+                    const data = JSON.parse(e.data);
+                    const total = data?.token_overview?.totals?.total_tokens;
+                    if (typeof total === 'number') {{
+                        setStatus(`Working on it... (${{total.toLocaleString()}} tokens)`, '#1565c0', true);
+                    }}
                 }});
 
                 eventSource.addEventListener('response', (e) => {{
@@ -307,6 +388,7 @@ def setup_chat_routes(app, session_manager: WebSessionManager, require_auth_html
                 eventSource.addEventListener('done', (e) => {{
                     eventSource.close();
                     addMessage('assistant', responseText);
+                    setStatus('Completed', '#2e7d32', false);
 
                     // Re-enable form
                     document.getElementById('chat-form').style.opacity = '1';
@@ -316,7 +398,15 @@ def setup_chat_routes(app, session_manager: WebSessionManager, require_auth_html
 
                 eventSource.addEventListener('error', (e) => {{
                     eventSource.close();
-                    addMessage('system', 'Error: Connection failed');
+                    let serverMessage = '';
+                    try {{
+                        const payload = e && e.data ? JSON.parse(e.data) : null;
+                        serverMessage = payload && payload.message ? payload.message : '';
+                    }} catch (err) {{
+                        serverMessage = '';
+                    }}
+                    addMessage('system', serverMessage ? `Error: ${{serverMessage}}` : 'Error: Connection failed');
+                    setStatus(serverMessage ? `Error: ${{serverMessage}}` : 'Error: connection failed', '#c62828', false);
                     document.getElementById('chat-form').style.opacity = '1';
                     document.getElementById('message-input').disabled = false;
                 }});
@@ -545,9 +635,12 @@ def setup_chat_routes(app, session_manager: WebSessionManager, require_auth_html
                             logger.error(f"Agent task failed: {e}", exc_info=True)
                             yield f"event: error\ndata: {json.dumps({'message': f'Agent task failed: {str(e)}'})}\n\n"
                             break
-                    # Send keepalive
-                    print(f"DEBUG Sending keepalive")
-                    yield f": keepalive\n\n"
+                    # Send heartbeat event that frontend can display.
+                    heartbeat = {
+                        'message': 'still_processing',
+                        'ts': datetime.utcnow().isoformat() + 'Z',
+                    }
+                    yield f"event: heartbeat\ndata: {json.dumps(heartbeat)}\n\n"
                     continue
 
             # Save response to history

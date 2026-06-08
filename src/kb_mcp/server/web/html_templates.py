@@ -9,7 +9,7 @@ def get_default_nav_items() -> list[tuple[str, str]]:
         ("/web/chat", "Agent Chat"),
         ("/web/graph", "Knowledge Graph"),
         ("/web/eval", "Evaluations"),
-        ("/web/compare", "Parser Compare"),
+        #("/web/compare", "Parser Compare"),
         ("/web/statistics", "Statistics"),
         ("/web/logs", "Logs"),
         ("/web/upload", "Upload"),
