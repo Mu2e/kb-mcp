@@ -20,7 +20,6 @@ def setup_statistics_routes(app, session_manager: WebSessionManager, require_aut
         require_auth_html: Authentication helper function
     """
 
-    @app.route("/web/statistics")
     async def web_statistics(request: Request):
         """Statistics page showing chunking strategies vs embedding names."""
         # Check authentication first
@@ -228,3 +227,4 @@ def setup_statistics_routes(app, session_manager: WebSessionManager, require_aut
             content=content,
             username=username
         ))
+    app.add_route("/web/statistics", web_statistics)

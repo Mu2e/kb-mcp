@@ -65,7 +65,6 @@ class ChatSession:
 def setup_chat_routes(app, session_manager: WebSessionManager, require_auth_html, require_auth_api):
     """Setup chat interface routes."""
 
-    @app.route("/web/chat", methods=["GET"])
     async def chat_page(request: Request):
         """Render chat interface page."""
         session_data, redirect = await require_auth_html(request, session_manager)
@@ -420,7 +419,6 @@ def setup_chat_routes(app, session_manager: WebSessionManager, require_auth_html
             username=username
         ))
 
-    @app.route("/web/api/chat/start", methods=["POST"])
     async def start_chat(request: Request):
         """Start a new chat session."""
         session_data, error_response = await require_auth_api(request, session_manager, json_response=True)
@@ -459,7 +457,6 @@ def setup_chat_routes(app, session_manager: WebSessionManager, require_auth_html
             'doc_context': document_context is not None
         })
 
-    @app.route("/web/api/chat/message", methods=["GET"])
     async def chat_message(request: Request):
         """Process chat message with SSE streaming."""
         session_data, error_response = await require_auth_api(request, session_manager)
@@ -663,7 +660,6 @@ def setup_chat_routes(app, session_manager: WebSessionManager, require_auth_html
             }
         )
 
-    @app.route("/web/api/chat/close/{session_id}", methods=["POST"])
     async def close_chat(request: Request):
         """Close a chat session and clean up resources."""
         session_data, error_response = await require_auth_api(request, session_manager, json_response=True)
@@ -700,6 +696,12 @@ def setup_chat_routes(app, session_manager: WebSessionManager, require_auth_html
                     await chat_session.cleanup()
                     del active_chat_sessions[session_id]
                     logger.info(f"Cleaned up inactive session {session_id} (age: {age/60:.1f} min)")
+
+    # Starlette 1.0 removed the @app.route decorator - register explicitly.
+    app.add_route("/web/chat", chat_page, methods=["GET"])
+    app.add_route("/web/api/chat/start", start_chat, methods=["POST"])
+    app.add_route("/web/api/chat/message", chat_message, methods=["GET"])
+    app.add_route("/web/api/chat/close/{session_id}", close_chat, methods=["POST"])
 
     # Store the cleanup task starter for later use
     app.state.chat_cleanup_task = cleanup_old_sessions

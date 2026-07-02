@@ -14,7 +14,6 @@ logger = logging.getLogger(__name__)
 def setup_graph_routes(app, session_manager: WebSessionManager):
     """Set up graph exploration routes."""
 
-    @app.route("/web/graph")
     async def graph_search(request: Request):
         """Graph search page with node search and path finding."""
         # Check authentication first
@@ -261,8 +260,8 @@ def setup_graph_routes(app, session_manager: WebSessionManager):
             None,
             username
         ))
+    app.add_route("/web/graph", graph_search)
 
-    @app.route("/web/graph/node/{node_id}")
     async def node_detail(request: Request):
         """View detailed information about a specific node."""
         # Check authentication first
@@ -481,8 +480,8 @@ def setup_graph_routes(app, session_manager: WebSessionManager):
                 ),
                 status_code=500
             )
+    app.add_route("/web/graph/node/{node_id}", node_detail)
 
-    @app.route("/web/graph/evidence/{relation_id}")
     async def evidence_detail(request: Request):
         """View evidence for a specific relation."""
         # Check authentication first
@@ -664,3 +663,4 @@ def setup_graph_routes(app, session_manager: WebSessionManager):
                 ),
                 status_code=500
             )
+    app.add_route("/web/graph/evidence/{relation_id}", evidence_detail)

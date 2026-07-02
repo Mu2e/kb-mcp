@@ -228,7 +228,6 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
     upload_dir = Path(data_dir) / "uploads"
     upload_dir.mkdir(parents=True, exist_ok=True)
 
-    @app.route("/web")
     async def web_page(request: Request):
         """Web interface (GitHub OAuth protected)."""
         # Check authentication first
@@ -378,8 +377,8 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
             None,
             username
         ))
+    app.add_route("/web", web_page)
 
-    @app.route("/web/document/{doc_id}")
     async def document_detail(request: Request):
         """View full document details (HTML)."""
         import time
@@ -1511,8 +1510,8 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
                 ),
                 status_code=500
             )
+    app.add_route("/web/document/{doc_id}", document_detail)
 
-    @app.route("/web/document/{doc_id}/rechunk-embed", methods=["POST"])
     async def rechunk_embed_document(request: Request):
         """Re-chunk and embed a document (POST)."""
         # Check authentication first
@@ -1603,8 +1602,8 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
                 ),
                 status_code=500
             )
+    app.add_route("/web/document/{doc_id}/rechunk-embed", rechunk_embed_document, methods=["POST"])
 
-    @app.route("/web/document/{doc_id}/delete", methods=["POST"])
     async def delete_document_route(request: Request):
         """Delete a document (POST)."""
         # Check authentication first
@@ -1680,8 +1679,8 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
                 ),
                 status_code=500
             )
+    app.add_route("/web/document/{doc_id}/delete", delete_document_route, methods=["POST"])
 
-    @app.route("/web/document/{doc_id}/generate-summary", methods=["POST"])
     async def generate_summary_document(request: Request):
         """Generate summary for a document (POST)."""
         # Check authentication first
@@ -1775,8 +1774,8 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
                 ),
                 status_code=500
             )
+    app.add_route("/web/document/{doc_id}/generate-summary", generate_summary_document, methods=["POST"])
 
-    @app.route("/web/upload", methods=["GET"])
     async def upload_page(request: Request):
         """File upload page (requires admin privileges)."""
         # Check authentication and admin privileges
@@ -1911,8 +1910,8 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
             username=username
         )
         return HTMLResponse(html)
+    app.add_route("/web/upload", upload_page, methods=["GET"])
 
-    @app.route("/web/upload", methods=["POST"])
     async def upload_file(request: Request):
         """Handle file upload (requires admin privileges)."""
         # Check authentication and admin privileges
@@ -2244,9 +2243,8 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
                 ),
                 status_code=500
             )
+    app.add_route("/web/upload", upload_file, methods=["POST"])
 
-    @app.route("/web/upload/meeting", methods=["GET"])
-    @app.route("/web/upload/meeting-comments", methods=["GET"])
     async def upload_meeting_comments_page(request: Request):
         """Simplified meeting comments upload page (requires admin privileges)."""
         session_data, redirect = await require_auth_html(request, session_manager, require_admin=True)
@@ -2360,8 +2358,6 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
         )
         return HTMLResponse(html)
 
-    @app.route("/web/upload/meeting", methods=["POST"])
-    @app.route("/web/upload/meeting-comments", methods=["POST"])
     async def upload_meeting_comments(request: Request):
         """Handle simplified meeting comments upload (requires admin privileges)."""
         session_data, redirect = await require_auth_html(request, session_manager, require_admin=True)
@@ -2604,7 +2600,6 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
                 status_code=500,
             )
 
-    @app.route("/web/raw/{raw_doc_id}")
     async def raw_document_detail(request: Request):
         """Show details for a raw document, its parsed versions, and any parser comparison."""
         session_data, redirect = await require_auth_html(request, session_manager)
@@ -2831,7 +2826,6 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
                 status_code=500,
             )
 
-    @app.route("/web/compare")
     async def compare_page(request: Request):
         """List all parser categorization runs, grouped by source, expandable."""
         session_data, redirect = await require_auth_html(request, session_manager)
@@ -2934,5 +2928,13 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
                 ),
                 status_code=500,
             )
+
+    # Starlette 1.0 removed the @app.route decorator - register explicitly.
+    app.add_route("/web/upload/meeting", upload_meeting_comments_page, methods=["GET"])
+    app.add_route("/web/upload/meeting-comments", upload_meeting_comments_page, methods=["GET"])
+    app.add_route("/web/upload/meeting", upload_meeting_comments, methods=["POST"])
+    app.add_route("/web/upload/meeting-comments", upload_meeting_comments, methods=["POST"])
+    app.add_route("/web/raw/{raw_doc_id}", raw_document_detail, methods=["GET"])
+    app.add_route("/web/compare", compare_page, methods=["GET"])
 
     # Logs, statistics, and eval routes moved to separate files

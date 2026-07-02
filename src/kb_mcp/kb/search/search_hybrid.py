@@ -23,6 +23,10 @@ def search_hybrid(
     rrf_k: int = 60,
     explain_analyse: bool = False,
     max_chunks_per_doc: Optional[int] = None,
+    rerank: Optional[bool] = None,
+    doc_type_boost: Optional[Dict[str, float]] = None,
+    expand_context: bool = False,
+    expand_context_window: int = 1,
     **kwargs
 ) -> Dict[str, Any]:
     """
@@ -129,9 +133,12 @@ def search_hybrid(
             )
         except Exception as e:
             logger.warning(f"Semantic search failed: {e}")
-            semantic_results = {"results": [], "metadata": {}}
+            semantic_results = {"results": [], "metadata": {"total_results": 0}}
 
         semantic_time = time.time() - semantic_start
+        resolved_embedding_name = (
+            semantic_results.get("metadata", {}).get("embedding_name") or embedding_name
+        )
 
         # Run full-text search
         fulltext_start = time.time()
@@ -151,9 +158,16 @@ def search_hybrid(
             )
         except Exception as e:
             logger.warning(f"Full-text search failed: {e}")
-            fulltext_results = {"results": [], "metadata": {}}
+            fulltext_results = {"results": [], "metadata": {"total_results": 0}}
 
         fulltext_time = time.time() - fulltext_start
+
+        semantic_total_results = semantic_results.get("metadata", {}).get(
+            "total_results", len(semantic_results.get("results", []))
+        )
+        fulltext_total_results = fulltext_results.get("metadata", {}).get(
+            "total_results", len(fulltext_results.get("results", []))
+        )
 
         # Prepare results lists for RRF
         fusion_start = time.time()
@@ -241,6 +255,58 @@ def search_hybrid(
                 
         final_results = list(final_docs_map.values())
 
+        # Apply doc_type boosts from the query router plus the per-record
+        # meta signals. Both adjust each
+        # chunk's rrf_score after fusion and before final sort:
+        #
+        #   * `doc_type_boost` — router-supplied factor per doc_type (e.g.
+        #     {"table": 1.7} for TABLE-typed queries).
+        #   * `num_rows / num_cols` — tables with fewer than 2 of either
+        #     dimension are almost always page-layout artifacts; halve.
+        #   * `level` — sections at level 1 or 2 are top-level topic units
+        #     (good for SYNTHESIS); level >= 3 is paragraph-tier and gets
+        #     reduced.
+        #   * `caption` — captioned image records carry an explicit
+        #     authorial label that's stronger than incidental nearby_text;
+        #     small bump.
+        #
+        # All factors compose multiplicatively. doc_provenance() makes the
+        # signals available on each result dict; falling back to 1.0 means
+        # records without a given key are unaffected.
+        for doc in final_results:
+            factor = 1.0
+            applied = {}
+
+            doc_type = doc.get("doc_type")
+            if doc_type_boost:
+                f = doc_type_boost.get(doc_type)
+                if f and f != 1.0:
+                    factor *= f
+                    applied["doc_type_boost"] = f
+
+            if doc_type == "table":
+                num_rows = doc.get("num_rows")
+                num_cols = doc.get("num_cols")
+                if (num_rows is not None and num_rows < 2) or (num_cols is not None and num_cols < 2):
+                    factor *= 0.5
+                    applied["tiny_table_penalty"] = 0.5
+
+            if doc_type == "section":
+                level = doc.get("level")
+                if level is not None and level >= 3:
+                    factor *= 0.85
+                    applied["deep_section_penalty"] = 0.85
+
+            if doc_type == "image" and doc.get("caption"):
+                factor *= 1.15
+                applied["captioned_image_bump"] = 1.15
+
+            if factor != 1.0:
+                for chunk in doc["chunks"]:
+                    chunk["rrf_score"] = chunk.get("rrf_score", 0.0) * factor
+                    rrf_rank = chunk.setdefault("rrf_rank", {})
+                    rrf_rank.update(applied)
+
         # sort based on rrf_score
         for doc in final_results:
             doc["chunks"].sort(key=lambda x: x["rrf_score"], reverse=True)
@@ -250,6 +316,35 @@ def search_hybrid(
         final_results = final_results[:max_results]
 
         fusion_time = time.time() - fusion_start
+
+        # Optional cross-encoder reranking
+        rerank_time = 0.0
+        if rerank is None:
+            # Auto-detect from config
+            from .reranker import get_reranker
+            reranker = get_reranker()
+        elif rerank:
+            from .reranker import get_reranker
+            reranker = get_reranker(enabled=True)
+        else:
+            reranker = None
+
+        if reranker and final_results:
+            rerank_start = time.time()
+            final_results = reranker.rerank(query, final_results, top_k=max_results)
+            rerank_time = time.time() - rerank_start
+            logger.info(f"Reranking took {rerank_time:.3f}s for {len(final_results)} docs")
+
+        # Optional hierarchical context expansion.
+        # Off by default — callers opt in when the LLM downstream needs
+        # richer context (parent doc title, parent summary, surrounding
+        # paragraphs from the body-order walk). Dedup against hit text
+        # protects the prompt budget from re-surfacing what's already
+        # there.
+        if expand_context and final_results:
+            from .expand_context import attach_parent_provenance
+            attach_parent_provenance(final_results, session=session, window=expand_context_window)
+
         total_time = time.time() - total_start
 
         # Log search to database
@@ -284,9 +379,13 @@ def search_hybrid(
                 "total_results": len(final_results),
                 "query": query,
                 "max_results": max_results,
-                "semantic_results": semantic_results["metadata"]["total_results"],
-                "fulltext_results": fulltext_results["metadata"]["total_results"],
+                "embedding_name": resolved_embedding_name,
+                "semantic_results": semantic_total_results,
+                "fulltext_results": fulltext_total_results,
                 "hybrid_results": len(final_results),
                 "rrf_k": rrf_k,
+                "reranked": reranker is not None,
+                "time_rerank": rerank_time,
+                "reranker_model": reranker.model_name if reranker else None,
             },
         }

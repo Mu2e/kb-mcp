@@ -1,7 +1,7 @@
-"""Server package.
+"""MCP server and web interface for the Mu2e knowledge base.
 
-This package exposes the main MCP server entrypoint.
-The actual implementation lives in server.server.
+Provides FastMCP server with 6 tools (search, get, graph) and a
+Starlette web UI for document browsing, search, and evaluation.
 """
 
 def main():
