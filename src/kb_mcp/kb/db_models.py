@@ -1,5 +1,6 @@
 """Core knowledge base models."""
 
+import logging
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -22,6 +23,8 @@ from sqlalchemy import (
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.orm import relationship, declarative_base
 from sqlalchemy.inspection import inspect as sqlalchemy_inspect
+
+logger = logging.getLogger(__name__)
 
 Base = declarative_base()
 
@@ -197,6 +200,23 @@ class Source(Base):
         return f"<Source(id={self.id}, name={self.name})>"
 
 
+#: `schema_name` value embedded in every DoclingDocument `model_dump()`.
+DOCLING_SCHEMA_NAME = "DoclingDocument"
+
+
+def is_docling_document(payload) -> bool:
+    """True if `payload` is a persisted DoclingDocument dict.
+
+    `Document.parser_output` holds the raw structured output of whichever
+    parser produced the document; DoclingDocument dumps self-identify via
+    their embedded `schema_name` field (always serialised by
+    `model_dump(mode="json")`). Readers that walk the DoclingDocument
+    structure (body / texts / tables / pictures / groups) must guard on
+    this instead of assuming the payload shape.
+    """
+    return isinstance(payload, dict) and payload.get("schema_name") == DOCLING_SCHEMA_NAME
+
+
 class Document(Base):
     """Document table 'documents' for storing LLM-ready knowledge base documents.
 
@@ -227,6 +247,14 @@ class Document(Base):
         summary (str): LLM-generated detailed summary for retrieval and display.
         gist (str): LLM-generated high-level concepts/themes for embedding context.
         content_hash (str): Hash of the document content for deduplication.
+        parser_output (dict): Raw structured output of whichever parser
+            produced this document (parser-agnostic). The Docling path stores
+            the DoclingDocument JSON — self-identifying via its embedded
+            `schema_name` field — with picture bytes stripped: the structural
+            information (texts, tables, pictures-without-bytes, pages, bboxes,
+            references) that lets us re-derive chunks/tables/figures without
+            re-parsing the source file. Null when a parser has no structured
+            output to persist.
     """
 
     __tablename__ = "documents"
@@ -321,6 +349,15 @@ class Document(Base):
     # Stored here for convenience - can check duplicates quickly
     # Alternative would be separate deduplication table, but this is simpler for now
     content_hash = Column(String(64), nullable=True, index=True)
+
+    # Raw structured output of the parser that produced this document.
+    # Parser-agnostic on purpose so alternative parsers can persist their
+    # native representation side by side; the Docling path stores the
+    # DoclingDocument JSON (self-identifying via `schema_name`) — the
+    # source-of-truth representation that lets us re-derive chunks / tables /
+    # figures without re-parsing the original file.
+    parser_output = Column(JSONB, nullable=True)
+
     # Relationships
     source_ref = relationship("Source", back_populates="documents")
     raw_document = relationship("RawDocument", back_populates="documents")
@@ -708,6 +745,7 @@ class Document(Base):
             binary=data.get("binary"),
             title=title,  # Populate from data["title"] or meta["title"] (removed from meta)
             meta=meta,
+            parser_output=data.get("parser_output"),
             creating_time=data.get("creating_time"),
             update_time=data.get("update_time"),
             parent_id=data.get("parent_id")

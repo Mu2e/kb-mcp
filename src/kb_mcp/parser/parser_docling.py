@@ -1,27 +1,65 @@
-"""Docling parser for PDF to markdown conversion."""
+"""Docling parser for high-quality PDF to markdown conversion.
 
+IBM Research's Docling library — DocLayNet layout detection plus TableFormer for
+table structure. Produces structured Markdown with preserved headings, lists,
+and tables. Mirrors the lazy-init / module-level cache pattern of `parser_marker.py`.
+"""
+
+import html
+import io
 import logging
 import os
-import re
-from io import BytesIO
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, List, Tuple
 
 from .parser_base import BaseParser
 
 logger = logging.getLogger(__name__)
 
-_CONVERTER_CACHE = None
+# Module-level converter cache, keyed on whether formula enrichment is on.
+# Two converters at most: { False: <plain>, True: <with_formula_enrichment> }.
+# OCR (PARSE_OCR) is read from env config at init time and is constant for
+# the process lifetime, so it doesn't need to participate in the cache key.
+# Per-document dispatch (PARSE_FORMULA_ENRICHMENT_AUTO)
+# decides which one to use; both share the same format_options for non-PDF
+# inputs, so PPTX / DOCX / HTML / XLSX outputs are identical regardless.
+_CONVERTER_CACHE: dict = {}
 
 
-def _get_converter() -> Any:
-    global _CONVERTER_CACHE
-    if _CONVERTER_CACHE is not None:
-        return _CONVERTER_CACHE
+def _get_converter(with_formula_enrichment: bool = False) -> Any:
+    """Initialize and return a docling DocumentConverter (cached).
+
+    The converter is registered for all formats kb-mcp routes through
+    Docling — PDF (custom layout-detection + table-structure pipeline,
+    accelerator-aware), plus PPTX / DOCX / HTML / XLSX with Docling's
+    default pipelines. The non-PDF readers don't need an accelerator;
+    cold-start is cheap.
+
+    Two cached variants:
+      * `with_formula_enrichment=False` (default): fast PDF pipeline,
+        formulas left as `<!-- formula-not-decoded -->` placeholders.
+      * `with_formula_enrichment=True`: PDF pipeline runs the
+        `CodeFormulaV2` model on each page. Recovers `$$...$$` LaTeX
+        blocks at ~+78 % parse time on equation-heavy documents.
+    """
+    if with_formula_enrichment in _CONVERTER_CACHE:
+        return _CONVERTER_CACHE[with_formula_enrichment]
 
     try:
-        from docling.document_converter import DocumentConverter, PdfFormatOption
-        from docling.datamodel.pipeline_options import PdfPipelineOptions
+        from docling.document_converter import (
+            DocumentConverter,
+            PdfFormatOption,
+            PowerpointFormatOption,
+            WordFormatOption,
+            HTMLFormatOption,
+            ExcelFormatOption,
+        )
+        from docling.datamodel.base_models import InputFormat
+        from docling.datamodel.pipeline_options import (
+            AcceleratorDevice,
+            AcceleratorOptions,
+            PdfPipelineOptions,
+        )
     except ImportError:
         logger.error("docling not installed. Install with: pip install docling")
         return None
@@ -30,25 +68,255 @@ def _get_converter() -> Any:
     if "DOCLING_CACHE_DIR" in os.environ:
         os.makedirs(os.environ["DOCLING_CACHE_DIR"], exist_ok=True)
 
-    logger.info("Initializing Docling DocumentConverter (this may take a while)...")
+    from ..config import get_parser_config
+    do_ocr = bool(get_parser_config().get("ocr", True))
+
+    logger.info(
+        "Initializing docling DocumentConverter "
+        f"(ocr={do_ocr}, formula_enrichment={with_formula_enrichment}; "
+        "model download on first use)..."
+    )
 
     try:
-        pipeline_options = PdfPipelineOptions()
-        pipeline_options.do_ocr = True
-        pipeline_options.do_table_structure = True
-        pipeline_options.generate_picture_images = True
+        device = AcceleratorDevice.CUDA if _cuda_available() else AcceleratorDevice.CPU
+        pdf_pipeline_options = PdfPipelineOptions()
+        pdf_pipeline_options.do_ocr = do_ocr
+        pdf_pipeline_options.do_table_structure = True
+        pdf_pipeline_options.generate_picture_images = True
+        if with_formula_enrichment:
+            pdf_pipeline_options.do_formula_enrichment = True
+            logger.info("docling formula enrichment ENABLED (CodeFormulaV2)")
+        pdf_pipeline_options.accelerator_options = AcceleratorOptions(device=device)
+        logger.info(f"docling accelerator device: {device.value}")
 
-        _CONVERTER_CACHE = DocumentConverter(
-            format_options={"pdf": PdfFormatOption(pipeline_options=pipeline_options)}
+        converter = DocumentConverter(
+            format_options={
+                InputFormat.PDF: PdfFormatOption(pipeline_options=pdf_pipeline_options),
+                InputFormat.PPTX: PowerpointFormatOption(),
+                InputFormat.DOCX: WordFormatOption(),
+                InputFormat.HTML: HTMLFormatOption(),
+                InputFormat.XLSX: ExcelFormatOption(),
+            }
         )
-        return _CONVERTER_CACHE
+        _CONVERTER_CACHE[with_formula_enrichment] = converter
+        return converter
     except Exception as e:
-        logger.error(f"Failed to initialize Docling converter: {e}")
+        logger.error(f"Failed to initialize docling: {e}")
         return None
 
 
+def _cuda_available() -> bool:
+    try:
+        import torch
+        return bool(torch.cuda.is_available())
+    except Exception:
+        return False
+
+
+def _extract_section_records(docling_dict: dict, parent_data: dict) -> list:
+    """Walk DoclingDocument body and emit one `doc_type="section"` dict per section.
+
+    Hierarchical retrieval: chunks already carry
+    `section_path`, but to *retrieve* at the section level we need the section
+    itself as an indexable record. This helper does a flat pass over
+    `docling_dict["body"]["children"]`: every `section_header` (or `title`)
+    text element opens a new section; subsequent text and group bodies
+    accumulate into that section until the next header. Tables and pictures
+    are skipped — they're already first-class records of their own.
+
+    Sections without text (heading-only with no following body) are dropped.
+
+    Returns a list of Document-shaped dicts:
+      - doc_type="section", source_type="text/markdown"
+      - text = "<title>\\n\\n<aggregated section text>"
+      - meta = {section_index, section_title, level, page_start, page_end,
+                self_ref, parser}
+      - parent_id wired to the parent text doc later (after parent is saved)
+
+    Search backends can filter or boost on `doc_type="section"` to give
+    callers the "level=section" view the advice memo asks for.
+    """
+    body = (docling_dict.get("body") or {})
+    body_children = body.get("children") or []
+    texts_by_ref = {
+        t.get("self_ref") or f"#/texts/{i}": t
+        for i, t in enumerate(docling_dict.get("texts") or [])
+    }
+    groups_by_ref = {
+        g.get("self_ref") or f"#/groups/{i}": g
+        for i, g in enumerate(docling_dict.get("groups") or [])
+    }
+
+    sections: list = []
+    current_title: str = ""
+    current_self_ref = None
+    current_level: int = 1
+    current_parts: list = []
+    current_pages: set = set()
+
+    def flush():
+        nonlocal current_title, current_self_ref, current_level, current_parts, current_pages
+        body_text = "\n\n".join(p for p in current_parts if p).strip()
+        if body_text:
+            pages = sorted(p for p in current_pages if p is not None)
+            sections.append({
+                "title": current_title,
+                "level": current_level,
+                "self_ref": current_self_ref,
+                "text": body_text,
+                "page_start": pages[0] if pages else None,
+                "page_end": pages[-1] if pages else None,
+            })
+        current_title = ""
+        current_self_ref = None
+        current_level = 1
+        current_parts = []
+        current_pages = set()
+
+    def collect_pages_from(prov_list):
+        if not prov_list:
+            return
+        for p in prov_list:
+            pn = p.get("page_no") if isinstance(p, dict) else None
+            if pn:
+                current_pages.add(pn)
+
+    for child in body_children:
+        cref = child.get("cref") if isinstance(child, dict) else None
+        if not cref:
+            continue
+        if cref.startswith("#/texts/"):
+            t = texts_by_ref.get(cref) or {}
+            label = t.get("label")
+            txt = (t.get("text") or "").strip()
+            if label in ("section_header", "title") and txt:
+                flush()
+                current_title = txt
+                current_self_ref = t.get("self_ref")
+                current_level = t.get("level") or 1
+                collect_pages_from(t.get("prov"))
+            elif txt:
+                current_parts.append(txt)
+                collect_pages_from(t.get("prov"))
+        elif cref.startswith("#/groups/"):
+            g = groups_by_ref.get(cref) or {}
+            for sub in g.get("children") or []:
+                sub_cref = sub.get("cref") if isinstance(sub, dict) else None
+                if not sub_cref or not sub_cref.startswith("#/texts/"):
+                    continue
+                sub_t = texts_by_ref.get(sub_cref) or {}
+                sub_txt = (sub_t.get("text") or "").strip()
+                if not sub_txt:
+                    continue
+                # Prefix list items with a bullet so the chunker still treats
+                # them as a list when re-rendered into chunk.text.
+                if sub_t.get("label") == "list_item":
+                    current_parts.append(f"- {sub_txt}")
+                else:
+                    current_parts.append(sub_txt)
+                collect_pages_from(sub_t.get("prov"))
+        # tables / pictures / form_items / key_value_items: skip (own records)
+
+    flush()
+
+    section_dicts: list = []
+    parent_doc_id = parent_data.get("doc_id", "doc")
+    for idx, s in enumerate(sections):
+        text = f"{s['title']}\n\n{s['text']}".strip() if s["title"] else s["text"]
+        section_dict = {
+            "source_id": parent_data.get("source_id", "local"),
+            "doc_id": f"{parent_doc_id}-section-{idx}",
+            "doc_type": "section",
+            "source_type": "text/markdown",
+            "text": text,
+            "parent_id": parent_data.get("id"),
+            "meta": {
+                "section_index": idx,
+                "section_title": s["title"] or None,
+                "level": s["level"],
+                "page_start": s["page_start"],
+                "page_end": s["page_end"],
+                "self_ref": s["self_ref"],
+                "parser": "docling",
+                # Resolved by `add_many()` in operations.py: looks up the
+                # parent's UUID by external doc_id and sets `parent_id` on
+                # the child Document. Required for hierarchical retrieval
+                # — without it section/table/image
+                # records land with parent_id=NULL.
+                "parent_doc_id": parent_doc_id,
+            },
+        }
+        if "meta" in parent_data:
+            merged = dict(parent_data["meta"])
+            merged.update(section_dict["meta"])
+            section_dict["meta"] = merged
+        section_dicts.append(section_dict)
+    return section_dicts
+
+
+def _build_nearby_text_index(docling_dict: dict, window: int = 2) -> dict:
+    """Index `cref → nearby_text` for tables and pictures by body order.
+
+    Walks `docling_dict["body"]["children"]` (top-level), keeping a sliding
+    window of the most recent text-element strings. When a table or picture
+    cref appears in the walk, its `nearby_text` is the joined window — the
+    paragraph(s) immediately preceding the figure/table in reading order.
+
+    Used to give figures and tables retrievable surrounding context when
+    Docling didn't associate an explicit caption (which is most figures in
+    practice). Group children (e.g. list items) are skipped in this v1.
+
+    Args:
+        docling_dict: Persisted DoclingDocument JSON.
+        window: How many preceding text elements to include.
+
+    Returns:
+        Dict keyed by self_ref ("#/tables/0", "#/pictures/3", ...) with the
+        joined preceding-text string (or "" if nothing precedes).
+    """
+    body = (docling_dict.get("body") or {})
+    body_children = body.get("children") or []
+    texts_by_ref: dict = {}
+    for i, t in enumerate(docling_dict.get("texts") or []):
+        sr = t.get("self_ref") or f"#/texts/{i}"
+        texts_by_ref[sr] = t
+
+    nearby: dict = {}
+    recent: list = []
+    for child in body_children:
+        cref = child.get("cref") if isinstance(child, dict) else None
+        if not cref:
+            continue
+        if cref.startswith("#/texts/"):
+            t = texts_by_ref.get(cref) or {}
+            txt = (t.get("text") or "").strip()
+            if txt:
+                recent.append(txt)
+                if len(recent) > window:
+                    recent = recent[-window:]
+        elif cref.startswith("#/tables/") or cref.startswith("#/pictures/"):
+            nearby[cref] = "\n\n".join(recent)
+        # groups, key_value_items, form_items, etc. are skipped for v1
+    return nearby
+
+
 class DoclingParser(BaseParser):
-    """Parser for PDF documents using Docling."""
+    """Parser for PDF documents using IBM Docling."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Populated by extract_text_and_images_dict — `parse()` reads this
+        # generic hook to persist the canonical DoclingDocument JSON into
+        # documents.parser_output alongside the document.
+        self.structured_output: dict | None = None
+        # Tables-as-records: each entry is a Document-shaped dict with
+        # doc_type="table" carrying the rendered Markdown table + provenance
+        # metadata. Walked into the returned doc_dicts by `parse()`.
+        self.table_dicts: list[dict] = []
+        # Sections-as-records: each entry is a Document-shaped dict with
+        # doc_type="section" — one per section_header in the body. Lets
+        # search ask for level=section matches.
+        self.section_dicts: list[dict] = []
 
     def extract_text(self) -> str:
         text, _ = self.extract_text_and_images_dict({})
@@ -58,7 +326,45 @@ class DoclingParser(BaseParser):
         self,
         parent_data: dict,
     ) -> Tuple[str, List[dict]]:
-        converter = _get_converter()
+        """Extract Markdown text and images from PDF using docling.
+
+        Args:
+            parent_data: Dictionary with parent document data (source_id, doc_id, ...).
+
+        Returns:
+            Tuple of (markdown_text, list_of_image_dicts).
+        """
+        # Decide whether to enable formula enrichment for this single
+        # document. Three modes via env vars:
+        #   * PARSE_FORMULA_ENRICHMENT=true   → always on (manual)
+        #   * PARSE_FORMULA_ENRICHMENT_AUTO=true → math-density pre-scan
+        #     decides per-document; threshold from
+        #     PARSE_FORMULA_ENRICHMENT_AUTO_THRESHOLD (default 0.005).
+        #   * neither set                     → off (fastest).
+        # Auto wins over manual when both are set, since auto's "off
+        # decision" is the careful one (the doc has no math).
+        enable_formula = False
+        try:
+            from ..config import get_parser_config
+            cfg = get_parser_config()
+            if cfg.get("formula_enrichment_auto", False) and self.mime_type == "application/pdf":
+                from .math_density import should_enable_formula_enrichment
+                threshold = cfg.get("formula_enrichment_auto_threshold", 0.005)
+                enable_formula, density = should_enable_formula_enrichment(
+                    self.file_path, threshold=threshold,
+                )
+                logger.info(
+                    f"docling auto-decide: math_density={density:.4f} "
+                    f"threshold={threshold:.4f} → "
+                    f"formula_enrichment={'ON' if enable_formula else 'OFF'} "
+                    f"({self.file_path.name})"
+                )
+            elif cfg.get("formula_enrichment", False):
+                enable_formula = True
+        except Exception as cfg_err:
+            logger.debug(f"formula-enrichment dispatch fell back to default: {cfg_err}")
+
+        converter = _get_converter(with_formula_enrichment=enable_formula)
         if converter is None:
             return "", []
 
@@ -66,46 +372,159 @@ class DoclingParser(BaseParser):
             result = converter.convert(str(self.file_path))
             doc = result.document
 
-            text = doc.export_to_markdown()
+            # Capture the structured DoclingDocument as a JSON-serialisable
+            # dict before exporting to Markdown. Stored on `self` so `parse()`
+            # can persist it as the canonical parser artifact. Picture bytes
+            # are stripped here — they're 95–97% of the dict size and already
+            # extracted as separate `doc_type="image"` records below; the
+            # remaining picture metadata (caption, prov bbox, refs) is what
+            # matters for retrieval.
+            try:
+                self.structured_output = doc.model_dump(mode="json")
+                for pic in self.structured_output.get("pictures", []) or []:
+                    pic.pop("image", None)
+            except Exception as dump_err:
+                logger.warning(f"docling: model_dump failed, JSON not persisted: {dump_err}")
+                self.structured_output = None
 
-            image_dicts = []
-            image_ref_counter = 0
+            # Docling escapes inequalities and a few other characters in its
+            # Markdown output (e.g. `Rate &lt; 20 kcps`). Unescape so chunks
+            # carry the original text.
+            text = html.unescape(doc.export_to_markdown())
 
-            # Track markdown image reference positions
-            image_reference_info: Dict[str, dict] = {}
-            image_tag_pattern = re.compile(r"!\[[^\]]*\]\(([^)]+)\)")
-            for match in image_tag_pattern.finditer(text):
-                image_ref_counter += 1
-                ref_name = Path(match.group(1)).name
-                ref_info = image_reference_info.get(ref_name)
-                if ref_info is None:
-                    image_reference_info[ref_name] = {
-                        "first_index": image_ref_counter,
-                        "first_char": match.start(),
-                        "all_positions": [match.start()],
-                    }
-                else:
-                    ref_info["all_positions"].append(match.start())
+            # Sections-as-records. Hierarchical retrieval —
+            # one Document per section_header in the body, with the
+            # aggregated section text as `text`. Indexed alongside chunks; the
+            # router boosts these for SYNTHESIS queries that want broader
+            # context.
+            self.section_dicts = _extract_section_records(self.structured_output or {}, parent_data)
 
-            # Extract pictures from docling document
-            for pic_idx, pic in enumerate(doc.pictures, start=1):
+            # Tables-as-records. Walk doc.tables, render each
+            # as a Markdown table (caption + grid), and emit a Document-shaped
+            # dict with doc_type="table". The chunker + embedder then index
+            # these the same way they index parent documents, but search code
+            # can boost / filter on doc_type="table" for table-shaped queries.
+            nearby_index = _build_nearby_text_index(self.structured_output or {})
+
+            self.table_dicts = []
+            tables = getattr(doc, "tables", None) or []
+            for idx, table in enumerate(tables):
                 try:
-                    pil_img = pic.image.pil_image if pic.image else None
-                    if pil_img is None:
+                    page_no = None
+                    bbox = None
+                    prov = getattr(table, "prov", None) or []
+                    if prov:
+                        page_no = getattr(prov[0], "page_no", None)
+                        prov_bbox = getattr(prov[0], "bbox", None)
+                        if prov_bbox is not None and hasattr(prov_bbox, "model_dump"):
+                            # model_dump(mode="json") converts the CoordOrigin
+                            # enum to its string value so the dict is
+                            # JSON-serialisable for the documents.meta JSONB.
+                            bbox = prov_bbox.model_dump(mode="json")
+
+                    caption = ""
+                    try:
+                        caption = (table.caption_text(doc) or "").strip()
+                    except Exception:
+                        caption = ""
+
+                    try:
+                        table_md = html.unescape(table.export_to_markdown(doc) or "")
+                    except Exception as md_err:
+                        logger.warning(f"docling: failed to render table {idx} as markdown: {md_err}")
+                        table_md = ""
+
+                    self_ref = getattr(table, "self_ref", None)
+                    nearby_text = nearby_index.get(self_ref, "") if self_ref else ""
+
+                    # Order: surrounding paragraph context → caption → grid.
+                    # Putting nearby_text first means search/embedding sees the
+                    # surrounding-paragraph signal even when caption is empty
+                    # (which is most tables in our sample).
+                    text_parts = []
+                    if nearby_text:
+                        text_parts.append(nearby_text)
+                    if caption:
+                        text_parts.append(caption)
+                    if table_md:
+                        text_parts.append(table_md)
+                    table_text = "\n\n".join(text_parts).strip()
+                    if not table_text:
+                        # Nothing useful — skip empty tables
                         continue
 
-                    img_byte_arr = BytesIO()
-                    img_format = pil_img.format or "PNG"
-                    pil_img.save(img_byte_arr, format=img_format)
+                    data = getattr(table, "data", None)
+                    num_rows = getattr(data, "num_rows", None) if data else None
+                    num_cols = getattr(data, "num_cols", None) if data else None
+
+                    table_dict = {
+                        "source_id": parent_data.get("source_id", "local"),
+                        "doc_id": parent_data.get("doc_id", self.file_path.stem) + f"-table-{idx}",
+                        "doc_type": "table",
+                        "source_type": "text/markdown",
+                        "text": table_text,
+                        "parent_id": parent_data.get("id"),
+                        "meta": {
+                            "table_index": idx,
+                            "page": page_no,
+                            "bbox": bbox,
+                            "caption": caption or None,
+                            "nearby_text": nearby_text or None,
+                            "num_rows": num_rows,
+                            "num_cols": num_cols,
+                            "self_ref": self_ref,
+                            "parser": "docling",
+                            # See section_dict — `add_many()` resolves
+                            # this to a real parent_id during ingest.
+                            "parent_doc_id": parent_data.get("doc_id"),
+                        },
+                    }
+                    if "meta" in parent_data:
+                        # Carry parent-level meta (filename, source_type, etc.)
+                        # — table-specific keys above take precedence.
+                        merged = dict(parent_data["meta"])
+                        merged.update(table_dict["meta"])
+                        table_dict["meta"] = merged
+
+                    self.table_dicts.append(table_dict)
+                except Exception as t_err:
+                    logger.warning(f"docling: failed to extract table {idx}: {t_err}")
+                    continue
+
+            image_dicts = []
+            pictures = getattr(doc, "pictures", None) or []
+            for idx, picture in enumerate(pictures):
+                try:
+                    pil_image = picture.get_image(doc)
+                    if pil_image is None:
+                        continue
+
+                    img_byte_arr = io.BytesIO()
+                    img_format = pil_image.format or "PNG"
+                    pil_image.save(img_byte_arr, format=img_format)
                     img_bytes = img_byte_arr.getvalue()
 
-                    # Use picture reference id or synthesise a stable name
-                    img_name = getattr(pic, "self_ref", None) or f"picture_{pic_idx}"
-                    img_name = str(img_name).lstrip("#/").replace("/", "_")
+                    page_no = None
+                    bbox = None
+                    prov = getattr(picture, "prov", None) or []
+                    if prov:
+                        page_no = getattr(prov[0], "page_no", None)
+                        prov_bbox = getattr(prov[0], "bbox", None)
+                        if prov_bbox is not None and hasattr(prov_bbox, "model_dump"):
+                            bbox = prov_bbox.model_dump(mode="json")
 
-                    page_no: Optional[int] = None
-                    if pic.prov:
-                        page_no = pic.prov[0].page_no
+                    # Caption text — Docling stores caption text refs on
+                    # picture.captions; resolve them via caption_text(doc).
+                    caption = ""
+                    try:
+                        caption = (picture.caption_text(doc) or "").strip()
+                    except Exception:
+                        caption = ""
+
+                    img_name = f"_page_{page_no if page_no is not None else idx}_Figure_{idx}.png"
+
+                    self_ref = getattr(picture, "self_ref", None)
+                    nearby_text = nearby_index.get(self_ref, "") if self_ref else ""
 
                     img_dict = {
                         "source_id": parent_data.get("source_id", "local"),
@@ -116,32 +535,37 @@ class DoclingParser(BaseParser):
                         "parent_id": parent_data.get("id"),
                         "meta": {
                             "image_name": img_name,
-                            "image_number": pic_idx,
-                            "parent_doc_id": parent_data.get("id", parent_data.get("doc_id")),
+                            "image_number": idx,
+                            "page": page_no,
+                            "bbox": bbox,
+                            "caption": caption or None,
+                            "nearby_text": nearby_text or None,
+                            "self_ref": self_ref,
                             "parser": "docling",
+                            # See section_dict — `add_many()` resolves
+                            # this to a real parent_id during ingest.
+                            "parent_doc_id": parent_data.get("doc_id"),
                         },
                     }
-
-                    if page_no is not None:
-                        img_dict["meta"]["page"] = page_no
-
+                    # Seed `text` with surrounding context + caption so search
+                    # hits even when no VLM description has been generated.
+                    # The LLM description path
+                    # (`image_descriptions.generate_image_descriptions()`) is
+                    # caption-aware and will combine caption+description; the
+                    # nearby_text remains visible only via meta in that case.
+                    seed_parts = [p for p in (nearby_text, caption) if p]
+                    if seed_parts:
+                        img_dict["text"] = "\n\n".join(seed_parts)
                     if "meta" in parent_data:
                         img_dict["meta"].update(parent_data["meta"])
 
-                    image_ref = image_reference_info.get(img_name)
-                    if image_ref:
-                        img_dict["meta"]["image_ref_index"] = image_ref["first_index"]
-                        img_dict["meta"]["image_ref_char_start"] = image_ref["first_char"]
-                        img_dict["meta"]["image_ref_count"] = len(image_ref["all_positions"])
-
                     image_dicts.append(img_dict)
-
-                except Exception as e:
-                    logger.warning(f"Failed to extract picture {pic_idx}: {e}")
+                except Exception as img_err:
+                    logger.warning(f"docling: failed to extract picture {idx}: {img_err}")
                     continue
 
             return text, image_dicts
 
         except Exception as e:
-            logger.error(f"Error parsing with Docling: {e}", exc_info=True)
+            logger.error(f"Error parsing with docling: {e}", exc_info=True)
             return "", []

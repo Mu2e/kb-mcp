@@ -1,9 +1,10 @@
 import pytest
+from sqlalchemy import text
 from kb_mcp.kb.db_models import Source, Document
 
 def test_db_ping(db_session):
     """Verify that we can perform a simple query."""
-    result = db_session.execute("SELECT 1").scalar()
+    result = db_session.execute(text("SELECT 1")).scalar()
     assert result == 1
 
 def test_source_lifecycle(db_session):

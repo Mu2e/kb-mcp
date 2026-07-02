@@ -40,7 +40,7 @@ nav:
     - CLI Usage: guides/cli.md
     - Evaluation: guides/evaluation.md
     - Database Schema: guides/database.md
-    - Deployment: 
+    - Deployment:
       - Deployment: guides/deployment.md
       - Authentication: guides/authentication.md
   - API Reference:

@@ -1,5 +1,6 @@
 """Utility functions for document parsing."""
 
+import importlib.metadata as _pkg_meta
 from pathlib import Path
 from typing import Optional
 
@@ -9,6 +10,46 @@ from .parser_pptx import PPTXParser
 from .parser_docx import DOCXParser
 from .parser_excel import ExcelParser
 from .parser_text import TextParser
+
+
+# Per-parser package list — one entry per `parser_name` that get_parser_version_info()
+# can describe. Order matters only for readability.
+_PARSER_PACKAGES = {
+    "kb-mcp": ["kb-mcp"],
+    "docling": ["docling", "docling-core", "docling-ibm-models", "docling-parse"],
+    "marker": ["marker-pdf"],
+    "pypdf2": ["PyPDF2"],
+}
+
+
+def get_parser_version_info(parser_name: str) -> dict:
+    """Return a dict describing the installed versions for a parser stack.
+
+    Used by `documents.operations.get_or_create_parser()` to populate the
+    `parsers.meta` JSON column so `Document.parser_id` plus the registered
+    metadata uniquely identifies the parser stack a document was processed
+    with. That makes cache invalidation on parser upgrades possible — when
+    Docling bumps its layout model, comparing meta tells us we need to re-parse.
+
+    Args:
+        parser_name: Logical parser name (e.g. ``"docling"``, ``"pypdf2"``,
+            ``"marker"``, ``"kb-mcp"``).
+
+    Returns:
+        ``{"versions": {pkg: ver, ...}}`` covering every installed package in
+        the parser stack. Missing packages are omitted (no error). Returns
+        ``{"versions": {}}`` for unknown parser names.
+    """
+    pkgs = _PARSER_PACKAGES.get(parser_name, [])
+    versions: dict = {}
+    for pkg in pkgs:
+        try:
+            versions[pkg] = _pkg_meta.version(pkg)
+        except _pkg_meta.PackageNotFoundError:
+            continue
+        except Exception:  # be conservative — never fail callers
+            continue
+    return {"versions": versions}
 
 # Parser mapping - maps MIME type or file extension to parser class
 PARSER_MAP = {

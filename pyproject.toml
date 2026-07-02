@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "kb-mcp"
-version = "0.1.0"
-description = "Knowledge Base MCP server with GitHub OAuth authentication"
+version = "0.2.0"
+description = "Mu2e knowledge base and retrieval system with MCP interface"
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
@@ -74,6 +74,19 @@ alcf = [
 # Azure AI Document Intelligence parser
 azure = [
     "azure-ai-documentintelligence>=1.0.0",
+]
+
+# IBM Docling — high-quality PDF → Markdown via DocLayNet + TableFormer.
+# Optional because the model weights are large (~500 MB) and download from
+# Hugging Face on first use (set HF_HOME to a roomy cache location).
+docling = [
+    "docling>=2.91.0",
+]
+
+# Marker-pdf — alternative high-quality PDF → Markdown parser kept for
+# benchmarking against Docling. Same caveat about model weights.
+marker = [
+    "marker-pdf",
 ]
 
 [project.scripts]
