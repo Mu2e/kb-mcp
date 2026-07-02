@@ -36,6 +36,7 @@ def setup_logging(verbose: bool = False, extra_loggers: list = None):
     imports_inspire_logger.setLevel(logging.INFO)
 
     logging.getLogger("kb_mcp.imports.docdb").setLevel(logging.INFO)
+    logging.getLogger("kb_mcp.imports.mediawiki").setLevel(logging.INFO)
 
     for name in (extra_loggers or []):
         logging.getLogger(name).setLevel(logging.INFO)
@@ -124,6 +125,7 @@ def cmd_docdb(args):
     if len(documents) > 10:
         print(f"  ... and {len(documents) - 10} more")
 
+
 def cmd_local_pdf(args):
     """Handle local-pdf source command."""
     from .local_pdf import LocalPDFSource
@@ -147,6 +149,34 @@ def cmd_local_pdf(args):
     if skip_parse:
         print(f"  Run the Marker GPU pipeline to parse them:")
         print(f"    kb tools parse-all {args.source_id} --extract-images --describe-images --parser-name marker")
+
+
+def cmd_wiki(args):
+    """Handle wiki source command."""
+    from .mediawiki import MediaWikiSource
+
+    setup_logging(args.verbose)
+
+    with MediaWikiSource(
+        wiki_url=args.wiki_url,
+        source_id=args.source_id,
+        delay=args.delay,
+        skip_existing=args.skip_existing,
+        use_kerberos=not args.no_kerberos,
+    ) as source:
+        documents = source.process_all(
+            query=args.query,
+            max_results=args.max_results,
+            output_dir=args.output_dir,
+            auto_embed=not args.no_auto_embed,
+            auto_summarize=not args.no_auto_summarize,
+        )
+
+        print(f"\n  Successfully processed {len(documents)} document(s)")
+        for doc_id in documents[:10]:
+            print(f"  - {doc_id}")
+        if len(documents) > 10:
+            print(f"  ... and {len(documents) - 10} more")
 
 
 def main():
@@ -214,6 +244,78 @@ def main():
              "This saves bandwidth by not re-downloading files. Default: False (always download)",
     )
     inspire_parser.set_defaults(func=cmd_inspire)
+
+    # Wiki (MediaWiki) source
+    wiki_parser = subparsers.add_parser(
+        "wiki",
+        help="Fetch pages from a MediaWiki site",
+        description="Fetch pages from a MediaWiki wiki (e.g., mu2ewiki.fnal.gov)",
+    )
+    wiki_parser.add_argument(
+        "--query",
+        "-q",
+        default="Main_Page",
+        help=(
+            "Pages to fetch. Options: "
+            "comma-separated titles (e.g., 'Computing,Practicalities'), "
+            "'links:PageTitle' (pages linked from a page), "
+            "'category:Name' (pages in a category), "
+            "'all' (all pages). Default: Main_Page"
+        ),
+    )
+    wiki_parser.add_argument(
+        "--wiki-url",
+        default="https://mu2ewiki.fnal.gov",
+        help="Base URL of the MediaWiki site (default: https://mu2ewiki.fnal.gov)",
+    )
+    wiki_parser.add_argument(
+        "--max-results",
+        type=int,
+        help="Maximum number of pages to process (default: all)",
+    )
+    wiki_parser.add_argument(
+        "--output-dir",
+        type=Path,
+        help="Directory to save downloaded pages",
+    )
+    wiki_parser.add_argument(
+        "--source-id",
+        default="mu2e-wiki",
+        help="Source identifier for knowledge base (default: mu2e-wiki)",
+    )
+    wiki_parser.add_argument(
+        "--delay",
+        type=float,
+        default=0.5,
+        help="Delay between requests in seconds (default: 0.5)",
+    )
+    wiki_parser.add_argument(
+        "--verbose",
+        "-v",
+        action="store_true",
+        help="Enable verbose logging",
+    )
+    wiki_parser.add_argument(
+        "--no-auto-embed",
+        action="store_true",
+        help="Disable automatic chunking and embedding after processing",
+    )
+    wiki_parser.add_argument(
+        "--no-auto-summarize",
+        action="store_true",
+        help="Disable automatic summarization after processing",
+    )
+    wiki_parser.add_argument(
+        "--skip-existing",
+        action="store_true",
+        help="Skip pages that already exist in the database",
+    )
+    wiki_parser.add_argument(
+        "--no-kerberos",
+        action="store_true",
+        help="Disable Kerberos/SPNEGO authentication (for public wikis)",
+    )
+    wiki_parser.set_defaults(func=cmd_wiki)
 
     # DocDB source
     docdb_parser = subparsers.add_parser(
@@ -300,7 +402,7 @@ def main():
         help="Re-download and re-parse documents even if they already exist in the database",
     )
     docdb_parser.set_defaults(func=cmd_docdb)
-    
+
     # Local PDF source
     local_pdf_parser = subparsers.add_parser(
         "local-pdf",

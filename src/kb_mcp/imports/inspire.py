@@ -101,28 +101,66 @@ class InspireSource(Source):
             logger.error(f"API request failed: {url} - {e}")
             return None
     
+    # INSPIRE-HEP literature endpoint caps `size` at 250 per request and
+    # rejects values above that. To return more than 250 hits we have to
+    # paginate via the `page` parameter.
+    _PAGE_SIZE_CAP = 250
+
     def fetch_items(self, query: Optional[str] = None, max_results: Optional[int] = None) -> List[Dict[str, Any]]:
-        """Fetch records from INSPIRE-HEP API.
-        
+        """Fetch records from INSPIRE-HEP API, paginating as needed.
+
         Args:
-            query: Direct search query (e.g., "collaboration:SLD")
-            max_results: Maximum number of results to fetch
-            
+            query: Direct search query (e.g., "collaborations.value:Mu2e").
+                Note: use ElasticSearch fielded syntax — the SPIRES-legacy
+                `find exp mu2e` form returns 0 hits on the modern API.
+            max_results: Soft cap on number of hits to return. The API
+                paginates 250 at a time; this function loops over `page`
+                until either max_results items have been collected or the
+                server reports no more hits. ``None`` means "fetch all
+                hits the query returns".
+
         Returns:
-            List of hit dictionaries from the API
+            List of hit dictionaries from the API, length ≤ max_results
+            and ≤ the query's actual total-hits count.
         """
         if max_results is None:
-            max_results = 1000
-        
+            target = float("inf")
+        else:
+            target = max_results
+
+        # Important: Inspire's `page` parameter is page-size-relative
+        # (skip = (page-1) * size). We MUST hold `size` constant across
+        # all pages or page 2 will overlap page 1 — caught 2026-04-27.
+        # Trim to max_results at the end instead of shrinking the last
+        # page's size.
+        page_size = min(self._PAGE_SIZE_CAP, int(target)) if target != float("inf") else self._PAGE_SIZE_CAP
+
         logger.info(f"Searching INSPIRE-HEP API with query: {query}")
-        all_records = self._api_request("/literature", params={"q": query, "size": max_results})
-        
-        if not all_records:
-            return []
-        
-        hits = all_records.get("hits", {}).get("hits", [])
-        logger.info(f"Found {len(hits)} result(s)")
-        
+        hits: List[Dict[str, Any]] = []
+        page = 1
+        while len(hits) < target:
+            page_resp = self._api_request(
+                "/literature",
+                params={"q": query, "size": page_size, "page": page},
+            )
+            if not page_resp:
+                break
+            page_hits = page_resp.get("hits", {}).get("hits", [])
+            if not page_hits:
+                break  # Server returned nothing more — done
+            hits.extend(page_hits)
+            # If the server gave us fewer than the page size, we've drained
+            # the result set (no further pages exist).
+            if len(page_hits) < page_size:
+                break
+            page += 1
+
+        # Trim to caller's max_results — we may have overshot by up to
+        # page_size - 1 hits because we held size constant.
+        if max_results is not None:
+            hits = hits[:max_results]
+
+        logger.info(f"Found {len(hits)} result(s) across {page} page(s)")
         return hits
     
     def _extract_metadata_from_api(self, record_data: Dict) -> Dict:
