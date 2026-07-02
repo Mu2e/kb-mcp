@@ -21,7 +21,8 @@ logger = logging.getLogger(__name__)
 def extract_relations(
     text: str,
     title: Optional[str] = None,
-    metadata: Optional[Dict[str, Any]] = None, 
+    metadata: Optional[Dict[str, Any]] = None,
+    domain_context: Optional[str] = None,
     session=None
 ) -> List[Dict[str, Any]]:
     """
@@ -72,9 +73,17 @@ def extract_relations(
                 if isinstance(v, list):
                     context_str += f"\n- {k}: {', '.join(map(str, v))}"
 
+        domain_str = ""
+        if domain_context:
+            domain_str = f"""### DOMAIN CONTEXT
+        {domain_context}
+        """
+
         prompt = f"""Extract knowledge graph relations from the following document fragment.
 
         {context_str}
+
+        {domain_str}
 
         ### DEFINITIONS
         You must ONLY use the keys from the lists below.
@@ -300,6 +309,7 @@ def process_relations(
 
 def extract_and_process_document(
     document_id: str,
+    domain_context: Optional[str] = None,
     session=None,
 ) -> Dict[str, Any]:
     """
@@ -352,6 +362,14 @@ def extract_and_process_document(
 
         logger.info(f"Starting extraction for document {document_id} on {hostname}")
 
+        # Resolve domain context from config if not explicitly provided
+        if domain_context is None:
+            domain = graph_config.get('domain')
+            if domain == 'mu2e':
+                from .mu2e_extraction import MU2E_DOMAIN_CONTEXT
+                domain_context = MU2E_DOMAIN_CONTEXT
+                logger.info("Using Mu2e domain context for extraction")
+
         # Step 1: Extract relations from document text
         start_extraction = time.time()
         try:
@@ -362,6 +380,7 @@ def extract_and_process_document(
                     "source_id": document.source_id,
                     "doc_id": document.doc_id,
                 },
+                domain_context=domain_context,
                 session=session
             )
             time_extraction = time.time() - start_extraction
