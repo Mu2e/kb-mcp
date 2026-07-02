@@ -1,7 +1,7 @@
 """Simple metrics computation for evaluation runs."""
 
 import logging
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 from sqlalchemy import func, case, select
 
@@ -10,6 +10,8 @@ from ..database import get_db_session
 from ..database import get_db_session
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_RECALL_KS: tuple[int, ...] = (1, 3, 5, 10)
 
 
 def compute_hit_rate(
@@ -161,6 +163,115 @@ def get_rank_distribution(
 
 
 
+def compute_recall_at_k(
+    run_id: Optional[str] = None,
+    generation_id: Optional[str] = None,
+    k_values: Optional[List[int]] = None,
+    use_judge: bool = False,
+    audit_type: Optional[str] = None,
+    session=None,
+) -> Dict[int, float]:
+    """Compute recall@k for one or more k values on a run.
+
+    recall@k = (questions whose gold doc was returned at rank <= k) / (questions evaluated)
+
+    The denominator matches `compute_hit_rate` — only questions where the
+    relevant `is_hit` / `is_judge_hit` flag is non-NULL count toward the total.
+    Questions whose gold doc was missed entirely (`hit_rank IS NULL`) are
+    counted as misses for every k.
+
+    The eval runner caps `hit_rank` at `EvalRun.max_results`, so any k
+    larger than the run's `max_results` returns the same value as
+    recall@max_results — extra capacity beyond what was retrieved cannot
+    raise the score.
+
+    Args:
+        run_id: Run ID to compute metric for (optional if generation_id provided).
+        generation_id: Generation ID — uses the most recent run for that
+            generation, mirroring `compute_hit_rate`.
+        k_values: Iterable of k values to compute recall for. Defaults to
+            `(1, 3, 5, 10)`. Values <= 0 are skipped.
+        use_judge: If True, score against `is_judge_hit` instead of `is_hit`.
+        audit_type: Optional filter by audit type (e.g., "llm_judge").
+        session: Database session.
+
+    Returns:
+        Dict mapping k -> recall@k (0.0 to 1.0). Empty dict if no
+        evaluated questions are found.
+
+    Example:
+        >>> compute_recall_at_k(run_id="run-123")
+        {1: 0.41, 3: 0.62, 5: 0.74, 10: 0.85}
+    """
+    if k_values is None:
+        k_values = list(DEFAULT_RECALL_KS)
+    k_values = sorted({int(k) for k in k_values if int(k) > 0})
+    if not k_values:
+        return {}
+
+    with get_db_session(session) as session:
+        # Resolve run_id from generation_id if needed (mirrors compute_hit_rate).
+        if run_id and not generation_id:
+            result_count = session.query(func.count(EvalResult.id)).filter(
+                EvalResult.run_id == run_id
+            ).scalar()
+            if result_count == 0:
+                logger.debug(f"No results for run_id {run_id}, trying as generation_id")
+                generation_id = run_id
+                run_id = None
+
+        if generation_id and not run_id:
+            latest_run = session.query(EvalRun).filter(
+                EvalRun.generation_id == generation_id
+            ).order_by(EvalRun.created_time.desc()).first()
+            if not latest_run:
+                logger.warning(f"No runs found for generation {generation_id}")
+                return {k: 0.0 for k in k_values}
+            run_id = latest_run.id
+            logger.debug(f"Using latest run {run_id} for generation {generation_id}")
+
+        if not run_id:
+            raise ValueError("Either run_id or generation_id must be provided")
+
+        # Build base filter — same shape as compute_hit_rate.
+        hit_col = EvalResult.is_judge_hit if use_judge else EvalResult.is_hit
+        base_filter = (EvalResult.run_id == run_id) & hit_col.isnot(None)
+
+        if audit_type:
+            audited_question_ids = select(EvalAudit.question_id).where(
+                EvalAudit.audit_type == audit_type,
+                EvalAudit.is_valid == True,  # noqa: E712
+            ).distinct()
+            base_filter = base_filter & EvalResult.question_id.in_(audited_question_ids)
+
+        total = session.query(func.count(EvalResult.id)).filter(base_filter).scalar() or 0
+
+        if total == 0:
+            return {k: 0.0 for k in k_values}
+
+        # One grouped query of (hit_rank, count) for hits; missing ranks (NULL)
+        # are excluded since they cannot satisfy hit_rank <= k for any k.
+        hit_filter = base_filter & (hit_col == True)  # noqa: E712
+        rows = session.query(
+            EvalResult.hit_rank, func.count(EvalResult.id)
+        ).filter(hit_filter, EvalResult.hit_rank.isnot(None)).group_by(
+            EvalResult.hit_rank
+        ).all()
+
+        # Walk ranks in ascending order, accumulating into each k bucket.
+        rank_counts = sorted((int(rank), int(count)) for rank, count in rows if rank is not None)
+        recall = {}
+        cumulative = 0
+        idx = 0
+        for k in k_values:
+            while idx < len(rank_counts) and rank_counts[idx][0] <= k:
+                cumulative += rank_counts[idx][1]
+                idx += 1
+            recall[k] = cumulative / total
+
+        return recall
+
+
 def get_summary_stats(
     run_id: str,
     use_judge: bool = False,
@@ -264,7 +375,16 @@ def get_summary_stats(
         # Get rank distributions
         rank_dist = get_rank_distribution(run_id, use_judge=False, audit_type=audit_type, session=session)
         judge_rank_dist = get_rank_distribution(run_id, use_judge=True, audit_type=audit_type, session=session) if judge_total > 0 else {}
-        
+
+        # recall@k — primary retrieval metric. Reuses the same audit filter so
+        # the denominator matches `total` / `judge_total` above.
+        recall_at_k = compute_recall_at_k(
+            run_id=run_id, use_judge=False, audit_type=audit_type, session=session,
+        )
+        judge_recall_at_k = compute_recall_at_k(
+            run_id=run_id, use_judge=True, audit_type=audit_type, session=session,
+        ) if judge_total > 0 else {}
+
         result = {
             "run_id": run_id,
             "total_questions": total,
@@ -272,8 +392,9 @@ def get_summary_stats(
             "misses": misses,
             "hit_rate": hit_rate,
             "rank_distribution": rank_dist,
+            "recall_at_k": recall_at_k,
         }
-        
+
         # Add judge stats if available
         if judge_total > 0:
             result.update({
@@ -282,7 +403,8 @@ def get_summary_stats(
                 "judge_misses": judge_total - judge_hits,
                 "judge_hit_rate": judge_hits / judge_total if judge_total > 0 else 0.0,
                 "judge_rank_distribution": judge_rank_dist,
+                "judge_recall_at_k": judge_recall_at_k,
             })
-        
+
         return result
 

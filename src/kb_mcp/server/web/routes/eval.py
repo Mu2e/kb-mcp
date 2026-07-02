@@ -88,7 +88,6 @@ def setup_eval_routes(app, session_manager: WebSessionManager, require_auth_html
         require_auth_html: Authentication helper function
     """
     
-    @app.route("/web/eval")
     async def web_eval_overview(request: Request):
         """Eval overview page showing list of EvalGenerations and EvalRuns."""
         # Check authentication first
@@ -242,8 +241,8 @@ def setup_eval_routes(app, session_manager: WebSessionManager, require_auth_html
             None,
             username
         ))
+    app.add_route("/web/eval", web_eval_overview)
 
-    @app.route("/web/eval/generation/{generation_id}")
     async def web_eval_generation(request: Request):
         """Eval generation detail page showing questions list."""
         # Check authentication first
@@ -465,8 +464,8 @@ def setup_eval_routes(app, session_manager: WebSessionManager, require_auth_html
             None,
             username
         ))
+    app.add_route("/web/eval/generation/{generation_id}", web_eval_generation)
 
-    @app.route("/web/eval/question/{question_id}")
     async def web_eval_question(request: Request):
         """Eval question detail page showing question and audits."""
         # Check authentication first
@@ -759,8 +758,8 @@ def setup_eval_routes(app, session_manager: WebSessionManager, require_auth_html
             None,
             username
         ))
+    app.add_route("/web/eval/question/{question_id}", web_eval_question)
 
-    @app.route("/web/eval/run/{run_id}")
     async def web_eval_run(request: Request):
         """Eval run detail page showing run details, summary stats, and results."""
         # Check authentication first
@@ -1093,8 +1092,8 @@ def setup_eval_routes(app, session_manager: WebSessionManager, require_auth_html
             None,
             username
         ))
+    app.add_route("/web/eval/run/{run_id}", web_eval_run)
 
-    @app.route("/web/eval/result/{result_id}")
     async def web_eval_result(request: Request):
         """Eval result detail page showing result details, question link, and retrieved documents."""
         # Check authentication first
@@ -1294,3 +1293,4 @@ def setup_eval_routes(app, session_manager: WebSessionManager, require_auth_html
             None,
             username
         ))
+    app.add_route("/web/eval/result/{result_id}", web_eval_result)

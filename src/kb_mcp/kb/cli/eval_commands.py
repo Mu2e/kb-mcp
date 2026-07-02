@@ -177,6 +177,13 @@ def cmd_eval_run(args):
                 "model": args.judge_model,
             }
 
+        # Determine rerank setting
+        rerank = None  # default: use config
+        if hasattr(args, 'rerank') and args.rerank:
+            rerank = True
+        elif hasattr(args, 'no_rerank') and args.no_rerank:
+            rerank = False
+
         stats = run_eval(
             name=args.name,
             description=args.description,
@@ -191,6 +198,7 @@ def cmd_eval_run(args):
             judge_strategy=judge_strategy,
             use_llm_judge=args.use_judge,
             workers=args.workers,
+            rerank=rerank,
         )
 
         print(f"Evaluation complete!")
@@ -226,6 +234,10 @@ def cmd_eval_stats(args):
             print(f"    Hits: {stats['hits']}")
             print(f"    Misses: {stats['misses']}")
             print(f"    Hit rate: {stats['hit_rate']:.2%}")
+            recall_at_k = stats.get('recall_at_k') or {}
+            if recall_at_k:
+                recall_str = ", ".join(f"@{k}: {v:.2%}" for k, v in sorted(recall_at_k.items()))
+                print(f"    Recall {recall_str}")
             if stats['rank_distribution']:
                 print(f"    Rank distribution:")
                 for rank in sorted(stats['rank_distribution'].keys()):
@@ -237,6 +249,10 @@ def cmd_eval_stats(args):
             print(f"    Hits: {stats['judge_hits']}")
             print(f"    Misses: {stats['judge_misses']}")
             print(f"    Hit rate: {stats['judge_hit_rate']:.2%}")
+            judge_recall_at_k = stats.get('judge_recall_at_k') or {}
+            if judge_recall_at_k:
+                recall_str = ", ".join(f"@{k}: {v:.2%}" for k, v in sorted(judge_recall_at_k.items()))
+                print(f"    Recall {recall_str}")
 
         if stats['total_questions'] == 0 and "judge_total_questions" not in stats:
             print("  No results found for this run.")
@@ -320,6 +336,26 @@ def cmd_eval_list(args):
         sys.exit(1)
 
 
+def cmd_eval_load_benchmark(args):
+    """Load a hand-curated benchmark question set."""
+    from ..eval.mu2e_benchmark import load_mu2e_benchmark
+
+    try:
+        result = load_mu2e_benchmark(json_path=args.path)
+
+        print(f"Benchmark loaded: {result['generation_name']}")
+        print(f"  Generation ID: {result['generation_id']}")
+        print(f"  Questions loaded: {result['num_questions_loaded']}")
+        print(f"  Questions skipped (duplicates): {result['num_skipped']}")
+        print(f"  Total questions: {result['total_questions']}")
+
+    except Exception as e:
+        print(f"Error loading benchmark: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+
 def setup_commands(subparsers):
     """Set up evaluation commands."""
     # Eval command
@@ -364,6 +400,8 @@ def setup_commands(subparsers):
     eval_run_parser.add_argument("--judge-model", help="LLM model for judge (if --use-judge)")
     eval_run_parser.add_argument("--answer-model", help="LLM model for answer generation in rag/agentic/llm_only modes (default: EVAL_GEN_MODEL)")
     eval_run_parser.add_argument("--workers", type=int, default=1, metavar="N", help="Number of parallel question evaluations (default: 1)")
+    eval_run_parser.add_argument("--rerank", action="store_true", help="Enable cross-encoder reranking")
+    eval_run_parser.add_argument("--no-rerank", action="store_true", help="Disable cross-encoder reranking")
     eval_run_parser.set_defaults(func=cmd_eval_run)
 
     # eval stats
@@ -378,3 +416,8 @@ def setup_commands(subparsers):
     eval_list_parser.add_argument("--generation-id", help="Filter to specific generation (for runs/questions)")
     eval_list_parser.add_argument("--limit", type=int, default=10, help="Max items to show")
     eval_list_parser.set_defaults(func=cmd_eval_list)
+
+    # eval load-benchmark
+    eval_benchmark_parser = eval_subparsers.add_parser("load-benchmark", help="Load a hand-curated benchmark question set")
+    eval_benchmark_parser.add_argument("--path", default="data/eval/mu2e_benchmark.json", help="Path to benchmark JSON (default: data/eval/mu2e_benchmark.json)")
+    eval_benchmark_parser.set_defaults(func=cmd_eval_load_benchmark)
