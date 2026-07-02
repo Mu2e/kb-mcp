@@ -538,16 +538,22 @@ class Chunk(Base):
     Attributes:
         id (str): Primary key (UUID stored as string).
         document_id (str): Foreign key to the documents table.
-        text (str): Text content of the chunk.
+        text (str): Clean chunk text — what is shown to users in search results
+            and citations. The contextual prefix (Section / Context / etc.) is
+            built dynamically at embed time by `Chunk.embed_text()`, not baked
+            into this field. Special strategies (`summary`, `image`) are the
+            exception — they handle their own prefix logic in chunking.py.
         chunk_index (int): Position in document (0-based) per chunk strategy.
         char_start_index (int): Character position where chunk starts. Optional.
         char_end_index (int): Character position where chunk ends. Optional.
-        token_length (int): Number of tokens in chunk.
-        section_path (str): Section path for hierarchical context (e.g., "Chapter 1 > Section 1.2"). Can be used in embedding context. Optional.
-        chunk_strategy (str): Foreign key to the chunk_strategies table.
+        token_length (int): Number of tokens in the embed-time text (clean
+            text + dynamically-prepended context). The chunker budgets this
+            to fit the embedding model's context window.
+        section_path (str): Section path for hierarchical context (e.g., "Chapter 1 > Section 1.2"). Used by `embed_text()` to build the prefix and indexed by the BM25 trigger (weight `C`). Optional.
+        chunk_strategy (str): Foreign key to the chunk_strategies table. The strategy's `meta` carries `prepend_section_path` / `prepend_gist` flags consumed by `embed_text()`.
         meta (dict): Metadata - flexible JSON field for additional metadata.
         created_time (datetime): Timestamp when the chunk was created.
-        text_search_vector (tsvector): Full-text search vector (PostgreSQL only). Auto-populated by trigger.
+        text_search_vector (tsvector): Full-text search vector (PostgreSQL only). Auto-populated by trigger combining doc.title (A) + chunk.text (B) + chunk.section_path (C) + doc.summary (D).
     """
     __tablename__ = "chunks"
 
@@ -580,6 +586,17 @@ class Chunk(Base):
 
     # Section path for hierarchical context (e.g., "Chapter 1 > Section 1.2")
     section_path = Column(Text, nullable=True)
+
+    # Page-anchored provenance. Populated only by the
+    # DoclingDocument-aware chunker, which walks the persisted DoclingDocument
+    # (documents.parser_output["body"]) and
+    # carries prov[].page_no / prov[].bbox onto the chunk it emits.
+    # Legacy markdown-chunked rows leave these NULL — clients should
+    # treat absence as "page-level citation not available for this chunk".
+    page_start = Column(Integer, nullable=True)  # First page no this chunk's content spans (1-based)
+    page_end = Column(Integer, nullable=True)    # Last page no this chunk's content spans (inclusive)
+    bbox = Column(JSONB, nullable=True)          # Pydantic-dumped BoundingBox (CoordOrigin string-encoded)
+    body_self_refs = Column(JSONB, nullable=True)  # List of "#/texts/N" / "#/groups/N" crefs that contributed
 
     # Chunk strategy - foreign key to chunk_strategies table
     chunk_strategy = Column(
@@ -626,6 +643,50 @@ class Chunk(Base):
             f"chunk_index={self.chunk_index}, token_length={self.token_length})>"
         )
 
+    def embed_text(self) -> str:
+        """Return the text fed to the embedder for this chunk.
+
+        Architecture: `chunk.text` is the clean text shown to users in
+        search results / citations. The contextual prefix
+        (Section / Context / etc.) is built dynamically here at embed time so
+        the embedding sees richer context while the display layer doesn't have
+        to strip a baked-in prefix. The prefix-prepending flags live on the
+        ChunkStrategy meta (`prepend_section_path`, `prepend_gist`).
+
+        Special strategies (`summary`, `image`) keep their context baked into
+        `chunk.text` (they handle their own prefix logic in chunking.py) — for
+        those, `embed_text()` returns `chunk.text` unchanged.
+
+        Legacy chunks created before this split have the prefix already baked
+        into `chunk.text`. We detect that via the literal `Section:` /
+        `Context:` markers and skip re-prefixing — re-chunking via the
+        corpus-refresh task replaces them with clean-text rows.
+
+        Returns:
+            Contextual text to embed (prefix + clean text), or the raw
+            `chunk.text` for special / legacy cases.
+        """
+        if self.chunk_strategy in ("summary", "image", "section", "table"):
+            return self.text or ""
+
+        clean = self.text or ""
+        if clean.startswith("Section:") or clean.startswith("Context:"):
+            # Legacy chunk; prefix already baked in.
+            return clean
+
+        cfg = (self.strategy_config.meta or {}) if self.strategy_config else {}
+        prepend_section_path = cfg.get("prepend_section_path", True)
+        prepend_gist = cfg.get("prepend_gist", True)
+
+        parts = []
+        if prepend_section_path and self.section_path:
+            parts.append(f"Section: {self.section_path}")
+        doc = self.document
+        if prepend_gist and doc is not None and getattr(doc, "gist", None):
+            parts.append(f"Context: {doc.gist}")
+        parts.append(clean)
+        return "\n\n".join(parts)
+
     @classmethod
     def from_dict(cls, data: dict) -> "Chunk":
         """Create a Chunk instance from a dictionary.
@@ -653,6 +714,10 @@ class Chunk(Base):
             char_end_index=data.get("char_end_index"),
             token_length=data.get("token_length"),
             section_path=data.get("section_path"),
+            page_start=data.get("page_start"),
+            page_end=data.get("page_end"),
+            bbox=data.get("bbox"),
+            body_self_refs=data.get("body_self_refs"),
             chunk_strategy=data.get("chunk_strategy"),
             meta=data.get("meta", {}),
         )
@@ -677,6 +742,10 @@ class Chunk(Base):
             "char_end_index": self.char_end_index,
             "token_length": self.token_length,
             "section_path": self.section_path,
+            "page_start": self.page_start,
+            "page_end": self.page_end,
+            "bbox": self.bbox,
+            "body_self_refs": self.body_self_refs,
             "chunk_strategy": self.chunk_strategy,
             "meta": meta,
             "created_time": self.created_time.isoformat() if self.created_time else None,

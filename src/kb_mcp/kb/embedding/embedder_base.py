@@ -98,8 +98,12 @@ class BaseEmbedder(ABC):
                 "Use session.add(chunk) and session.commit() first."
             )
         
-        # Extract texts from chunks
-        texts = [chunk.text for chunk in chunks]
+        # Extract texts from chunks. embed_text() returns the contextual
+        # prefix + clean chunk text for the embedding model, while chunk.text
+        # itself stays clean for display/citation. Legacy chunks with the
+        # prefix already baked into chunk.text are detected inside
+        # embed_text() to avoid double-prefixing.
+        texts = [chunk.embed_text() for chunk in chunks]
         
         # Generate embeddings using the abstract method
         try:
