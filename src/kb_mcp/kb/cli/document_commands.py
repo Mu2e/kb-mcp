@@ -1,5 +1,6 @@
 """Document management commands (add, get)."""
 
+import json
 import os
 import sys
 from pathlib import Path
@@ -66,6 +67,9 @@ def cmd_ingest(args):
 
     # Determine source_id if not provided
     source_id = args.source_id
+    if args.meeting and not source_id:
+        source_id = "MeetingTranscripts"
+
     if not source_id:
         source_id = "local"
         print(f"Warning: No source_id provided, using '{source_id}'")
@@ -81,6 +85,25 @@ def cmd_ingest(args):
     # Determine image LLM description setting
     # If --parse-images is set, enable LLM descriptions by default unless --no-parse-images-llm is set
     describe_images = args.parse_images and not args.no_parse_images_llm
+
+    # Parse optional metadata JSON
+    meta = None
+    if args.meta_json:
+        try:
+            meta = json.loads(args.meta_json)
+            if not isinstance(meta, dict):
+                raise ValueError(f"--meta-json must decode to an object, got {type(meta).__name__}")
+        except Exception as e:
+            print(f"Error parsing --meta-json: {e}")
+            sys.exit(1)
+
+    # Convenience profile to mirror meeting uploader defaults.
+    if args.meeting:
+        if meta is None:
+            meta = {}
+
+    # Meeting comments profile should always include metadata enrichment.
+    summary_include_metadata = args.summary_include_metadata or args.meeting
 
     # Prepare chunk_config if chunk_size or chunk_overlap are provided
     chunk_config = None
@@ -98,7 +121,15 @@ def cmd_ingest(args):
             source = session.query(Source).filter(Source.id == source_id).first()
             if not source:
                 print(f"Source '{source_id}' does not exist. Creating it...")
-                add_source(source_id=source_id, name=f"Local files ({source_id})", session=session)
+                if source_id == "MeetingTranscripts":
+                    add_source(
+                        source_id=source_id,
+                        name="Meeting Transcripts",
+                        description="Meeting notes/comments/transcripts",
+                        session=session,
+                    )
+                else:
+                    add_source(source_id=source_id, name=f"Local files ({source_id})", session=session)
                 # Flush to make source available for foreign key constraints
                 session.flush()
 
@@ -113,9 +144,10 @@ def cmd_ingest(args):
                 force_reparse=args.force_reparse,
                 copy_to_kb=not args.no_copy,
                 uri=None,
-                meta=None,
+                meta=meta,
                 parser_name=args.parser_name,
                 generate_summary=not args.no_summary,
+                summary_include_metadata=summary_include_metadata,
                 chunk_and_embed=not args.no_embed,
                 create_summary_chunks=not args.no_summary_chunks and not args.no_summary,
                 chunk_strategy=args.strategy,
@@ -158,6 +190,8 @@ def cmd_ingest(args):
             # Show summary of processing
             if result.get('num_summaries', 0) > 0:
                 print(f"\n  Generated {result['num_summaries']} summary(ies)")
+            if result.get('num_metadata_enriched', 0) > 0:
+                print(f"  Metadata enriched for {result['num_metadata_enriched']} document(s)")
             if result.get('num_chunks', 0) > 0:
                 print(f"  Created {result['num_chunks']} chunk(s)")
                 if result.get('num_text_chunks', 0) > 0:
@@ -257,6 +291,11 @@ def setup_commands(subparsers):
         help="Skip automatic summary generation (title, gist, summary)"
     )
     ingest_parser.add_argument(
+        "--summary-include-metadata",
+        action="store_true",
+        help="Include structured metadata extraction in summary generation"
+    )
+    ingest_parser.add_argument(
         "--no-embed",
         action="store_true",
         help="Skip automatic chunking and embedding after ingesting document"
@@ -301,6 +340,16 @@ def setup_commands(subparsers):
         "--batch-size",
         type=int,
         help="Batch size for embedding generation"
+    )
+    ingest_parser.add_argument(
+        "--meta-json",
+        help="Metadata JSON object to attach to the document"
+    )
+    ingest_parser.add_argument(
+        "--meeting",
+        dest="meeting",
+        action="store_true",
+        help="Shortcut profile for meeting uploads (source=MeetingTranscripts if unset)"
     )
     ingest_parser.set_defaults(func=cmd_ingest)
 

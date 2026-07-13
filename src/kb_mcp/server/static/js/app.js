@@ -770,6 +770,10 @@ function createDocumentElement(doc, isSearchResult = false, showSimilarity = tru
         displayTitle = `${doc.title_gen} (${doc.doc_id || doc.id})`;
     }
     
+    // Build chat link with properly escaped title
+    const chatTitle = doc.title || doc.title_gen || doc.doc_id || 'Unknown';
+    const chatLink = `/web/chat?doc_id=${encodeURIComponent(doc.id)}&title=${encodeURIComponent(chatTitle)}`;
+
     div.innerHTML = `
         <div class="document-header">
             <div>
@@ -777,8 +781,8 @@ function createDocumentElement(doc, isSearchResult = false, showSimilarity = tru
                     <a href="/web/document/${doc.id}">${escapeHtml(displayTitle)}</a>
                 </h3>
                 <div class="document-meta">
-                    <strong>Source:</strong> ${escapeHtml(doc.source_id)} | 
-                    <strong>Type:</strong> ${escapeHtml(doc.doc_type)} | 
+                    <strong>Source:</strong> ${escapeHtml(doc.source_id)} |
+                    <strong>Type:</strong> ${escapeHtml(doc.doc_type)} |
                     <strong>Inserted:</strong> ${insertTime}
                 </div>
             </div>
@@ -788,6 +792,7 @@ function createDocumentElement(doc, isSearchResult = false, showSimilarity = tru
         ${metaInfo}
         <div class="document-actions">
             <a href="/web/document/${doc.id}" class="btn">View Full Document</a>
+            <a href="${chatLink}" class="btn" style="background-color: #2196F3;">💬 Chat with Document</a>
             <!--${!doc.summary ? `<form method="POST" action="/web/document/${doc.id}/generate-summary" style="display: inline-block; margin-left: 10px;">
                 <button type="submit" class="btn" style="background-color: #FF9800; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; font-size: 14px;">Generate Summary</button>-->
             </form>` : ''}

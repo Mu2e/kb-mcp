@@ -362,10 +362,10 @@ def find_node(
         dialect = session.bind.dialect.name
 
         if dialect == 'postgresql':
-            # PostgreSQL: check if canonical is in the array using raw SQL
+            # PostgreSQL: check if canonical is in the array using raw SQL with parameterization
             from sqlalchemy import text as sql_text
             query = session.query(GraphNode).filter(
-                sql_text(f"'{canonical}' = ANY(graph_nodes.aliases)")
+                sql_text(":canonical = ANY(graph_nodes.aliases)").bindparams(canonical=canonical)
             )
             if node_type_obj:
                 query = query.filter(GraphNode.type_id == node_type_obj.id)

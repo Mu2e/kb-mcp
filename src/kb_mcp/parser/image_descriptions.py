@@ -59,7 +59,10 @@ def _get_single_image_description(
         max_tokens=600  # Increased for detailed technical descriptions
     )
 
-    return response.choices[0].message.content.strip()
+    content = response.choices[0].message.content
+    if content is None:
+        raise ValueError("Model returned empty response — vision may not be supported by this model")
+    return content.strip()
 
 
 def generate_image_descriptions(
@@ -141,18 +144,19 @@ def generate_image_descriptions(
         descriptions = [None] * len(images_for_llm)
         
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            # Submit all tasks
-            future_to_index = {
-                executor.submit(
+            # Submit all tasks — use explicit loop (not dict comprehension) to
+            # avoid late-binding closure capturing only the last loop values.
+            future_to_index = {}
+            for i, (orig_idx, image_base64, image_identifier, img_dict) in enumerate(images_for_llm):
+                future = executor.submit(
                     _get_single_image_description,
                     client,
                     document_text,
                     image_base64,
                     image_identifier,
-                    model
-                ): i
-                for i, (_, image_base64, image_identifier, _) in enumerate(images_for_llm)
-            }
+                    model,
+                )
+                future_to_index[future] = i
 
             # Collect results
             for future in as_completed(future_to_index):

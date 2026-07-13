@@ -917,6 +917,94 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
             """
                         timings['build_eval_results_html'] = time.time() - t0
                     
+                    # Get graph nodes for this document
+                    graph_nodes_html = ""
+                    graph_extraction_logs_data = "[]"
+                    try:
+                        from ....kb.graph.queries import get_nodes_for_document
+                        from ....kb.graph.db_models import GraphExtractionLog
+
+                        timings['graph_nodes_since_last'] = time.time() - t0
+                        t0 = time.time()
+                        nodes = get_nodes_for_document(document_id=doc.id, session=session)
+                        timings['graph_nodes'] = time.time() - t0
+                        timings['graph_nodes_count'] = len(nodes)
+
+                        if nodes:
+                            t0 = time.time()
+                            nodes_list = ""
+                            for node_info in nodes:
+                                node_id = node_info["id"]
+                                node_name = html_escape(node_info["name"])
+                                node_type = html_escape(node_info["type"])
+                                mention_count = node_info["mention_count"]
+                                aliases_str = ", ".join(html_escape(a) for a in node_info["aliases"]) if node_info["aliases"] else "—"
+
+                                nodes_list += f"""
+                            <tr style="border-bottom: 1px solid #eee; cursor: pointer;" onclick="window.location.href='/web/graph/node/{node_id}'" onmouseover="this.style.backgroundColor='#f8f9fa'" onmouseout="this.style.backgroundColor='transparent'">
+                                <td style="padding: 12px 10px;">
+                                    <a href="/web/graph/node/{node_id}" style="text-decoration: none; color: #2196F3;">{node_name}</a>
+                                </td>
+                                <td style="padding: 12px 10px; color: #666;">{node_type}</td>
+                                <td style="padding: 12px 10px; color: #666;">{mention_count}</td>
+                                <td style="padding: 12px 10px; color: #666; font-size: 12px;">{aliases_str}</td>
+                            </tr>
+                            """
+
+                            graph_nodes_html = f"""
+                <div class="card" style="margin-top: 20px;">
+                    <h2>Knowledge Graph Nodes ({len(nodes)})</h2>
+                    <p style="color: #666; font-size: 14px; margin-bottom: 10px;">Entities and concepts extracted from this document:</p>
+                    <table style="width: 100%; border-collapse: collapse; margin-top: 10px;">
+                        <thead>
+                            <tr style="background-color: #f5f5f5; border-bottom: 2px solid #ddd;">
+                                <th style="text-align: left; padding: 10px; font-weight: 600;">Name</th>
+                                <th style="text-align: left; padding: 10px; font-weight: 600;">Type</th>
+                                <th style="text-align: left; padding: 10px; font-weight: 600;">Mentions</th>
+                                <th style="text-align: left; padding: 10px; font-weight: 600;">Aliases</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {nodes_list}
+                        </tbody>
+                    </table>
+                </div>
+                """
+                            timings['build_graph_nodes_html'] = time.time() - t0
+
+                        # Get extraction logs for this document and prepare for JavaScript
+                        timings['graph_extraction_logs_since_last'] = time.time() - t0
+                        t0 = time.time()
+                        extraction_logs = session.query(GraphExtractionLog).filter(
+                            GraphExtractionLog.document_id == doc.id
+                        ).order_by(GraphExtractionLog.created_time.desc()).all()
+                        timings['graph_extraction_logs'] = time.time() - t0
+                        timings['graph_extraction_logs_count'] = len(extraction_logs)
+
+                        # Convert extraction logs to JSON for JavaScript
+                        graph_extraction_logs_json = []
+                        if extraction_logs:
+                            import json as json_module
+                            for log in extraction_logs:
+                                graph_extraction_logs_json.append({
+                                    "created_time": _to_utc_iso(log.created_time),
+                                    "extraction_model": log.extraction_model or "N/A",
+                                    "hostname": log.hostname or "N/A",
+                                    "time_extraction": log.time_extraction,
+                                    "time_processing": log.time_processing,
+                                    "relations_extracted": log.relations_extracted,
+                                    "relations_created": log.relations_created,
+                                    "relations_updated": log.relations_updated,
+                                    "relations_errors": log.relations_errors
+                                })
+                            graph_extraction_logs_data = json_module.dumps(graph_extraction_logs_json)
+                        else:
+                            graph_extraction_logs_data = "[]"
+
+                    except (ImportError, Exception) as e:
+                        logger.debug(f"Could not load graph information: {e}")
+                        # Graph module may not be available, that's okay
+
                     # Get EvalDataset questions where this document is the source
                     timings['eval_questions_since_last'] = time.time() - t0
                     t0 = time.time()
@@ -993,8 +1081,15 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
             content = f"""
             <h1>Document Details</h1>
             <p><a href="/web">← Back to Document List</a></p>
-            
+
             {message_html if message_html else ''}
+
+            <div style="margin: 20px 0;">
+                <a href="/web/chat?doc_id={doc.id}&title={html_escape(doc.title or doc.title_gen or doc.doc_id or 'Unknown')}"
+                   style="display: inline-block; padding: 12px 24px; background: #2196F3; color: white; text-decoration: none; border-radius: 4px; font-weight: 500;">
+                    Chat with this document
+                </a>
+            </div>
 
             <div class="card">
                 <h2>Document Information</h2>
@@ -1146,15 +1241,17 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
                 }}
             }});
             </script>
-            
+
+            {graph_nodes_html}
+
             <div id="document-logs" class="card" style="margin-top: 20px;">
                 <h2>Operation Logs</h2>
                 <div id="logs-content" style="color: #666;">Loading logs...</div>
             </div>
-            
+
             {eval_results_html}
             {eval_questions_html}
-            
+
             <script>
             // Load and display similar documents
             async function loadSimilarDocuments() {{
@@ -1252,6 +1349,9 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
             </script>
             
             <script>
+            // Graph extraction logs data
+            const graphExtractionLogs = {graph_extraction_logs_data};
+
             // Helper function to format UTC timestamp to local time with timezone info
             function formatLocalTime(utcIsoString) {{
                 if (!utcIsoString) return 'N/A';
@@ -1271,7 +1371,7 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
                     return 'N/A';
                 }}
             }}
-            
+
             // Load and display document logs
             async function loadDocumentLogs() {{
                 try {{
@@ -1326,11 +1426,28 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
                     }} else {{
                         logsHtml += '<p style="color: #666; margin-top: 20px;">No chunking logs found.</p>';
                     }}
-                    
+
+                    // Graph extraction logs (from server-side data)
+                    if (graphExtractionLogs && graphExtractionLogs.length > 0) {{
+                        logsHtml += '<h3 style="margin-top: 20px;">Graph Extraction Logs</h3><table style="width: 100%; border-collapse: collapse; font-size: 13px;"><thead><tr><th style="text-align: left; padding: 8px; border-bottom: 2px solid #ddd;">Time</th><th style="text-align: left; padding: 8px; border-bottom: 2px solid #ddd;">Model</th><th style="text-align: left; padding: 8px; border-bottom: 2px solid #ddd;">Hostname</th><th style="text-align: center; padding: 8px; border-bottom: 2px solid #ddd;">Extracted</th><th style="text-align: center; padding: 8px; border-bottom: 2px solid #ddd;">Created</th><th style="text-align: center; padding: 8px; border-bottom: 2px solid #ddd;">Updated</th><th style="text-align: center; padding: 8px; border-bottom: 2px solid #ddd;">Errors</th><th style="text-align: left; padding: 8px; border-bottom: 2px solid #ddd;">Extract Time</th><th style="text-align: left; padding: 8px; border-bottom: 2px solid #ddd;">Process Time</th></tr></thead><tbody>';
+                        for (const log of graphExtractionLogs) {{
+                            const time = formatLocalTime(log.created_time);
+                            const extractTime = log.time_extraction ? log.time_extraction.toFixed(2) + 's' : 'N/A';
+                            const processTime = log.time_processing ? log.time_processing.toFixed(2) + 's' : 'N/A';
+                            const errorColor = log.relations_errors === 0 ? '#4CAF50' : '#FF9800';
+                            logsHtml += `<tr><td style="padding: 8px; border-bottom: 1px solid #eee;">${{time}}</td><td style="padding: 8px; border-bottom: 1px solid #eee; font-size: 12px;">${{log.extraction_model}}</td><td style="padding: 8px; border-bottom: 1px solid #eee; font-size: 12px;">${{log.hostname}}</td><td style="padding: 8px; border-bottom: 1px solid #eee; text-align: center;">${{log.relations_extracted}}</td><td style="padding: 8px; border-bottom: 1px solid #eee; text-align: center;">${{log.relations_created}}</td><td style="padding: 8px; border-bottom: 1px solid #eee; text-align: center;">${{log.relations_updated}}</td><td style="padding: 8px; border-bottom: 1px solid #eee; text-align: center; color: ${{errorColor}}; font-weight: 500;">${{log.relations_errors}}</td><td style="padding: 8px; border-bottom: 1px solid #eee; font-size: 12px;">${{extractTime}}</td><td style="padding: 8px; border-bottom: 1px solid #eee; font-size: 12px;">${{processTime}}</td></tr>`;
+                        }}
+                        logsHtml += '</tbody></table>';
+                    }} else {{
+                        logsHtml += '<p style="color: #666; margin-top: 20px;">No graph extraction logs found.</p>';
+                    }}
+
                     if (!logs.parsing || logs.parsing.length === 0) {{
                         if (!logs.chunking || logs.chunking.length === 0) {{
                             if (!logs.summary || logs.summary.length === 0) {{
-                                logsHtml = '<p style="color: #666;">No logs found for this document.</p>';
+                                if (!graphExtractionLogs || graphExtractionLogs.length === 0) {{
+                                    logsHtml = '<p style="color: #666;">No logs found for this document.</p>';
+                                }}
                             }}
                         }}
                     }}
@@ -1699,6 +1816,12 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
         content = f"""
             <h1>Upload Document</h1>
             <p>Upload a file to add it to the knowledge base with optional image extraction, summary generation, and embedding.</p>
+
+            <div class="card" style="margin-bottom: 20px; background: #f7fbff; border-left: 4px solid #2196F3;">
+                <h2 style="margin-top: 0;">Quick Upload: Meeting</h2>
+                <p style="margin-bottom: 10px;">Use the upload flow for meeting notes/comments/transcripts.</p>
+                <a href="/web/upload/meeting" style="display: inline-block; padding: 8px 14px; background: #2196F3; color: white; text-decoration: none; border-radius: 4px;">Open Meeting Upload</a>
+            </div>
             
             <div class="card">
                 <form id="upload-form" enctype="multipart/form-data" method="POST" action="/web/upload">
@@ -2135,6 +2258,367 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
             )
 
     app.add_route("/web/upload", upload_file, methods=["POST"])
+
+    async def upload_meeting_comments_page(request: Request):
+        """Simplified meeting comments upload page (requires admin privileges)."""
+        session_data, redirect = await require_auth_html(request, session_manager, require_admin=True)
+        if redirect:
+            return redirect
+
+        username = session_data.get("username", "User")
+
+        content = """
+            <h1>Upload Meeting</h1>
+            <p>Simple upload for meeting comments/notes/transcripts.</p>
+
+            <div class="card">
+                <form id="meeting-upload-form" enctype="multipart/form-data" method="POST" action="/web/upload/meeting">
+                    <div id="meeting-dropzone" style="margin-bottom: 15px; padding: 28px; border: 2px dashed #90CAF9; border-radius: 8px; background: #F5FAFF; text-align: center; cursor: pointer;">
+                        <strong>Drag and drop files here</strong><br>
+                        <span style="color: #666;">or click to select one or more files</span>
+                        <input type="file" id="meeting-file" name="file" multiple required style="display: none;">
+                    </div>
+
+                    <div id="meeting-file-name" style="margin-bottom: 15px; color: #444; font-size: 14px;">No file selected</div>
+
+                    <div style="margin-bottom: 15px;">
+                        <label for="meeting-doc-id"><strong>Document ID (optional):</strong></label>
+                        <input type="text" id="meeting-doc-id" name="doc_id" placeholder="e.g., meeting-2026-06-06" style="margin-top: 5px; display: block; width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                    </div>
+
+                    <div style="margin-bottom: 15px;">
+                        <label for="meeting-title"><strong>Title (optional):</strong></label>
+                        <input type="text" id="meeting-title" name="title" placeholder="e.g., Mu2e Weekly Meeting" style="margin-top: 5px; display: block; width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                    </div>
+
+                    <div style="margin-bottom: 15px;">
+                        <label for="meeting-meta"><strong>Additional Metadata (optional):</strong></label>
+                        <textarea id="meeting-meta" name="meta" rows="4" placeholder='{"meeting_type": "weekly", "team": "mu2e"}' style="margin-top: 5px; display: block; width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px; font-family: monospace; font-size: 14px;"></textarea>
+                    </div>
+
+                    <div style="margin-bottom: 15px; padding: 12px; background: #f9f9f9; border: 1px solid #ddd; border-radius: 4px; color: #444;">
+                        <strong>Fixed processing:</strong> Generate summary = ON, Chunk & embed = ON, Chunking strategy = default, Parse images = OFF, Source = <code>MeetingTranscripts</code>, Doc type = default text
+                    </div>
+
+                    <button type="submit" id="meeting-upload-submit-btn" style="padding: 10px 20px; background-color: #4CAF50; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 16px;">Upload Meeting</button>
+                </form>
+            </div>
+
+            <div id="meeting-upload-status" style="margin-top: 20px;"></div>
+
+            <script>
+            document.addEventListener('DOMContentLoaded', function() {
+                const dropzone = document.getElementById('meeting-dropzone');
+                const fileInput = document.getElementById('meeting-file');
+                const fileName = document.getElementById('meeting-file-name');
+
+                function updateFileName(files) {
+                    if (files && files.length) {
+                        if (files.length === 1) {
+                            fileName.textContent = 'Selected: ' + files[0].name;
+                        } else {
+                            fileName.textContent = 'Selected: ' + files.length + ' files';
+                        }
+                    } else {
+                        fileName.textContent = 'No file selected';
+                    }
+                }
+
+                dropzone.addEventListener('click', function() {
+                    fileInput.click();
+                });
+
+                dropzone.addEventListener('dragover', function(e) {
+                    e.preventDefault();
+                    dropzone.style.borderColor = '#1E88E5';
+                    dropzone.style.background = '#EAF4FF';
+                });
+
+                dropzone.addEventListener('dragleave', function() {
+                    dropzone.style.borderColor = '#90CAF9';
+                    dropzone.style.background = '#F5FAFF';
+                });
+
+                dropzone.addEventListener('drop', function(e) {
+                    e.preventDefault();
+                    dropzone.style.borderColor = '#90CAF9';
+                    dropzone.style.background = '#F5FAFF';
+                    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+                        fileInput.files = e.dataTransfer.files;
+                        updateFileName(e.dataTransfer.files);
+                    }
+                });
+
+                fileInput.addEventListener('change', function() {
+                    updateFileName(fileInput.files);
+                });
+
+                if (typeof setupFormLoadingIndicator === 'function') {
+                    setupFormLoadingIndicator(
+                        'meeting-upload-form',
+                        'meeting-upload-submit-btn',
+                        'meeting-upload-status',
+                        'Uploading and processing meeting comments...'
+                    );
+                }
+            });
+            </script>
+        """
+
+        html = html_templates.base_template(
+            title="Upload Meeting",
+            content=content,
+            username=username,
+        )
+        return HTMLResponse(html)
+
+    app.add_route("/web/upload/meeting", upload_meeting_comments_page, methods=["GET"])
+    app.add_route("/web/upload/meeting-comments", upload_meeting_comments_page, methods=["GET"])
+
+    async def upload_meeting_comments(request: Request):
+        """Handle simplified meeting comments upload (requires admin privileges)."""
+        session_data, redirect = await require_auth_html(request, session_manager, require_admin=True)
+        if redirect:
+            return redirect
+
+        username = session_data.get("username", "User")
+
+        try:
+            form = await request.form()
+            files = form.getlist("file")
+            source_id = "MeetingTranscripts"
+            doc_id = form.get("doc_id")
+            title = form.get("title")
+            meta_text = form.get("meta")
+
+            # Fixed workflow defaults for meeting comments.
+            parse_images = False
+            generate_summary = True
+            chunk_and_embed = True
+            create_summary_chunks = True
+            chunk_strategy = None
+
+            meta = None
+            if meta_text:
+                try:
+                    meta = json.loads(meta_text)
+                    if not isinstance(meta, dict):
+                        return HTMLResponse(
+                            html_templates.base_template(
+                                title="Upload Error",
+                                content=f'<div class="card"><h2>Error</h2><p>Metadata must be a JSON object (dictionary), not a {type(meta).__name__}.</p><p><a href="/web/upload/meeting">← Back to Meeting Upload</a></p></div>',
+                                username=username,
+                            ),
+                            status_code=400,
+                        )
+                except json.JSONDecodeError as e:
+                    error_msg = html_escape(str(e))
+                    return HTMLResponse(
+                        html_templates.base_template(
+                            title="Upload Error",
+                            content=f'<div class="card"><h2>Error</h2><p>Invalid JSON in metadata field: {error_msg}</p><p><a href="/web/upload/meeting">← Back to Meeting Upload</a></p></div>',
+                            username=username,
+                        ),
+                        status_code=400,
+                    )
+
+            if not files:
+                return HTMLResponse(
+                    html_templates.base_template(
+                        title="Upload Error",
+                        content='<div class="card"><h2>Error</h2><p>No file provided.</p><p><a href="/web/upload/meeting">← Back to Meeting Upload</a></p></div>',
+                        username=username,
+                    ),
+                    status_code=400,
+                )
+
+            ALLOWED_EXTENSIONS = {
+                ".pdf", ".docx", ".pptx", ".xlsx", ".txt", ".md",
+                ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp",
+                ".csv", ".json", ".xml", ".html", ".htm",
+            }
+            from ....config import get_server_config
+            server_config = get_server_config()
+            max_upload_size = server_config['max_upload_size']
+
+            upload_results = []
+            created_doc_ids = []
+
+            for index, file in enumerate(files):
+                filename = getattr(file, "filename", None) or f"uploaded_file_{index + 1}"
+                file_ext = Path(filename).suffix.lower()
+                if file_ext not in ALLOWED_EXTENSIONS:
+                    return HTMLResponse(
+                        html_templates.base_template(
+                            title="Upload Error",
+                            content=f'<div class="card"><h2>Error</h2><p>File type not allowed for <code>{html_escape(filename)}</code>. Allowed extensions: {", ".join(sorted(ALLOWED_EXTENSIONS))}</p><p><a href="/web/upload/meeting">← Back to Meeting Upload</a></p></div>',
+                            username=username,
+                        ),
+                        status_code=400,
+                    )
+
+                file_content = await file.read()
+                if len(file_content) > max_upload_size:
+                    size_mb = max_upload_size / (1024 * 1024)
+                    return HTMLResponse(
+                        html_templates.base_template(
+                            title="Upload Error",
+                            content=f'<div class="card"><h2>Error</h2><p>File too large for <code>{html_escape(filename)}</code>. Maximum size: {size_mb:.0f}MB</p><p><a href="/web/upload/meeting">← Back to Meeting Upload</a></p></div>',
+                            username=username,
+                        ),
+                        status_code=400,
+                    )
+
+                safe_filename = "".join(c for c in filename if c.isalnum() or c in ".-_ ").strip() or "uploaded_file"
+                file_path = upload_dir / safe_filename
+                counter = 1
+                original_path = file_path
+                while file_path.exists():
+                    stem = original_path.stem
+                    suffix = original_path.suffix
+                    file_path = upload_dir / f"{stem}_{counter}{suffix}"
+                    counter += 1
+
+                file_path.write_bytes(file_content)
+                final_filename = file_path.name
+                uri = f"local://uploads/{final_filename}"
+
+                file_doc_id = doc_id
+                if len(files) > 1:
+                    if file_doc_id:
+                        file_doc_id = f"{file_doc_id}-{Path(filename).stem}"
+                    else:
+                        file_doc_id = file_path.stem
+                elif not file_doc_id:
+                    file_doc_id = file_path.stem
+
+                upload_results.append({
+                    "filename": filename,
+                    "file_path": file_path,
+                    "uri": uri,
+                    "doc_id": file_doc_id,
+                })
+
+            from ....kb import add_source, ingest
+
+            add_source(
+                source_id=source_id,
+                name="Meeting Transcripts",
+                description="Meeting notes/comments/transcripts uploaded via meeting comments interface",
+            )
+
+            try:
+                if meta is None:
+                    meta = {}
+                if title:
+                    meta["title"] = title
+
+                results = []
+                for upload in upload_results:
+                    result = ingest(
+                        str(upload["file_path"]),
+                        source_id=source_id,
+                        doc_id=upload["doc_id"],
+                        uri=upload["uri"],
+                        meta=dict(meta),
+                        extract_images=parse_images,
+                        describe_images=False,
+                        copy_to_kb=False,
+                        generate_summary=generate_summary,
+                        summary_include_metadata=True,
+                        chunk_and_embed=chunk_and_embed,
+                        create_summary_chunks=create_summary_chunks,
+                        chunk_strategy=chunk_strategy,
+                    )
+                    results.append(result)
+                    created_doc_ids.extend(result.get("document_ids", []))
+
+                from ....kb import get_db_session, get
+                from urllib.parse import urlencode
+
+                with get_db_session() as session:
+                    docs = get(uid=created_doc_ids, session=session)
+                    if not isinstance(docs, list):
+                        docs = [docs] if docs else []
+
+                    doc_links = []
+                    for doc in docs:
+                        doc_links.append(f'<a href="/web/document/{doc.id}">Document {doc.id}</a> ({doc.doc_type})')
+
+                    safe_filename_display = ", ".join(html_escape(upload["filename"]) for upload in upload_results)
+                    total_chunks = sum(result.get("num_chunks", 0) for result in results)
+                    total_summaries = sum(result.get("num_summaries", 0) for result in results)
+                    total_metadata = sum(result.get("num_metadata_enriched", 0) for result in results)
+                    chunk_status = f" chunked/embedded ({total_chunks} chunks)" if total_chunks > 0 else ""
+                    summary_status = " with summaries" if total_summaries > 0 else ""
+                    metadata_status = f" Metadata extracted for {total_metadata} document(s)." if total_metadata > 0 else ""
+
+                    if len(docs) == 1 and docs[0]:
+                        success_message = f'Meeting upload completed! File "{safe_filename_display}" added as <a href="/web/document/{docs[0].id}">Document {docs[0].id}</a> ({docs[0].doc_type}) in source <code>{source_id}</code>{summary_status}{chunk_status}.{metadata_status}'
+                    else:
+                        success_message = f'Meeting upload completed! File "{safe_filename_display}" created {len(docs)} documents: {", ".join(doc_links)}{summary_status}{chunk_status}.{metadata_status}'
+
+                redirect_params = {
+                    "source_id": source_id,
+                    "message": success_message,
+                    "uploaded_docs": ",".join(created_doc_ids),
+                }
+                redirect_url = f"/web?{urlencode(redirect_params)}"
+                return RedirectResponse(url=redirect_url, status_code=303)
+
+            except Exception as e:
+                logger.error(f"Error adding meeting comments document to KB: {e}", exc_info=True)
+                if file_path.exists():
+                    file_path.unlink()
+
+                error_msg = html_escape(str(e))
+                error_content = f"""
+                    <div class="card">
+                        <h2>Error Processing File</h2>
+                        <p>An error occurred while processing the uploaded file:</p>
+                        <div class="info-box" style="margin-top: 10px;">
+                            <strong>Error:</strong> {error_msg}
+                        </div>
+                        <p style="margin-top: 20px;">
+                            <a href="/web/upload/meeting">← Back to Meeting Upload</a>
+                        </p>
+                    </div>
+                """
+                return HTMLResponse(
+                    html_templates.base_template(
+                        title="Upload Error",
+                        content=error_content,
+                        username=username,
+                    ),
+                    status_code=500,
+                )
+
+        except Exception as e:
+            logger.error(f"Error in upload_meeting_comments: {e}", exc_info=True)
+            error_msg = html_escape(str(e))
+            error_content = f"""
+                <div class="card">
+                    <h2>Upload Error</h2>
+                    <p>An error occurred during upload:</p>
+                    <div class="info-box" style="margin-top: 10px;">
+                        <strong>Error:</strong> {error_msg}
+                    </div>
+                    <p style="margin-top: 20px;">
+                        <a href="/web/upload/meeting">← Back to Meeting Upload</a>
+                    </p>
+                </div>
+            """
+            return HTMLResponse(
+                html_templates.base_template(
+                    title="Upload Error",
+                    content=error_content,
+                    username=username,
+                ),
+                status_code=500,
+            )
+
+    app.add_route("/web/upload/meeting", upload_meeting_comments, methods=["POST"])
+    app.add_route("/web/upload/meeting-comments", upload_meeting_comments, methods=["POST"])
 
     async def raw_document_detail(request: Request):
         """Show details for a raw document, its parsed versions, and any parser comparison."""

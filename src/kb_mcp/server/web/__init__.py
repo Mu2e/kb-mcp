@@ -11,6 +11,8 @@ from .routes.logs import setup_logs_routes
 from .routes.statistics import setup_statistics_routes
 from .routes.admin import setup_admin_routes
 from .routes.api import setup_api_routes
+from .routes.graph import setup_graph_routes
+from .routes.chat import setup_chat_routes
 
 
 def setup_web_routes(app, oauth_provider, session_manager: WebSessionManager):
@@ -45,6 +47,12 @@ def setup_web_routes(app, oauth_provider, session_manager: WebSessionManager):
 
     # Setup API routes (JSON endpoints)
     setup_api_routes(app, session_manager)
+
+    # Setup graph routes (knowledge graph exploration)
+    setup_graph_routes(app, session_manager)
+
+    # Setup chat routes (agent-based chat interface)
+    setup_chat_routes(app, session_manager, require_auth_html, require_auth_api)
 
 
 __all__ = [

@@ -26,7 +26,9 @@ def _get_bool(key: str, default: bool = False) -> bool:
     return os.getenv(key, str(default)).lower() == "true"
 
 def _get_int(key: str, default: int) -> int:
-    val = os.getenv(key, str(default))
+    val = os.getenv(key)
+    if val is None or val.strip() == "":
+        return default
     # Kubernetes injects service vars like DB_PORT=tcp://10.x.x.x:5432; extract just the port
     if val.startswith("tcp://") and ":" in val:
         val = val.rsplit(":", 1)[-1]
@@ -257,6 +259,7 @@ def get_parser_config() -> dict:
             * `image_llm_description` (bool): Use LLM for image descriptions (Env: `PARSE_IMAGE_LLM_DESCRIPTION`).
             * `image_description_model` (str): Model for descriptions (Env: `PARSE_IMAGE_DESCRIPTION_MODEL`, defaults to DEFAULT_LLM_MODEL).
             * `image_description_num_workers` (int): Parallel worker count (Env: `PARSE_IMAGE_DESCRIPTION_NUMWORKERS`, default: 6).
+            * `marker_output_base` (str): Base directory for pre-existing Marker output (Env: `MARKER_OUTPUT_BASE`, default: 'data/sources/sld-scanned/extracted_output').
     """
     return {
         'parser': os.getenv("KB_PARSER", "kb-mcp"),
@@ -264,6 +267,7 @@ def get_parser_config() -> dict:
         'image_llm_description': _get_bool("PARSE_IMAGE_LLM_DESCRIPTION", True),
         'image_description_model': os.getenv("PARSE_IMAGE_DESCRIPTION_MODEL", get_default_llm_model()),
         'image_description_num_workers': _get_int("PARSE_IMAGE_DESCRIPTION_NUMWORKERS", 6),
+        'marker_output_base': os.getenv("MARKER_OUTPUT_BASE", "data/sources/sld-scanned/extracted_output"),
     }
 
 def get_embedding_config() -> dict:
@@ -310,6 +314,22 @@ def get_search_config() -> dict:
         'max_chunks_per_doc': _get_int("SEARCH_MAX_CHUNKS_PER_DOC", 10),
         'initial_limit_multiplier': _get_int("SEARCH_INITIAL_LIMIT_MULTIPLIER", 50),
         'rrf_k': _get_int("SEARCH_RRF_K", 60),
+    }
+
+def get_agent_config() -> dict:
+    """Research agent configuration.
+
+    Returns:
+        dict: Agent configuration with keys:
+
+            * `agent_model` (str): LLM model for agent reasoning (Env: `AGENT_MODEL`, defaults to DEFAULT_LLM_MODEL).
+            * `max_depth` (int): Maximum recursion depth for agent delegation (Env: `AGENT_MAX_DEPTH`, default: 2).
+    """
+    return {
+        'agent_model': os.getenv("AGENT_MODEL", get_default_llm_model()),
+        'max_depth': _get_int("AGENT_MAX_DEPTH", 2),
+        'max_tool_output_chars': _get_int("AGENT_MAX_TOOL_OUTPUT_CHARS", 30000),
+        'max_aggregated_tool_output_chars': _get_int("AGENT_MAX_AGGREGATED_TOOL_OUTPUT_CHARS", 100000),
     }
 
 # Paths

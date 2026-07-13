@@ -32,6 +32,7 @@ def summarize(
     include_gist: bool = True,
     include_summary: bool = True,
     include_title: bool = True,
+    include_metadata: bool = False,
     model: Optional[str] = None,
 ) -> Dict[str, str]:
     """Generate AI summary, gist, and/or title for a document.
@@ -50,6 +51,7 @@ def summarize(
         include_gist: Whether to generate gist (default: True)
         include_summary: Whether to generate summary (default: True)
         include_title: Whether to generate title (default: False)
+        include_metadata: Whether to extract structured metadata (default: False)
         model: Model name to use (overrides SUMMARY_MODEL env var)
 
     Returns:
@@ -101,6 +103,10 @@ def summarize(
     if include_summary:
         fields.append('"summary": Detailed paragraph capturing key points, important details, findings, or arguments (up to ~350 words). Include specific information that would help someone understand the document\'s content. This will be used for search and retrieval.')
         json_fields.append('"summary": "..."')
+
+    if include_metadata:
+        fields.append('"metadata": Structured metadata object with keys: "event_datetime" (ISO string or null), "event_date" (YYYY-MM-DD or null), "event_name" (string or null), "event_participants" (array of strings), "event_organizations" (array of strings), "event_location" (string or null), "event_topics" (array of strings), "event_decisions" (array of strings), "event_action_items" (array of strings), "event_tags" (array of strings). Use null/empty arrays when unknown and do not invent facts.')
+        json_fields.append('"metadata": {"event_datetime": null, "event_date": null, "event_name": null, "event_participants": [], "event_organizations": [], "event_location": null, "event_topics": [], "event_decisions": [], "event_action_items": [], "event_tags": []}')
 
     # Build numbered list of fields
     field_instructions = "\n\n".join(f"{i+1}. {field}" for i, field in enumerate(fields))
@@ -171,6 +177,10 @@ Return ONLY a valid JSON object in this format:
         if include_summary and "summary" not in result:
             logger.warning(f"Missing 'summary' in response: {result.keys()}")
             result["summary"] = ""
+
+        if include_metadata and "metadata" not in result:
+            logger.warning(f"Missing 'metadata' in response: {result.keys()}")
+            result["metadata"] = {}
 
         logger.info(
             f"Generated summary ({len(result.get('summary', ''))} chars)"

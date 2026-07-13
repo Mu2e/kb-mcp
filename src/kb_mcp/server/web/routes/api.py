@@ -829,3 +829,108 @@ def setup_api_routes(app, session_manager: WebSessionManager):
             )
 
     app.add_route("/api/similar", api_similar)
+
+    async def api_graph_node(request: Request):
+        """JSON API endpoint for getting node information."""
+        # Check authentication first
+        session_data, error_response = await require_auth_api(request, session_manager, json_response=True)
+        if error_response:
+            return error_response
+
+        # Get query parameters
+        node_id = request.query_params.get("id", None)
+        node_name = request.query_params.get("name", None)
+        node_type = request.query_params.get("type", None)
+
+        if not node_id and not node_name:
+            return JSONResponse(
+                {"error": "Either 'id' or 'name' parameter is required"},
+                status_code=400
+            )
+
+        try:
+            from ....kb.graph.queries import get_node
+
+            node_data = get_node(
+                id=node_id,
+                name=node_name,
+                type=node_type
+            )
+
+            if not node_data:
+                return JSONResponse(
+                    {"error": "Node not found"},
+                    status_code=404
+                )
+
+            if node_data["node"].get("created_time"):
+                node_data["node"]["created_time"] = str(node_data["node"]["created_time"])
+
+            for rel in node_data.get("outgoing_relations", []):
+                if rel.get("created_time"):
+                    rel["created_time"] = str(rel["created_time"])
+
+            for rel in node_data.get("incoming_relations", []):
+                if rel.get("created_time"):
+                    rel["created_time"] = str(rel["created_time"])
+
+            return JSONResponse(node_data)
+
+        except Exception as e:
+            logger.error(f"Error in api_graph_node: {e}", exc_info=True)
+            return JSONResponse(
+                {"error": str(e)},
+                status_code=500
+            )
+
+    app.add_route("/api/graph/node", api_graph_node)
+
+    async def api_graph_paths(request: Request):
+        """JSON API endpoint for finding paths between two nodes."""
+        session_data, error_response = await require_auth_api(request, session_manager, json_response=True)
+        if error_response:
+            return error_response
+
+        start_node_id = request.query_params.get("start_node_id", None)
+        end_node_id = request.query_params.get("end_node_id", None)
+
+        if not start_node_id or not end_node_id:
+            return JSONResponse(
+                {"error": "Both 'start_node_id' and 'end_node_id' parameters are required"},
+                status_code=400
+            )
+
+        max_depth = int(request.query_params.get("max_depth", "4"))
+        limit = int(request.query_params.get("limit", "5"))
+
+        try:
+            from ....kb.graph.queries import find_paths
+
+            paths = find_paths(
+                start_node_id=start_node_id,
+                end_node_id=end_node_id,
+                max_depth=max_depth,
+                limit=limit
+            )
+
+            return JSONResponse({
+                "paths": paths,
+                "start_node_id": start_node_id,
+                "end_node_id": end_node_id,
+                "max_depth": max_depth,
+                "total_paths": len(paths)
+            })
+
+        except ValueError as e:
+            return JSONResponse(
+                {"error": str(e)},
+                status_code=400
+            )
+        except Exception as e:
+            logger.error(f"Error in api_graph_paths: {e}", exc_info=True)
+            return JSONResponse(
+                {"error": str(e)},
+                status_code=500
+            )
+
+    app.add_route("/api/graph/paths", api_graph_paths)

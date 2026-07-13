@@ -506,7 +506,9 @@ def add_document(
 
     file_path = Path(file_path)
 
-    if not file_path.exists():
+    # For marker-preloaded parser, we don't need the actual file to exist
+    # We only use the filename stem to find pre-existing Marker output
+    if parser_name != "marker-preloaded" and not file_path.exists():
         raise FileNotFoundError(f"File not found: {file_path}")
 
     # Initialize result dictionary
@@ -545,18 +547,30 @@ def add_document(
         result["copied"] = True
         result["copied_path"] = str(dest_path)
 
+    # Get parser name from parameter or config (need this early for marker-preloaded check)
+    if parser_name is None:
+        from ...config import get_parser_config
+        parser_name = get_parser_config()['parser']
+
     # Calculate file hash and metadata
     import hashlib
     import socket
     from ...parser.utils import detect_mime_type
 
-    with open(actual_file_path, "rb") as f:
-        file_content = f.read()
-        content_hash = hashlib.sha256(file_content).hexdigest()
+    # For marker-preloaded, we don't have the original file
+    # Use a placeholder hash and assume PDF type
+    if parser_name == "marker-preloaded":
+        content_hash = hashlib.sha256(str(actual_file_path).encode()).hexdigest()
+        file_size = 0
+        source_type = "application/pdf"
+    else:
+        with open(actual_file_path, "rb") as f:
+            file_content = f.read()
+            content_hash = hashlib.sha256(file_content).hexdigest()
 
-    file_stat = actual_file_path.stat()
-    file_size = file_stat.st_size
-    source_type = detect_mime_type(actual_file_path)
+        file_stat = actual_file_path.stat()
+        file_size = file_stat.st_size
+        source_type = detect_mime_type(actual_file_path)
 
     # Prepare URI
     if uri is None:
@@ -565,11 +579,6 @@ def add_document(
     # Prepare metadata
     raw_meta = dict(meta) if meta else {}
     raw_meta["filename"] = actual_file_path.name
-
-    # Get parser name from parameter or config
-    if parser_name is None:
-        from ...config import get_parser_config
-        parser_name = get_parser_config()['parser']
 
     # Try to insert RawDocument - returns ID if inserted, None if already exists
     with get_db_session(session) as db_session:
@@ -654,6 +663,8 @@ def add_document(
             "source_id": source_id,
             "doc_id": doc_id,
         }
+        if uri:
+            parse_data["uri"] = uri
         if meta:
             parse_data["meta"] = meta
 
@@ -760,11 +771,11 @@ def _get(
         # UUID (explicit keyword, guaranteed)
         doc = get(uuid="550e8400-e29b-41d4-a716-446655440000")
         
-        # Parse identifier: "source_id_doc_id" (split on "_")
-        doc = get("mu2e-docdb_1234-doc1")
+        # Parse identifier: "source_id/doc_id" (split on "/")
+        doc = get("mu2e-docdb/1234-doc1")
         # → source_id="mu2e-docdb", doc_id="1234-doc1"
-        
-        # Parse identifier: just doc_id (no "_", not UUID)
+
+        # Parse identifier: just doc_id (no "/", not UUID)
         doc = get("1234-doc1")
         # → doc_id="1234-doc1"
         
@@ -793,7 +804,7 @@ def _get(
     Args:
         identifier: Positional argument that can be:
                     - UUID (36 chars with dashes) → used as document UUID
-                    - "source_id_doc_id" format → parsed (split on "_")
+                    - "source_id/doc_id" format → parsed (split on "/")
                     - Otherwise → treated as doc_id
         uuid: Explicit UUID lookup (guaranteed, overrides identifier)
         source_id: Source identifier to filter by
@@ -832,9 +843,9 @@ def _get(
                 query = query.filter(Document.id == identifier)
             else:
                 # Not a UUID - parse it
-                if "_" in identifier:
-                    # Split on "_" to get source_id and doc_id
-                    parts = identifier.split("_", 1)
+                if "/" in identifier:
+                    # Split on "/" to get source_id and doc_id
+                    parts = identifier.split("/", 1)
                     if len(parts) == 2:
                         parsed_source_id, parsed_doc_id = parts[0], parts[1]
                         # Only use parsed values if explicit parameters not provided
@@ -845,7 +856,7 @@ def _get(
                     else:
                         return None
                 else:
-                    # No "_" - treat as doc_id if doc_id not explicitly provided
+                    # No "/" - treat as doc_id if doc_id not explicitly provided
                     if doc_id is None:
                         doc_id = identifier
 
@@ -1018,7 +1029,8 @@ def get(
     Args:
         identifier: Positional argument that can be:
                     - UUID (36 chars with dashes) → used as document UUID
-                    - "source_id_doc_id" format → parsed (split on "_")
+                    - "source_id/doc_id" format → parsed (split on "/")
+                    - "source_id_doc_id" format → parsed (split on "_") [legacy]
                     - Otherwise → treated as doc_id
         uid: Explicit UUID lookup. Can be:
              - Single UUID string → returns single Document

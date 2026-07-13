@@ -30,6 +30,7 @@ from .queries import (
     get_document_for_node,
     get_node,
     find_paths,
+    get_relation_evidence,
 )
 
 from .tools import (
@@ -61,6 +62,7 @@ __all__ = [
     "get_document_for_node",
     "get_node",
     "find_paths",
+    "get_relation_evidence",
     # Tools
     "extract_all",
 ]
