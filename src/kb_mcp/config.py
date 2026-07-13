@@ -26,7 +26,11 @@ def _get_bool(key: str, default: bool = False) -> bool:
     return os.getenv(key, str(default)).lower() == "true"
 
 def _get_int(key: str, default: int) -> int:
-    return int(os.getenv(key, str(default)))
+    val = os.getenv(key, str(default))
+    # Kubernetes injects service vars like DB_PORT=tcp://10.x.x.x:5432; extract just the port
+    if val.startswith("tcp://") and ":" in val:
+        val = val.rsplit(":", 1)[-1]
+    return int(val)
 
 # --- Configuration Getters ---
 
@@ -65,7 +69,7 @@ def get_server_config() -> dict:
 
             * `base_url` (str): Server base URL (Env: `BASE_URL`, default: 'https://127.0.0.1').
             * `port` (int): Server port (Env: `PORT`, default: 8443).
-            * `host` (str): Server host (Env: `HOST`, default: '127.0.0.1').
+            * `host` (str): Server host (Env: `SERVER_HOST`, default: '127.0.0.1').
             * `use_https` (bool): Whether HTTPS is enabled (Env: `USE_HTTPS`, default: True).
             * `log_level` (str): Logging level (Env: `LOG_LEVEL`, default: 'INFO').
             * `mcp_log_level` (str): App-specific log level (Env: `MCP_LOG_LEVEL`).
@@ -77,7 +81,7 @@ def get_server_config() -> dict:
     return {
         'base_url': os.getenv("BASE_URL", "https://127.0.0.1"),
         'port': _get_int("PORT", 8443),
-        'host': os.getenv("HOST", "127.0.0.1"),
+        'host': os.getenv("SERVER_HOST", "127.0.0.1"),
         'use_https': _get_bool("USE_HTTPS", True),
         'log_level': log_level,
         'mcp_log_level': os.getenv("MCP_LOG_LEVEL", log_level).upper(),

@@ -227,8 +227,27 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
     data_dir = get_data_dir()
     upload_dir = Path(data_dir) / "uploads"
     upload_dir.mkdir(parents=True, exist_ok=True)
+    sources_dir = (Path(data_dir) / "sources").resolve()
 
-    @app.route("/web")
+    def uri_to_link(uri: str) -> str:
+        """Convert a document URI to an HTML anchor tag with a friendly display label."""
+        from urllib.parse import unquote
+        if uri.startswith("local://uploads/"):
+            filename = uri[len("local://uploads/"):]
+            return f'<a href="/files/uploaded/{filename}" target="_blank" rel="noopener noreferrer">{filename}</a>'
+        if uri.startswith("local://local/"):
+            filename = uri[len("local://local/"):]
+            return f'<a href="/files/local/{filename}" target="_blank" rel="noopener noreferrer">{filename}</a>'
+        if uri.startswith("file://"):
+            file_path = Path(unquote(uri[len("file://"):])).resolve()
+            try:
+                rel = file_path.relative_to(sources_dir)
+                return f'<a href="/files/local/{rel}" target="_blank" rel="noopener noreferrer">{rel}</a>'
+            except ValueError:
+                display = str(Path(*file_path.parts[-2:]))
+                return f'<span title="{html_escape(uri)}">{html_escape(display)}</span>'
+        return f'<a href="{html_escape(uri)}" target="_blank" rel="noopener noreferrer">{html_escape(uri)}</a>'
+
     async def web_page(request: Request):
         """Web interface (GitHub OAuth protected)."""
         # Check authentication first
@@ -379,7 +398,8 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
             username
         ))
 
-    @app.route("/web/document/{doc_id}")
+    app.add_route("/web", web_page)
+
     async def document_detail(request: Request):
         """View full document details (HTML)."""
         import time
@@ -424,20 +444,7 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
                 doc_title_display = f"{doc.title_gen} ({doc.doc_id or doc.id})"
             
             # Format URI as link if it exists
-            uri_display = "N/A"
-            if doc.uri:
-                # Convert local://uploads/filename to /files/uploaded/filename
-                if doc.uri.startswith("local://uploads/"):
-                    filename = doc.uri.replace("local://uploads/", "")
-                    uri_href = f"/files/uploaded/{filename}"
-                    uri_display = f'<a href="{uri_href}" target="_blank" rel="noopener noreferrer">{doc.uri}</a>'
-                # Convert local://local/filename to /files/local/filename
-                elif doc.uri.startswith("local://local/"):
-                    filename = doc.uri.replace("local://local/", "")
-                    uri_href = f"/files/local/{filename}"
-                    uri_display = f'<a href="{uri_href}" target="_blank" rel="noopener noreferrer">{doc.uri}</a>'
-                else:
-                    uri_display = f'<a href="{doc.uri}" target="_blank" rel="noopener noreferrer">{doc.uri}</a>'
+            uri_display = uri_to_link(doc.uri) if doc.uri else "N/A"
 
             # Get chunk strategies for this document
             chunk_strategies_html = ""
@@ -1395,7 +1402,8 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
                 status_code=500
             )
 
-    @app.route("/web/document/{doc_id}/rechunk-embed", methods=["POST"])
+    app.add_route("/web/document/{doc_id}", document_detail)
+
     async def rechunk_embed_document(request: Request):
         """Re-chunk and embed a document (POST)."""
         # Check authentication first
@@ -1487,7 +1495,8 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
                 status_code=500
             )
 
-    @app.route("/web/document/{doc_id}/delete", methods=["POST"])
+    app.add_route("/web/document/{doc_id}/rechunk-embed", rechunk_embed_document, methods=["POST"])
+
     async def delete_document_route(request: Request):
         """Delete a document (POST)."""
         # Check authentication first
@@ -1564,7 +1573,8 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
                 status_code=500
             )
 
-    @app.route("/web/document/{doc_id}/generate-summary", methods=["POST"])
+    app.add_route("/web/document/{doc_id}/delete", delete_document_route, methods=["POST"])
+
     async def generate_summary_document(request: Request):
         """Generate summary for a document (POST)."""
         # Check authentication first
@@ -1659,7 +1669,8 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
                 status_code=500
             )
 
-    @app.route("/web/upload", methods=["GET"])
+    app.add_route("/web/document/{doc_id}/generate-summary", generate_summary_document, methods=["POST"])
+
     async def upload_page(request: Request):
         """File upload page (requires admin privileges)."""
         # Check authentication and admin privileges
@@ -1789,7 +1800,8 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
         )
         return HTMLResponse(html)
 
-    @app.route("/web/upload", methods=["POST"])
+    app.add_route("/web/upload", upload_page, methods=["GET"])
+
     async def upload_file(request: Request):
         """Handle file upload (requires admin privileges)."""
         # Check authentication and admin privileges
@@ -2122,7 +2134,8 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
                 status_code=500
             )
 
-    @app.route("/web/raw/{raw_doc_id}")
+    app.add_route("/web/upload", upload_file, methods=["POST"])
+
     async def raw_document_detail(request: Request):
         """Show details for a raw document, its parsed versions, and any parser comparison."""
         session_data, redirect = await require_auth_html(request, session_manager)
@@ -2349,7 +2362,8 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
                 status_code=500,
             )
 
-    @app.route("/web/compare")
+    app.add_route("/web/raw/{raw_doc_id}", raw_document_detail)
+
     async def compare_page(request: Request):
         """List all parser categorization runs, grouped by source, expandable."""
         session_data, redirect = await require_auth_html(request, session_manager)
@@ -2452,5 +2466,7 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
                 ),
                 status_code=500,
             )
+
+    app.add_route("/web/compare", compare_page)
 
     # Logs, statistics, and eval routes moved to separate files

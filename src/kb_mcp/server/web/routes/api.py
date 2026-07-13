@@ -21,7 +21,6 @@ def setup_api_routes(app, session_manager: WebSessionManager):
     upload_dir = Path(data_dir) / "uploads"
     upload_dir.mkdir(parents=True, exist_ok=True)
 
-    @app.route("/api/get")
     async def api_get(request: Request):
         """JSON API endpoint for getting documents with filters."""
         # Check authentication first
@@ -166,7 +165,8 @@ def setup_api_routes(app, session_manager: WebSessionManager):
                 status_code=500
             )
 
-    @app.route("/api/document/{doc_id}")
+    app.add_route("/api/get", api_get)
+
     async def api_document(request: Request):
         """JSON API endpoint for getting a single document."""
         # Check authentication first
@@ -199,7 +199,8 @@ def setup_api_routes(app, session_manager: WebSessionManager):
                 status_code=500
             )
 
-    @app.route("/api/statistics")
+    app.add_route("/api/document/{doc_id}", api_document)
+
     async def api_statistics(request: Request):
         """JSON API endpoint for getting statistics grid."""
         # Check authentication first
@@ -229,7 +230,8 @@ def setup_api_routes(app, session_manager: WebSessionManager):
                 status_code=500
             )
 
-    @app.route("/api/document/{doc_id}/chunks")
+    app.add_route("/api/statistics", api_statistics)
+
     async def api_get_chunks(request: Request):
         """JSON API endpoint for getting chunks for a document."""
         # Check authentication first
@@ -278,7 +280,8 @@ def setup_api_routes(app, session_manager: WebSessionManager):
                 status_code=500
             )
 
-    @app.route("/api/options")
+    app.add_route("/api/document/{doc_id}/chunks", api_get_chunks)
+
     async def api_options(request: Request):
         """JSON API endpoint for getting filter options with filtered counts."""
         # Check authentication first
@@ -351,7 +354,8 @@ def setup_api_routes(app, session_manager: WebSessionManager):
                 status_code=500
             )
 
-    @app.route("/files/image/{doc_id}")
+    app.add_route("/api/options", api_options)
+
     async def api_image(request: Request):
         """Serve image binary data."""
         # Check authentication first
@@ -402,7 +406,8 @@ def setup_api_routes(app, session_manager: WebSessionManager):
                 media_type="text/plain"
             )
 
-    @app.route("/files/uploaded/{filename}")
+    app.add_route("/files/image/{doc_id}", api_image)
+
     async def serve_uploaded_file(request: Request):
         """Serve uploaded files from data/uploads directory."""
         # Check authentication first
@@ -455,7 +460,8 @@ def setup_api_routes(app, session_manager: WebSessionManager):
                 media_type="text/plain"
             )
 
-    @app.route("/files/local/{filename}")
+    app.add_route("/files/uploaded/{filename}", serve_uploaded_file)
+
     async def serve_local_file(request: Request):
         """Serve local files from data/sources directory."""
         # Check authentication first
@@ -464,43 +470,43 @@ def setup_api_routes(app, session_manager: WebSessionManager):
             return error_response
 
         filename = request.path_params["filename"]
-        
-        # Security: prevent directory traversal
-        if ".." in filename or "/" in filename or "\\" in filename:
-            return Response(
-                content=b"Invalid filename",
-                status_code=400,
-                media_type="text/plain"
-            )
 
         try:
             # Get sources directory from DATA_DIR
             from ....config import get_data_dir
             data_dir = get_data_dir()
             sources_dir = Path(data_dir) / "sources"
-            file_path = sources_dir / filename
-            
+            file_path = (sources_dir / filename).resolve()
+
+            # Security: ensure resolved path is still inside sources_dir
+            if not str(file_path).startswith(str(sources_dir.resolve())):
+                return Response(
+                    content=b"Invalid filename",
+                    status_code=400,
+                    media_type="text/plain"
+                )
+
             if not file_path.exists():
                 return Response(
                     content=b"File not found",
                     status_code=404,
                     media_type="text/plain"
                 )
-            
+
             # Determine content type from file extension
             import mimetypes
             content_type, _ = mimetypes.guess_type(str(file_path))
             if not content_type:
                 content_type = "application/octet-stream"
-            
+
             # Read and serve file
             file_content = file_path.read_bytes()
-            
+
             return Response(
                 content=file_content,
                 media_type=content_type,
                 headers={
-                    "Content-Disposition": f'inline; filename="{filename}"',
+                    "Content-Disposition": f'inline; filename="{file_path.name}"',
                 }
             )
 
@@ -512,7 +518,8 @@ def setup_api_routes(app, session_manager: WebSessionManager):
                 media_type="text/plain"
             )
 
-    @app.route("/api/search")
+    app.add_route("/files/local/{filename:path}", serve_local_file)
+
     async def api_search(request: Request):
         """JSON API endpoint for search (hybrid, semantic, or fulltext)."""
         # Check authentication first
@@ -630,7 +637,8 @@ def setup_api_routes(app, session_manager: WebSessionManager):
                 status_code=500
             )
 
-    @app.route("/api/metadata-keys")
+    app.add_route("/api/search", api_search)
+
     async def api_metadata_keys(request: Request):
         """JSON API endpoint for getting all available metadata keys."""
         # Check authentication first
@@ -655,7 +663,8 @@ def setup_api_routes(app, session_manager: WebSessionManager):
                 status_code=500
             )
 
-    @app.route("/api/logs/{doc_id}")
+    app.add_route("/api/metadata-keys", api_metadata_keys)
+
     async def api_logs_document(request: Request):
         """JSON API endpoint for getting all logs for a document."""
         # Check authentication first
@@ -677,7 +686,8 @@ def setup_api_routes(app, session_manager: WebSessionManager):
                 status_code=500
             )
 
-    @app.route("/api/logs")
+    app.add_route("/api/logs/{doc_id}", api_logs_document)
+
     async def api_logs(request: Request):
         """JSON API endpoint for getting search logs with filters."""
         # Check authentication first
@@ -722,7 +732,8 @@ def setup_api_routes(app, session_manager: WebSessionManager):
                 status_code=500
             )
 
-    @app.route("/api/similar")
+    app.add_route("/api/logs", api_logs)
+
     async def api_similar(request: Request):
         """JSON API endpoint for finding similar documents to a chunk or document."""
         # Check authentication first
@@ -817,3 +828,4 @@ def setup_api_routes(app, session_manager: WebSessionManager):
                 status_code=500
             )
 
+    app.add_route("/api/similar", api_similar)
