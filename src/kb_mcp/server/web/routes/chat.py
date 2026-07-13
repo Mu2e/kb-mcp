@@ -65,7 +65,6 @@ class ChatSession:
 def setup_chat_routes(app, session_manager: WebSessionManager, require_auth_html, require_auth_api):
     """Setup chat interface routes."""
 
-    @app.route("/web/chat", methods=["GET"])
     async def chat_page(request: Request):
         """Render chat interface page."""
         session_data, redirect = await require_auth_html(request, session_manager)
@@ -420,7 +419,8 @@ def setup_chat_routes(app, session_manager: WebSessionManager, require_auth_html
             username=username
         ))
 
-    @app.route("/web/api/chat/start", methods=["POST"])
+    app.add_route("/web/chat", chat_page, methods=["GET"])
+
     async def start_chat(request: Request):
         """Start a new chat session."""
         session_data, error_response = await require_auth_api(request, session_manager, json_response=True)
@@ -459,7 +459,8 @@ def setup_chat_routes(app, session_manager: WebSessionManager, require_auth_html
             'doc_context': document_context is not None
         })
 
-    @app.route("/web/api/chat/message", methods=["GET"])
+    app.add_route("/web/api/chat/start", start_chat, methods=["POST"])
+
     async def chat_message(request: Request):
         """Process chat message with SSE streaming."""
         session_data, error_response = await require_auth_api(request, session_manager)
@@ -663,7 +664,8 @@ def setup_chat_routes(app, session_manager: WebSessionManager, require_auth_html
             }
         )
 
-    @app.route("/web/api/chat/close/{session_id}", methods=["POST"])
+    app.add_route("/web/api/chat/message", chat_message, methods=["GET"])
+
     async def close_chat(request: Request):
         """Close a chat session and clean up resources."""
         session_data, error_response = await require_auth_api(request, session_manager, json_response=True)
@@ -680,6 +682,8 @@ def setup_chat_routes(app, session_manager: WebSessionManager, require_auth_html
             return JSONResponse({'status': 'closed'})
 
         return JSONResponse({'error': 'Session not found'}, status_code=404)
+
+    app.add_route("/web/api/chat/close/{session_id}", close_chat, methods=["POST"])
 
     # Background task to clean up old sessions
     async def cleanup_old_sessions():
