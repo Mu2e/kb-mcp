@@ -20,7 +20,6 @@ def setup_logs_routes(app, session_manager: WebSessionManager, require_auth_html
         require_auth_html: Authentication helper function
     """
 
-    @app.route("/web/logs")
     async def web_logs(request: Request):
         """Search logs page with filtering."""
         # Check authentication first
@@ -94,4 +93,6 @@ def setup_logs_routes(app, session_manager: WebSessionManager, require_auth_html
             content=content,
             username=username,
         ))
+
+    app.add_route("/web/logs", web_logs)
 

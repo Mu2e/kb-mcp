@@ -327,7 +327,6 @@ def setup_shared_auth_routes(app, session_manager: WebSessionManager):
         session_manager: WebSessionManager instance
     """
 
-    @app.route("/login")
     async def login(request):
         """Start web login flow - show provider selection or redirect if single provider."""
         redirect_after_login = request.query_params.get("redirect", "/")
@@ -378,7 +377,8 @@ def setup_shared_auth_routes(app, session_manager: WebSessionManager):
         # Redirect to OAuth provider
         return RedirectResponse(url=oauth_url, status_code=303)
 
-    @app.route("/logout")
+    app.add_route("/login", login)
+
     async def logout(request):
         """Logout from web interface."""
         session_id = request.cookies.get("web_session")
@@ -388,3 +388,5 @@ def setup_shared_auth_routes(app, session_manager: WebSessionManager):
         response = RedirectResponse(url="/", status_code=303)
         response.delete_cookie("web_session")
         return response
+
+    app.add_route("/logout", logout)
