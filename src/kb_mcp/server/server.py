@@ -259,43 +259,32 @@ app.add_route("/status", status_responder)
 setup_web_routes(app, oauth_provider, web_session_manager)
 
 
-# Startup event to initialize background tasks
-@app.on_event("startup")
-async def startup_event():
-    """Start background tasks when the server starts."""
-    import asyncio
-
-    # Start chat cleanup task if it exists
-    if hasattr(app.state, 'chat_cleanup_task'):
-        asyncio.create_task(app.state.chat_cleanup_task())
-        logger.info("Started chat session cleanup background task")
-
-
 def main():
     """Run the server."""
+    import asyncio
     import uvicorn
-    
+
     if auth_config['disable_auth'] == True and USE_HTTPS:
         logger.warning("Authentication is disabled but HTTPS is enabled. Is this intended?")
         logger.warning("HTTPS is only needed if authentication is enabled.")
         logger.warning("To disable HTTPS, set USE_HTTPS=false in .env")
 
-    if USE_HTTPS:
-        uvicorn.run(
-            app,
-            host=HOST,
-            port=PORT,
-            ssl_keyfile="certs/key.pem",
-            ssl_certfile="certs/cert.pem",
-            log_level="debug",
-        )
-    else:
-        uvicorn.run(
-            app,
-            host=HOST,
-            port=PORT,
-            log_level="debug",
-        )
+    async def _serve():
+        # Start chat cleanup background task if registered
+        if hasattr(app.state, 'chat_cleanup_task'):
+            asyncio.create_task(app.state.chat_cleanup_task())
+            logger.info("Started chat session cleanup background task")
+
+        kwargs = dict(host=HOST, port=PORT, log_level="debug")
+        if USE_HTTPS:
+            kwargs["ssl_keyfile"] = "certs/key.pem"
+            kwargs["ssl_certfile"] = "certs/cert.pem"
+
+        config = uvicorn.Config(app, **kwargs)
+        server = uvicorn.Server(config)
+        await server.serve()
+
+    asyncio.run(_serve())
 
 
 if __name__ == "__main__":
