@@ -11,6 +11,34 @@ from .documents import require_auth_api, document_to_dict
 
 logger = logging.getLogger(__name__)
 
+_RANGE_OPERATIONS = {"gte", "gt", "lte", "lt"}
+
+
+def parse_metadata_query_params(metadata_params):
+    """Convert "key:operation=value" query params into Elasticsearch-style filter clauses.
+
+    Supports the operations exposed by the web UI's metadata filter dropdown:
+    term (equals), match (contains), and gte/gt/lte/lt (range). Also accepts the
+    legacy "key=value" form (defaults to "term") for backward compatibility.
+    """
+    clauses = []
+    for meta_pair in metadata_params:
+        if "=" not in meta_pair:
+            continue
+        key_op, value = meta_pair.split("=", 1)
+        if ":" in key_op:
+            key, operation = key_op.split(":", 1)
+        else:
+            key, operation = key_op, "term"
+
+        if operation in _RANGE_OPERATIONS:
+            clauses.append({"range": {key: {operation: value}}})
+        elif operation == "match":
+            clauses.append({"match": {key: value}})
+        else:
+            clauses.append({"term": {key: value}})
+    return clauses
+
 
 def setup_api_routes(app, session_manager: WebSessionManager):
     """Setup API routes for knowledge base operations."""
@@ -36,38 +64,33 @@ def setup_api_routes(app, session_manager: WebSessionManager):
         offset = int(request.query_params.get("offset", "0"))
         include_text = request.query_params.get("include_text", "false").lower() == "true"
         
-        # Parse metadata filters (key=value pairs)
-        metadata_filters = {}
-        metadata_params = request.query_params.getlist("metadata")
-        for meta_pair in metadata_params:
-            if "=" in meta_pair:
-                # Support both "key=value" and "key:operation=value" formats
-                if ":" in meta_pair and "=" in meta_pair:
-                    # Format: "key:operation=value"
-                    key_op, value = meta_pair.split("=", 1)
-                    if ":" in key_op:
-                        key, operation = key_op.split(":", 1)
-                        # For now, we'll use simple metadata filters
-                        # Full Elasticsearch support would require filter parameter
-                        metadata_filters[key] = value
-                else:
-                    # Format: "key=value"
-                    key, value = meta_pair.split("=", 1)
-                    metadata_filters[key] = value
-        
+        # Parse metadata filters (key:operation=value pairs) into ES-style "must" clauses
+        # so the operation (term, match, gte, lte, gt, lt) is preserved.
+        metadata_clauses = parse_metadata_query_params(request.query_params.getlist("metadata"))
+
         # Parse Elasticsearch-style filter if provided
         filter_dict = {}
         filter_json = request.query_params.get("filter", None)
+        es_filter = None
         if filter_json:
             try:
                 import json
-                filter_dict["filter"] = json.loads(filter_json)
+                es_filter = json.loads(filter_json)
             except json.JSONDecodeError:
                 return JSONResponse(
                     {"error": "Invalid JSON in filter parameter"},
                     status_code=400
                 )
-        
+
+        if metadata_clauses:
+            must_clauses = list(metadata_clauses)
+            if es_filter:
+                must_clauses.append(es_filter)
+            es_filter = {"bool": {"must": must_clauses}} if len(must_clauses) > 1 else must_clauses[0]
+
+        if es_filter:
+            filter_dict["filter"] = es_filter
+
         # Build filter_dict for get() function
         if source_id:
             filter_dict["source_id"] = source_id
@@ -75,9 +98,6 @@ def setup_api_routes(app, session_manager: WebSessionManager):
             filter_dict["doc_type"] = doc_type
         if search:
             filter_dict["text_contains"] = search
-        
-        # Add metadata filters to filter_dict (will be passed as kwargs to get_filters_fallback)
-        filter_dict.update(metadata_filters)
 
         try:
             # Query documents from knowledge base
@@ -542,13 +562,9 @@ def setup_api_routes(app, session_manager: WebSessionManager):
         doc_type = request.query_params.get("doc_type", None)
         chunking_strategy = request.query_params.get("chunking_strategy", None)
 
-        # Parse metadata filters (key=value pairs)
-        metadata_filters = {}
-        metadata_params = request.query_params.getlist("metadata")
-        for meta_pair in metadata_params:
-            if "=" in meta_pair:
-                key, value = meta_pair.split("=", 1)
-                metadata_filters[key] = value
+        # Parse metadata filters (key:operation=value pairs) into ES-style "must" clauses
+        # so the operation (term, match, gte, lte, gt, lt) is preserved.
+        metadata_clauses = parse_metadata_query_params(request.query_params.getlist("metadata"))
 
         # Parse Elasticsearch-style filter if provided
         filter_dict = None
@@ -562,6 +578,12 @@ def setup_api_routes(app, session_manager: WebSessionManager):
                     {"error": "Invalid JSON in filter parameter"},
                     status_code=400
                 )
+
+        if metadata_clauses:
+            must_clauses = list(metadata_clauses)
+            if filter_dict:
+                must_clauses.append(filter_dict)
+            filter_dict = {"bool": {"must": must_clauses}} if len(must_clauses) > 1 else must_clauses[0]
 
         try:
             # Import appropriate search function based on type
@@ -584,7 +606,6 @@ def setup_api_routes(app, session_manager: WebSessionManager):
                 doc_type=doc_type,
                 chunking_strategy=chunking_strategy,
                 filter=filter_dict,
-                **metadata_filters
             )
 
             # Convert results to document dictionaries

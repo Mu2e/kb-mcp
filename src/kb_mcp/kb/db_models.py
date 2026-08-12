@@ -28,12 +28,16 @@ Base = declarative_base()
 
 class JSONB(TypeDecorator):
     """JSONB type for PostgreSQL, JSON for SQLite.
-    
+
     This type uses PostgreSQL's JSONB type for better performance and indexing,
     but falls back to JSON for SQLite compatibility.
     """
     impl = JSON
     cache_ok = True
+    # Without this, indexing (meta[field]) returns TypeDecorator's default
+    # comparator, which lacks .astext/.has_key/etc. that postgresql.JSONB provides.
+    comparator_factory = postgresql.JSONB.Comparator
+    astext_type = Text()
 
     def load_dialect_impl(self, dialect):
         if dialect.name == 'postgresql':
