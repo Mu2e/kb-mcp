@@ -1,12 +1,13 @@
 """Admin web interface for managing API keys."""
 
 import logging
-from starlette.responses import HTMLResponse, RedirectResponse
+from starlette.responses import HTMLResponse, RedirectResponse, JSONResponse
 
 from ..auth import WebSessionManager
 from ...oauth import ApiKeyManager
 from .. import html_templates
 from ....config import get_api_keys_file
+from ....alcf_auth import get_token_status, refresh_alcf_token, AlcfAuthError
 
 logger = logging.getLogger(__name__)
 
@@ -51,11 +52,71 @@ def setup_admin_routes(app, oauth_provider, session_manager: WebSessionManager):
             </tr>
             """
 
+        alcf_status = get_token_status()
+        alcf_status_html = (
+            f"Base URL: <code>{alcf_status['current_base_url'] or 'not set'}</code><br>"
+            f"API key set: <strong>{'yes' if alcf_status['current_api_key_set'] else 'no'}</strong><br>"
+            f"Stored ALCF login: <strong>{'found' if alcf_status['has_token_file'] else 'not found'}</strong>"
+        )
+
         content = f"""
         <h1>API Key Management</h1>
         <p>Authenticated as: <strong>{username}</strong></p>
 
         {auth_warning}
+
+        <div class="card">
+            <h2>ALCF Inference Token</h2>
+            <p style="font-size: 13px; color: #666;">
+                Refreshes the ALCF access token using the stored Globus login (no browser needed).
+                If there is no stored login, or it has fully expired, this will fail and you'll need to
+                run <code>./scripts/setup_alcf.sh</code> in a terminal on the server instead.
+            </p>
+            <p id="alcf-status">{alcf_status_html}</p>
+            <div style="display: flex; gap: 8px; align-items: center;">
+                <label for="alcf-cluster">Cluster:</label>
+                <select id="alcf-cluster">
+                    <option value="sophia" selected>sophia</option>
+                    <option value="metis">metis</option>
+                </select>
+                <button type="button" class="btn" id="alcf-refresh-btn" onclick="refreshAlcfToken()">Refresh ALCF Token</button>
+            </div>
+            <p id="alcf-result" style="margin-top: 10px; font-size: 13px;"></p>
+        </div>
+        <script>
+            async function refreshAlcfToken() {{
+                const btn = document.getElementById('alcf-refresh-btn');
+                const resultEl = document.getElementById('alcf-result');
+                const cluster = document.getElementById('alcf-cluster').value;
+                btn.disabled = true;
+                btn.textContent = 'Refreshing...';
+                resultEl.style.color = '#666';
+                resultEl.textContent = '';
+                try {{
+                    const response = await fetch('/admin/alcf/refresh', {{
+                        method: 'POST',
+                        headers: {{'Content-Type': 'application/json'}},
+                        body: JSON.stringify({{cluster}})
+                    }});
+                    const data = await response.json();
+                    if (response.ok) {{
+                        resultEl.style.color = '#2e7d32';
+                        resultEl.textContent = `Success: base URL set to ${{data.base_url}}`;
+                        document.getElementById('alcf-status').innerHTML =
+                            `Base URL: <code>${{data.base_url}}</code><br>API key set: <strong>yes</strong><br>Stored ALCF login: <strong>found</strong>`;
+                    }} else {{
+                        resultEl.style.color = '#c62828';
+                        resultEl.textContent = data.error || 'Refresh failed.';
+                    }}
+                }} catch (e) {{
+                    resultEl.style.color = '#c62828';
+                    resultEl.textContent = 'Request failed: ' + e;
+                }} finally {{
+                    btn.disabled = false;
+                    btn.textContent = 'Refresh ALCF Token';
+                }}
+            }}
+        </script>
 
         <div class="card">
             <h2>Generate New API Key</h2>
@@ -210,4 +271,32 @@ def setup_admin_routes(app, oauth_provider, session_manager: WebSessionManager):
             )
 
     app.add_route("/admin/revoke", admin_revoke, methods=["POST"])
+
+    async def admin_alcf_refresh(request):
+        """Refresh the ALCF inference token (silent refresh only, no browser login)."""
+        if not await session_manager.has_admin_access(request, force_reverify=True):
+            return JSONResponse({"error": "Not authenticated"}, status_code=401)
+
+        username = await session_manager.get_session_username(
+            request, force_reverify=False
+        )
+
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        cluster = body.get("cluster", "sophia")
+
+        try:
+            result = refresh_alcf_token(cluster)
+            logger.info(f"Refreshed ALCF token ({cluster}) by {username}")
+            return JSONResponse(result)
+        except AlcfAuthError as e:
+            logger.warning(f"ALCF token refresh failed for {username}: {e}")
+            return JSONResponse({"error": str(e)}, status_code=400)
+        except Exception as e:
+            logger.error(f"Unexpected error refreshing ALCF token: {e}")
+            return JSONResponse({"error": f"Unexpected error: {e}"}, status_code=500)
+
+    app.add_route("/admin/alcf/refresh", admin_alcf_refresh, methods=["POST"])
 

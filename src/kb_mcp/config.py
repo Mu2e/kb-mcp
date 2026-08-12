@@ -16,9 +16,14 @@ load_dotenv()
 # This allows users to override settings (e.g., ALCF credentials) without
 # modifying the shared .env file (which may be a symlink on NERSC)
 env_path = find_dotenv()
-if env_path:
-    local_env_path = Path(env_path).with_name(".env.local")
+local_env_path = Path(env_path).with_name(".env.local") if env_path else None
+if local_env_path:
     load_dotenv(dotenv_path=local_env_path, override=True)
+
+
+def get_env_local_path() -> Optional[str]:
+    """Path to the user-specific `.env.local` override file, if resolvable."""
+    return str(local_env_path) if local_env_path else None
 
 # --- Helpers ---
 
@@ -78,6 +83,8 @@ def get_server_config() -> dict:
             * `audit_log_file` (str): Path to audit log (Env: `AUDIT_LOG_FILE`).
             * `max_upload_size` (int): Max upload bytes (Env: `MAX_UPLOAD_SIZE`, default: 100MB).
             * `use_firestore` (bool): Use Firestore for session storage (Env: `SESSION_STORE_FIRESTORE`, default: False).
+            * `site_name` (str): Display name for the web UI (Env: `SITE_NAME`, default: 'Knowledge Base').
+            * `hide_graph` (bool): Hide the knowledge graph from the web UI and MCP tools (Env: `HIDE_GRAPH`, default: False).
     """
     log_level = os.getenv("LOG_LEVEL", "INFO").upper()
     return {
@@ -90,6 +97,8 @@ def get_server_config() -> dict:
         'audit_log_file': os.getenv("AUDIT_LOG_FILE", ""),
         'max_upload_size': _get_int("MAX_UPLOAD_SIZE", 104857600),
         'use_firestore': _get_bool("SESSION_STORE_FIRESTORE", False),
+        'site_name': os.getenv("SITE_NAME", "Knowledge Base"),
+        'hide_graph': _get_bool("HIDE_GRAPH", False),
     }
 
 # LLM

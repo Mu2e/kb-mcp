@@ -116,32 +116,10 @@ from .web import WebSessionManager, setup_shared_auth_routes, setup_web_routes
 
 web_session_manager = WebSessionManager(oauth_provider)
 
-# Root/Status responders need access to oauth_provider and web_session_manager
+# Root responder redirects to the Knowledge Base Explorer (the web UI landing page)
 async def root_responder(request):
-    from .web import html_templates
-    active_sessions = await oauth_provider.get_active_sessions_count() if oauth_provider else 0
-    username = await web_session_manager.get_session_username(request)
-    # Get required repo/group and provider info for display
-    required_access = None
-    provider_display = None
-    if oauth_provider:
-        if isinstance(oauth_provider, GitHubOAuthProvider):
-            required_access = oauth_provider.required_repo
-            provider_display = "GitHub"
-        elif isinstance(oauth_provider, GlobusOAuthProvider):
-            required_access = oauth_provider.required_group
-            provider_display = "Globus"
-        else:
-            # API-key-only mode
-            provider_display = "API Key Only"
-    else:
-        provider_display = "Disabled"
-    from starlette.responses import HTMLResponse
-    return HTMLResponse(
-        html_templates.root_page(
-            active_sessions, required_access, username, provider_display
-        )
-    )
+    from starlette.responses import RedirectResponse
+    return RedirectResponse(url="/web?doc_type=text")
 
 async def status_responder(request):
     from .web import html_templates

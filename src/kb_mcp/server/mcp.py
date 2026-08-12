@@ -7,6 +7,7 @@ import re
 from typing import Optional, List, Dict, Any
 
 from mcp.types import ImageContent
+from mcp.server.fastmcp import Context
 
 from .mcp_prompts import BASE_SYSTEM_PROMPT
 
@@ -396,20 +397,23 @@ def kb_get(identifier: str) -> str:
 
         meta_header = "\n".join(meta_lines)
 
-        # Fetch Associated Nodes from Knowledge Graph
-        graph_nodes = get_nodes_for_document(doc.doc_id)
+        # Fetch Associated Nodes from Knowledge Graph (unless disabled via HIDE_GRAPH)
+        from ..config import get_server_config
 
         graph_section = ""
-        if graph_nodes:
-            node_lines = []
-            # Sort by mention count and take top 15
-            for gn in graph_nodes[:15]:
-                node_lines.append(
-                    f"- {gn['name']} ({gn['type']}) [Mentions: {gn['mention_count']}] "
-                    f"-> CMD: kb_lookup_node(\"{gn['id']}\")"
-                )
+        if not get_server_config()['hide_graph']:
+            graph_nodes = get_nodes_for_document(doc.doc_id)
 
-            graph_section = "\n[[DETECTED_CONCEPTS]]\n" + "\n".join(node_lines) + "\n"
+            if graph_nodes:
+                node_lines = []
+                # Sort by mention count and take top 15
+                for gn in graph_nodes[:15]:
+                    node_lines.append(
+                        f"- {gn['name']} ({gn['type']}) [Mentions: {gn['mention_count']}] "
+                        f"-> CMD: kb_lookup_node(\"{gn['id']}\")"
+                    )
+
+                graph_section = "\n[[DETECTED_CONCEPTS]]\n" + "\n".join(node_lines) + "\n"
 
         # Return the natural text with metadata header
         return f"""[[DOCUMENT_METADATA]]
@@ -637,15 +641,104 @@ def kb_find_path(start_node: str, end_node: str, max_depth: int = 4) -> str:
         return f"ERROR: {str(e)}"
 
 
+async def kb_research(question: str, ctx: Context = None) -> str:
+    """Run a multi-step research agent over the knowledge base and return a synthesized answer.
+
+    Use this for open-ended questions that require multiple searches, cross-referencing
+    documents, or exploring the knowledge graph before an answer can be composed. It is
+    much slower and more expensive than kb_search/kb_get, so prefer those directly when a
+    single lookup will do.
+
+    Args:
+        question: The research question to investigate.
+
+    Returns:
+        A synthesized answer composed from the agent's findings.
+    """
+    import sys
+    from datetime import datetime
+    from mcp import ClientSession, StdioServerParameters
+    from mcp.client.stdio import stdio_client
+
+    from ..agents.notebook_agent import NotebookAgent
+    from ..llm import get_openai_client
+    from ..config import get_agent_config
+
+    # NotebookAgent runs up to MAX_ITERATIONS steps, each involving one or more
+    # LLM calls, and can comfortably exceed a client's idle timeout. Report
+    # progress on every step so MCP clients (e.g. Claude Code) that key their
+    # idle timeout off notifications/progress don't abort the call early.
+    NOTEBOOK_MAX_ITERATIONS = 10
+
+    async def report_progress(event: dict):
+        if ctx is None:
+            return
+        etype = event.get("type")
+        iteration = event.get("iteration")
+        if etype == "info":
+            message = event.get("message", "")
+        elif etype == "tool_call":
+            message = f"calling tools: {', '.join(event.get('tools', []))}"
+        elif etype == "notebook_update":
+            message = "updated research notes"
+        else:
+            return
+        try:
+            await ctx.report_progress(
+                progress=iteration or 0,
+                total=NOTEBOOK_MAX_ITERATIONS,
+                message=message,
+            )
+        except Exception:
+            logger.debug("failed to report kb_research progress", exc_info=True)
+
+    try:
+        agent_config = get_agent_config()
+        model = agent_config["agent_model"]
+
+        server_params = StdioServerParameters(
+            command=sys.executable,
+            args=["-m", "kb_mcp.server.mcp_stdio"],
+            env=None,
+        )
+
+        async with stdio_client(server_params) as (read, write):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+
+                client = get_openai_client(use_async=True)
+                run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+                worker = NotebookAgent(
+                    session=session,
+                    client=client,
+                    depth=1,
+                    agent_id="kb_research",
+                    run_id=run_id,
+                    callback=report_progress,
+                )
+                await worker.initialize_tools()
+                return await worker.run(question, model=model)
+
+    except Exception as e:
+        logger.error(f"Error in kb_research: {e}", exc_info=True)
+        return f"ERROR: {str(e)}"
+
+
 def register_tools(mcp):
     """Register MCP tools with the FastMCP instance."""
+    from ..config import get_server_config
+
     mcp.tool()(kb_search)
     mcp.tool()(kb_get)
     mcp.tool()(kb_get_image)  # Keep for explicit image retrieval by filename
-    # Graph Tools
-    mcp.tool()(kb_lookup_node)
-    mcp.tool()(kb_find_path)
-    mcp.tool()(kb_node_relation_evidence)
+    # Graph Tools (skipped when HIDE_GRAPH is set)
+    if not get_server_config()['hide_graph']:
+        mcp.tool()(kb_lookup_node)
+        mcp.tool()(kb_find_path)
+        mcp.tool()(kb_node_relation_evidence)
+    # Agentic research (long-running; excluded from worker agents' own tool lists)
+    mcp.tool()(kb_research)
 
 
 def register_resources(mcp, oauth_provider, base_url):

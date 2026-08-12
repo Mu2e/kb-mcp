@@ -11,6 +11,7 @@ from starlette.requests import Request
 
 from ..auth import WebSessionManager
 from .. import html_templates
+from ....config import get_server_config
 
 logger = logging.getLogger(__name__)
 
@@ -242,10 +243,22 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
             file_path = Path(unquote(uri[len("file://"):])).resolve()
             try:
                 rel = file_path.relative_to(sources_dir)
-                return f'<a href="/files/local/{rel}" target="_blank" rel="noopener noreferrer">{rel}</a>'
             except ValueError:
-                display = str(Path(*file_path.parts[-2:]))
-                return f'<span title="{html_escape(uri)}">{html_escape(display)}</span>'
+                # Path was recorded under a different root (e.g. ingested on the host
+                # filesystem, served from a container with a different DATA_DIR).
+                # Fall back to matching by the "sources/..." suffix instead of the
+                # absolute root, since that's what actually lives under sources_dir.
+                parts = file_path.parts
+                rel = None
+                if sources_dir.name in parts:
+                    idx = len(parts) - 1 - parts[::-1].index(sources_dir.name)
+                    rel = Path(*parts[idx + 1:])
+
+            if rel is not None and (sources_dir / rel).exists():
+                return f'<a href="/files/local/{rel}" target="_blank" rel="noopener noreferrer">{rel}</a>'
+
+            display = str(Path(*file_path.parts[-2:]))
+            return f'<span title="{html_escape(uri)}">{html_escape(display)}</span>'
         return f'<a href="{html_escape(uri)}" target="_blank" rel="noopener noreferrer">{html_escape(uri)}</a>'
 
     async def web_page(request: Request):
@@ -263,7 +276,7 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
 
         # Get initial filter values from query params (for initial state)
         source_id = request.query_params.get("source_id", "")
-        doc_type = request.query_params.get("doc_type", "")
+        doc_type = request.query_params.get("doc_type", "text")
         search = request.query_params.get("search", "")
         message = request.query_params.get("message", "")
         uploaded_docs = request.query_params.get("uploaded_docs", "")  # Comma-separated doc IDs
@@ -301,7 +314,7 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
             """
 
         content = f"""
-        <h1>Knowledge Base Explorer</h1>
+        <h1>{html_templates.get_site_name()}</h1>
         <!--<p>Authenticated as: <strong>{username}</strong></p>-->
 
         {auth_warning}
@@ -392,7 +405,7 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
         """
 
         return HTMLResponse(html_templates.base_template(
-            "Knowledge Base Explorer - MCP Server",
+            html_templates.get_site_name(),
             content,
             None,
             username
@@ -921,6 +934,8 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
                     graph_nodes_html = ""
                     graph_extraction_logs_data = "[]"
                     try:
+                        if get_server_config()['hide_graph']:
+                            raise ImportError("Graph UI disabled via HIDE_GRAPH")
                         from ....kb.graph.queries import get_nodes_for_document
                         from ....kb.graph.db_models import GraphExtractionLog
 
@@ -1520,6 +1535,44 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
             )
 
     app.add_route("/web/document/{doc_id}", document_detail)
+
+    async def document_by_doc_id(request: Request):
+        """Redirect to document detail page by human-readable doc_id string."""
+        session_data = await session_manager.get_session_data(request)
+        if not session_data:
+            return RedirectResponse(url="/login?redirect=/web")
+
+        doc_id_str = request.path_params["doc_id_str"]
+        from ....kb import get
+        try:
+            doc = get(doc_id=doc_id_str)
+            if not doc:
+                return HTMLResponse(
+                    html_templates.base_template(
+                        "Document Not Found",
+                        f'<div class="error-box"><h2>Document Not Found</h2><p>No document with doc_id <code>{html_escape(doc_id_str)}</code> found.</p><p><a href="/web">← Back to Document List</a></p></div>',
+                        None,
+                        session_data.get("username"),
+                    ),
+                    status_code=404,
+                )
+            # get() may return a list if multiple docs share the same doc_id; take the first
+            if isinstance(doc, list):
+                doc = doc[0]
+            return RedirectResponse(url=f"/web/document/{doc.id}", status_code=302)
+        except Exception as e:
+            logger.error(f"Error looking up doc_id {doc_id_str}: {e}")
+            return HTMLResponse(
+                html_templates.base_template(
+                    "Error",
+                    f'<div class="error-box"><h2>Error</h2><p>{html_escape(str(e))}</p><p><a href="/web">← Back to Document List</a></p></div>',
+                    None,
+                    session_data.get("username"),
+                ),
+                status_code=500,
+            )
+
+    app.add_route("/web/document/by-doc-id/{doc_id_str:path}", document_by_doc_id)
 
     async def rechunk_embed_document(request: Request):
         """Re-chunk and embed a document (POST)."""

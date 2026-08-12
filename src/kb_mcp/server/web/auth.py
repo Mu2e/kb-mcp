@@ -206,7 +206,7 @@ class WebSessionManager:
         return ""
 
     async def create_oauth_login_url(
-        self, provider: BaseOAuthProvider, redirect_after_login: str = "/"
+        self, provider: BaseOAuthProvider, redirect_after_login: str = "/web"
     ) -> tuple[str, str]:
         """Create OAuth login URL for a specific provider."""
         state = secrets.token_urlsafe(32)
@@ -329,7 +329,7 @@ def setup_shared_auth_routes(app, session_manager: WebSessionManager):
 
     async def login(request):
         """Start web login flow - show provider selection or redirect if single provider."""
-        redirect_after_login = request.query_params.get("redirect", "/")
+        redirect_after_login = request.query_params.get("redirect", "/web")
         provider_name = request.query_params.get("provider")
         
         # If auth is disabled, create a dev session automatically
@@ -385,7 +385,7 @@ def setup_shared_auth_routes(app, session_manager: WebSessionManager):
         if session_id:
             await session_manager.session_store.delete("sessions", session_id)
 
-        response = RedirectResponse(url="/", status_code=303)
+        response = RedirectResponse(url="/web", status_code=303)
         response.delete_cookie("web_session")
         return response
 

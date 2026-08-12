@@ -57,7 +57,11 @@ document.addEventListener('DOMContentLoaded', async function() {
         }
         
         loadDocuments(true); // Initial load
-        
+
+        // Focus search input on page load
+        const searchEl = document.getElementById('search-input');
+        if (searchEl) searchEl.focus();
+
         // Set up infinite scroll
         window.addEventListener('scroll', handleScroll);
     }
@@ -254,7 +258,7 @@ function initFilters() {
     // Initialize filters from URL params
     const urlParams = new URLSearchParams(window.location.search);
     currentFilters.source_id = urlParams.get('source_id') || '';
-    currentFilters.doc_type = urlParams.get('doc_type') || '';
+    currentFilters.doc_type = urlParams.has('doc_type') ? urlParams.get('doc_type') : 'text';
     currentFilters.search = urlParams.get('search') || '';
     currentFilters.search_type = urlParams.get('search_type') || 'hybrid';
     currentFilters.date_type = urlParams.get('date_type') || 'insert_time';
@@ -398,7 +402,9 @@ function applyFilters() {
     // Update URL without reload
     const params = new URLSearchParams();
     if (currentFilters.source_id) params.set('source_id', currentFilters.source_id);
-    if (currentFilters.doc_type) params.set('doc_type', currentFilters.doc_type);
+    // Always include doc_type (even empty = "All Types") so it round-trips through the
+    // URL correctly against the "text" default applied when the param is absent.
+    params.set('doc_type', currentFilters.doc_type);
     if (currentFilters.search) params.set('search', currentFilters.search);
     if (currentFilters.search_type && currentFilters.search_type !== 'hybrid') {
         params.set('search_type', currentFilters.search_type);
