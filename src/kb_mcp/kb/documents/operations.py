@@ -534,8 +534,10 @@ def add_document(
         dest_dir.mkdir(parents=True, exist_ok=True)
 
         # Create standardized filename: {source_id}-{doc_id}.{ext}
+        # Sanitize doc_id so slashes don't create subdirectories
         file_ext = file_path.suffix
-        dest_filename = f"{source_id}-{doc_id}{file_ext}"
+        safe_doc_id = str(doc_id).replace("/", "-").replace("\\", "-")
+        dest_filename = f"{source_id}-{safe_doc_id}{file_ext}"
         dest_path = dest_dir / dest_filename
 
         # Copy file
@@ -644,10 +646,15 @@ def add_document(
             )
             return result
 
-        # Get or create parser record
+        # Get or create parser record. Version info comes from
+        # parser.utils.get_parser_version_info() so the parsers row can be
+        # used to gate cache invalidation when an underlying package is
+        # upgraded (e.g. Docling layout model bump).
+        from kb_mcp.parser.utils import get_parser_version_info
         parser = get_or_create_parser(
             name=parser_name,
             description=f"Parser: {parser_name}",
+            meta=get_parser_version_info(parser_name),
             session=db_session,
         )
 

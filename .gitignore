@@ -1,3 +1,4 @@
+docs/slides
 certs/
 .env
 .env.local
@@ -17,7 +18,7 @@ build/
 # IDE
 .vscode/
 .idea/
-.claude/
+
 
 # local scripts
 inference_auth_token.py
@@ -34,3 +35,18 @@ setup.sh
 *.dump
 
 ._dbindex_
+
+# smoke-test output dumps (parser comparisons etc.) — regenerated on demand
+scripts/out/
+
+# per-session local state (cached host keys, tunnel pids) — machine-specific
+.session/
+
+# AI-assistant/session state — local only, must not enter git
+.claude/
+
+# project-scoped MCP server registry — endpoint URLs are machine-specific
+.mcp.json
+
+# pytest scratch database (tests/conftest.py default TEST_DATABASE_URL)
+test_kb.db

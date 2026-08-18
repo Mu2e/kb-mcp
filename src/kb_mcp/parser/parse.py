@@ -39,9 +39,18 @@ def parse(
                         - OPENAI_BASE_URL
                         - OPENAI_API_KEY
                         If None, reads from PARSE_IMAGE_LLM_DESCRIPTION env var.
-        parser_name: Optional parser name (e.g., "kb-mcp", "marker"). 
-                     If "marker", uses marker-pdf for parsing (PDF only).
-                     If None or "kb-mcp", uses standard parsers.
+        parser_name: Optional parser name. Recognised values:
+                     - "docling"  — IBM Docling (PDF/PPTX/DOCX/HTML/XLSX).
+                                     DEFAULT for PDF, PPTX, HTML, DOCX.
+                     - "marker"   — marker-pdf (PDF only).
+                     - "nougat"   — Nougat OCR (PDF only, optional extra).
+                     - "azure"    — Azure Document Intelligence (PDF only,
+                                     optional extra).
+                     - "pypdf2"   — legacy PyPDF2 fast path (PDF only).
+                     - "legacy"   — bespoke parser for the given MIME
+                                     (opt-out from the Docling defaults).
+                     - "kb-mcp" / None — Docling-default routes above;
+                                          other types via get_parser().
     
     Returns:
         List of dictionaries (can be converted to Documents):
@@ -196,22 +205,59 @@ def parse(
         text_extraction_start = time.time()
         image_dicts = []
 
-        _PDF_PARSERS = {
-            "marker": ("kb_mcp.parser.parser_marker", "MarkerParser"),
-            "docling": ("kb_mcp.parser.parser_docling", "DoclingParser"),
+        # Default PDF parser is Docling (DocLayNet + TableFormer). Pass
+        # parser_name="pypdf2" for the legacy fast path or
+        # parser_name="marker" for marker-pdf.
+        if mime_type == "application/pdf" and parser_name in (None, "kb-mcp"):
+            parser_name = "docling"
+
+        # Default PPTX parser is also Docling (since 2026-04-26). The
+        # unified Docling path emits structural records (sections,
+        # tables, figures) and a structured `parser_output` artefact that
+        # the downstream multi-view consumers use; the legacy parser_pptx
+        # returned only flat text. Pass parser_name="legacy" for the
+        # python-pptx route.
+        _PPTX_MIME = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+        if mime_type == _PPTX_MIME and parser_name in (None, "kb-mcp"):
+            parser_name = "docling"
+
+        # Default HTML / XHTML parser is Docling (since 2026-04-26).
+        # Mu2e Wiki content is the primary HTML source; the importer wraps
+        # API-rendered MediaWiki HTML in a minimal shell and writes it as
+        # text/html. Docling's HTML reader produces markdown-formatted
+        # text with link syntax preserved, table records, and a
+        # `parser_output` artefact — the previous TextParser route
+        # stripped HTML to flat text. Pass parser_name="legacy" for
+        # TextParser.
+        if mime_type in ("text/html", "application/xhtml+xml") and parser_name in (None, "kb-mcp"):
+            parser_name = "docling"
+
+        # Default DOCX parser is Docling (since 2026-04-26).
+        # Smoke on a synthetic Mu2e-style tech note (no real DOCX in our
+        # local cache; DocDB has few): Docling preserves heading
+        # hierarchy as Markdown, extracts tables as doc_type="table"
+        # records, populates parser_output. Legacy parser_docx returned
+        # only flat text with no structural records. Pass
+        # parser_name="legacy" for the python-docx route.
+        _DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        if mime_type == _DOCX_MIME and parser_name in (None, "kb-mcp"):
+            parser_name = "docling"
+
+        # Optional PDF-only parsers, resolved lazily via importlib so their
+        # heavy dependencies stay optional extras.
+        _OPTIONAL_PDF_PARSERS = {
             "nougat": ("kb_mcp.parser.parser_nougat", "NougatParser"),
-            "unstructured": ("kb_mcp.parser.parser_unstructured", "UnstructuredParser"),
             "azure": ("kb_mcp.parser.parser_azure", "AzureParser"),
         }
 
-        if parser_name in _PDF_PARSERS:
+        if parser_name in _OPTIONAL_PDF_PARSERS:
             if mime_type != "application/pdf":
                 raise NotImplementedError(f"{parser_name} parser only supports PDF, got {mime_type}")
-            module_path, class_name = _PDF_PARSERS[parser_name]
+            module_path, class_name = _OPTIONAL_PDF_PARSERS[parser_name]
             import importlib
             mod = importlib.import_module(module_path)
             parser = getattr(mod, class_name)(file_path, mime_type)
-        if parser_name == "marker":
+        elif parser_name == "marker":
             #if mime_type != "text/plain":
             #if mime_type == "text/plain":
             #    parser = get_parser(file_path, doc_type="text/plain")
@@ -223,8 +269,45 @@ def parse(
 
                 from .parser_marker import MarkerParser
                 parser = MarkerParser(file_path, mime_type)
+        elif parser_name == "docling":
+            # Docling (IBM Research) implementation. Multi-format:
+            # PDF + PPTX + DOCX + HTML + XLSX route through the
+            # same DoclingParser, which produces the canonical
+            # DoclingDocument JSON regardless of input format. The
+            # multi-view extractors (sections, tables, pictures) operate
+            # on the body schema and work format-agnostically. Anything
+            # outside this set falls back to NotImplementedError so the
+            # caller's parser_name="docling" choice doesn't silently
+            # mis-route a CSV or a code file.
+            _DOCLING_MIMES = {
+                "application/pdf",
+                "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                "text/html",
+                "application/xhtml+xml",
+            }
+            if mime_type not in _DOCLING_MIMES:
+                raise NotImplementedError(
+                    f"Docling parser does not support {mime_type}. "
+                    f"Supported: {sorted(_DOCLING_MIMES)}"
+                )
+            from .parser_docling import DoclingParser
+            parser = DoclingParser(file_path, mime_type)
+        elif parser_name == "pypdf2":
+            # Explicit opt-in to legacy PyPDF2.
+            if mime_type != "application/pdf":
+                raise NotImplementedError(f"pypdf2 parser only supports PDF, got {mime_type}")
+            from .parser_pdf import PDFParser
+            parser = PDFParser(file_path, mime_type)
+        elif parser_name == "legacy":
+            # Explicit opt-out from the Docling-default routes
+            # (PDF / PPTX / DOCX / HTML / XLSX). Falls through
+            # to the bespoke parser registered in `get_parser()` for the
+            # given MIME — e.g. parser_pptx.PPTXParser, parser_docx.DOCXParser.
+            parser = get_parser(file_path, doc_type=mime_type)
         else:
-            # Standard implementation
+            # Standard implementation for non-PDF types
             parser = get_parser(file_path, doc_type=mime_type)
             
             
@@ -237,7 +320,17 @@ def parse(
             # Simple text extraction
             text = parser.get_text()
             image_dicts = []
-        
+
+        # If the parser produced a structured artifact, persist it on the doc
+        # dict so it survives round-tripping through Document.from_dict and
+        # lands in the parser-agnostic documents.parser_output column. Any
+        # parser may expose `structured_output`; the payload should
+        # self-identify its schema (DoclingDocument dumps carry `schema_name`,
+        # which downstream readers guard on).
+        structured_output = getattr(parser, "structured_output", None)
+        if structured_output is not None:
+            doc_data["parser_output"] = structured_output
+
         text_extraction_time = time.time() - text_extraction_start
         
         # Generate image descriptions in parallel if enabled
@@ -307,7 +400,29 @@ def parse(
         # Filter images if needed (placeholder for future filtering logic)
         # For now, keep all images that have binary data (i.e., are real image dicts)
         filtered_image_dicts = [img_dict for img_dict in image_dicts if img_dict['doc_type'] == 'image']
-        
+
+        # Tables-as-records. DoclingParser populates
+        # `parser.table_dicts` with one dict per detected table. We always
+        # emit them — they're cheap, structurally distinct, and search code
+        # can boost / filter by doc_type="table".
+        table_dicts = list(getattr(parser, "table_dicts", None) or [])
+
+        # Whole-table LLM summary. Gated on
+        # PARSE_TABLE_LLM_SUMMARY — off by default so plain re-parses don't
+        # incur API calls. When on, each table dict gets a 1–2 sentence
+        # summary appended to text and stored in meta["summary"].
+        table_summary_time = 0.0
+        if parser_config['table_llm_summary'] and table_dicts:
+            from .table_summaries import generate_table_summaries
+
+            table_summary_start = time.time()
+            table_dicts = generate_table_summaries(table_dicts)
+            table_summary_time = time.time() - table_summary_start
+
+        # Sections-as-records. One dict per section_header in
+        # body order; lets search match at the section level via doc_type="section".
+        section_dicts = list(getattr(parser, "section_dicts", None) or [])
+
         # Set text on main document dict
         doc_data["text"] = text
         if "doc_type" not in doc_data:
@@ -320,14 +435,18 @@ def parse(
         doc_data["meta"]["_parsing_timing"] = {
             "text_extraction_time_seconds": round(text_extraction_time, 3),
             "image_description_time_seconds": round(image_description_time, 3) if image_description_time > 0 else None,
-            "total_time_seconds": round(text_extraction_time + image_description_time, 3),
+            "table_summary_time_seconds": round(table_summary_time, 3) if table_summary_time > 0 else None,
+            "total_time_seconds": round(text_extraction_time + image_description_time + table_summary_time, 3),
         }
         
-        # Return main document dict + image document dicts
+        # Return main document dict + section dicts + table dicts + image
+        # document dicts. Tables and sections are always emitted (no
+        # extract_images gate) — they're structural records, not raw image
+        # binaries.
         if create_additional_docs:
-            return [doc_data] + filtered_image_dicts
+            return [doc_data] + section_dicts + table_dicts + filtered_image_dicts
         else:
-            return [doc_data]
+            return [doc_data] + section_dicts + table_dicts
         
     finally:
         # Clean up temp file if we created it

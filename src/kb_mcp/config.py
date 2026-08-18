@@ -10,9 +10,13 @@ from anyio import Path
 from dotenv import load_dotenv, find_dotenv
 
 # Load shared configuration from .env
-load_dotenv()
+# override=True ensures .env values take precedence over shell environment
+# variables. This prevents issues where a shell-level DEFAULT_LLM_MODEL
+# (e.g., set for Claude Desktop) overrides the backend model settings
+# needed for OpenAI API calls (summarization, graph extraction, etc.).
+load_dotenv(override=True)
 
-# Load user-specific overrides from .env.local (takes precedence)
+# Load user-specific overrides from .env.local (takes precedence over .env)
 # This allows users to override settings (e.g., ALCF credentials) without
 # modifying the shared .env file (which may be a symlink on NERSC)
 env_path = find_dotenv()
@@ -110,7 +114,7 @@ def get_llm_config() -> dict:
             * `summary_model` (str): Summarization model (Env: `SUMMARY_MODEL`, defaults to DEFAULT_LLM_MODEL).
             * `eval_gen_model` (str): Evaluation question generation model (Env: `EVAL_GEN_MODEL`, defaults to DEFAULT_LLM_MODEL).
             * `eval_judge_model` (str): Evaluation answer judging model (Env: `EVAL_JUDGE_MODEL`, defaults to DEFAULT_LLM_MODEL).
-            * `image_llm_description` (bool): Use LLM for image descriptions (Env: `PARSE_IMAGE_DESCRIPTION_MODEL`).
+            * `image_description_model` (str): Model for image descriptions (Env: `PARSE_IMAGE_DESCRIPTION_MODEL`, defaults to a vision-capable model — see `DEFAULT_IMAGE_DESCRIPTION_MODEL`).
             * `graph_relation_extraction_model` (str): Graph relation extraction model (Env: `GRAPH_EXTRACTION_MODEL`, defaults to DEFAULT_LLM_MODEL).
             * `parser_comparison_model` (str): Parser comparison model (Env: `PARSER_COMP_MODEL`, defaults to DEFAULT_LLM_MODEL).
             * `privacy_filter_model` (str): Privacy classification model (Env: `PRIVACY_FILTER_MODEL`, defaults to DEFAULT_LLM_MODEL).
@@ -124,7 +128,9 @@ def get_llm_config() -> dict:
         'summary_model': os.getenv("SUMMARY_MODEL", get_default_llm_model()),
         'eval_gen_model': os.getenv("EVAL_GEN_MODEL", get_default_llm_model()),
         'eval_judge_model': os.getenv("EVAL_JUDGE_MODEL", get_default_llm_model()),
-        'image_description_model': os.getenv("PARSE_IMAGE_DESCRIPTION_MODEL", get_default_llm_model()),
+        # Vision fallback, NOT the default LLM: text-only models silently
+        # refuse images, so unset means a vision-capable default.
+        'image_description_model': os.getenv("PARSE_IMAGE_DESCRIPTION_MODEL", DEFAULT_IMAGE_DESCRIPTION_MODEL),
         'graph_relation_extraction_model': os.getenv("GRAPH_EXTRACTION_MODEL", get_default_llm_model()),
         'parser_comparison_model': os.getenv("PARSER_COMP_MODEL", get_default_llm_model()),
         'privacy_filter_model': os.getenv("PRIVACY_FILTER_MODEL", get_default_llm_model()),
@@ -145,6 +151,7 @@ def get_graph_config() -> dict:
         'node_similarity_threshold': float(os.getenv("GRAPH_NODE_SIMILARITY_THRESHOLD", "0.85")),
         'embedding': get_embedding_config(),
         'graph_relation_extraction_model': os.getenv("GRAPH_EXTRACTION_MODEL", get_default_llm_model()),
+        'domain': os.getenv("GRAPH_DOMAIN", None),  # e.g., "mu2e" for Mu2e-specific extraction
     }
 
 # Integrations
@@ -245,6 +252,20 @@ def get_batch_config() -> dict:
         'extract_batch_size': _get_int("EXTRACT_BATCH_SIZE", 10),
     }
 
+# Vision-capable model used for figure / page-image descriptions when the
+# user hasn't set PARSE_IMAGE_DESCRIPTION_MODEL explicitly. Falling back to
+# DEFAULT_LLM_MODEL is unsafe — the project default `openai/gpt-oss-120b`
+# is text-only and silently refuses images.
+#
+# Qwen3.6 won a head-to-head probe on a real Mu2e plot: reads axis labels
+# accurately, follows the "no specific values" instruction, ~2.6 s per
+# call. NVIDIA NVILA-2-lite (the previous default) confidently invented
+# axis ranges and data values on the same probe — a non-starter for
+# physics-figure retrieval where hallucinated specifics get embedded
+# into search.
+DEFAULT_IMAGE_DESCRIPTION_MODEL = "qwen/qwen3.6"
+
+
 def get_parser_config() -> dict:
     """Parser settings.
 
@@ -254,17 +275,42 @@ def get_parser_config() -> dict:
             * `parser` (str): Parser framework to use (Env: `KB_PARSER`, default: 'kb-mcp').
             * `image_additional_doc` (bool): Create separate docs for images (Env: `PARSE_IMAGE_ADDITIONAL_DOC`).
             * `image_llm_description` (bool): Use LLM for image descriptions (Env: `PARSE_IMAGE_LLM_DESCRIPTION`).
-            * `image_description_model` (str): Model for descriptions (Env: `PARSE_IMAGE_DESCRIPTION_MODEL`, defaults to DEFAULT_LLM_MODEL).
+            * `image_description_model` (str): Model for descriptions (Env: `PARSE_IMAGE_DESCRIPTION_MODEL`, defaults to a vision-capable model — `qwen/qwen3.6`).
             * `image_description_num_workers` (int): Parallel worker count (Env: `PARSE_IMAGE_DESCRIPTION_NUMWORKERS`, default: 6).
             * `marker_output_base` (str): Base directory for pre-existing Marker output (Env: `MARKER_OUTPUT_BASE`, default: 'data/sources/sld-scanned/extracted_output').
+            * `ocr` (bool): Run OCR during Docling PDF parsing (Env: `PARSE_OCR`, default: True). Required for scanned documents (e.g. SLD scans); born-digital-only sweeps can disable it for speed.
+            * `table_llm_summary` (bool): Generate LLM summaries for table records (Env: `PARSE_TABLE_LLM_SUMMARY`, default: False).
+            * `table_summary_model` (str): Model for table summaries (Env: `PARSE_TABLE_SUMMARY_MODEL`, defaults to DEFAULT_LLM_MODEL).
+            * `table_summary_num_workers` (int): Parallel worker count (Env: `PARSE_TABLE_SUMMARY_NUMWORKERS`, default: 6).
     """
     return {
         'parser': os.getenv("KB_PARSER", "kb-mcp"),
         'image_additional_doc': _get_bool("PARSE_IMAGE_ADDITIONAL_DOC", True),
         'image_llm_description': _get_bool("PARSE_IMAGE_LLM_DESCRIPTION", True),
-        'image_description_model': os.getenv("PARSE_IMAGE_DESCRIPTION_MODEL", get_default_llm_model()),
+        'image_description_model': os.getenv("PARSE_IMAGE_DESCRIPTION_MODEL", DEFAULT_IMAGE_DESCRIPTION_MODEL),
         'image_description_num_workers': _get_int("PARSE_IMAGE_DESCRIPTION_NUMWORKERS", 6),
         'marker_output_base': os.getenv("MARKER_OUTPUT_BASE", "data/sources/sld-scanned/extracted_output"),
+        # OCR on by default: scanned-document pipelines depend on it.
+        # Born-digital-only sweeps can disable it per-deployment for speed.
+        'ocr': _get_bool("PARSE_OCR", True),
+        'table_llm_summary': _get_bool("PARSE_TABLE_LLM_SUMMARY", False),
+        'table_summary_model': os.getenv("PARSE_TABLE_SUMMARY_MODEL", get_default_llm_model()),
+        'table_summary_num_workers': _get_int("PARSE_TABLE_SUMMARY_NUMWORKERS", 6),
+        # Docling CodeFormulaV2-based formula enrichment on PDF parses.
+        # Recovers equations the layout model would otherwise leave as
+        # <!-- formula-not-decoded --> stubs, rendering them as `$$...$$`
+        # LaTeX blocks. Heavy: cold start downloads ~hundreds of MB of
+        # model weights and adds significant per-page parse time. Default off.
+        'formula_enrichment': _get_bool("PARSE_FORMULA_ENRICHMENT", False),
+        # Per-document auto-decide. When true, runs a cheap PyPDF2 pre-scan
+        # to score the PDF's math-character density; if score >= threshold,
+        # enables formula enrichment for that single document. Auto wins
+        # over the manual flag when both are set (because auto's
+        # off-decision is the careful one — "no math on this doc").
+        'formula_enrichment_auto': _get_bool("PARSE_FORMULA_ENRICHMENT_AUTO", False),
+        'formula_enrichment_auto_threshold': float(
+            os.getenv("PARSE_FORMULA_ENRICHMENT_AUTO_THRESHOLD", "0.0005")
+        ),
     }
 
 def get_embedding_config() -> dict:
@@ -276,11 +322,21 @@ def get_embedding_config() -> dict:
             * `provider` (str): Provider name (Env: `EMBEDDING_PROVIDER`, default: 'st').
             * `model` (str|None): Specific model name (Env: `EMBEDDING_MODEL`).
             * `chunk_strategy` (str): Chunking method (Env: `CHUNK_STRATEGY`, default: 'tokens').
+            * `chunk_from_docling_json` (bool): Route PDF parents through the
+              DoclingDocument-aware chunker that walks the persisted
+              `documents.parser_output["body"]` and emits chunks with
+              page_start/page_end/body_self_refs populated
+              (Env: `CHUNK_FROM_DOCLING_JSON`, default: false). When true and
+              the parent text doc's `parser_output` holds a DoclingDocument
+              payload, the dispatch in `chunk_document()` uses
+              `chunk_from_docling_json` instead of the Markdown
+              token-windowing path.
     """
     return {
         'provider': os.getenv("EMBEDDING_PROVIDER", "st"),
         'model': os.getenv("EMBEDDING_MODEL"),
         'chunk_strategy': os.getenv("CHUNK_STRATEGY", "tokens"),
+        'chunk_from_docling_json': _get_bool("CHUNK_FROM_DOCLING_JSON", False),
     }
 
 def get_eval_config() -> dict:
@@ -311,6 +367,21 @@ def get_search_config() -> dict:
         'max_chunks_per_doc': _get_int("SEARCH_MAX_CHUNKS_PER_DOC", 10),
         'initial_limit_multiplier': _get_int("SEARCH_INITIAL_LIMIT_MULTIPLIER", 50),
         'rrf_k': _get_int("SEARCH_RRF_K", 60),
+        'router_enabled': _get_bool("ROUTER_ENABLED", False),
+    }
+
+def get_reranker_config() -> dict:
+    """Reranker configuration.
+
+    Returns:
+        dict: Reranker configuration with keys:
+
+            * `enabled` (bool): Whether reranking is enabled (Env: `RERANKER_ENABLED`, default: false).
+            * `model_name` (str): Cross-encoder model name (Env: `RERANKER_MODEL`, default: cross-encoder/ms-marco-MiniLM-L-6-v2).
+    """
+    return {
+        'enabled': _get_bool("RERANKER_ENABLED", False),
+        'model_name': os.getenv("RERANKER_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2"),
     }
 
 def get_agent_config() -> dict:

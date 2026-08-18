@@ -1,8 +1,8 @@
-"""
-Document parsers module - extract text and metadata from various document formats.
+"""Document parsers for extracting text and metadata from various formats.
 
-This module is based on the parser structure from mu2eDocChat:
-https://github.com/corrodis/mu2eDocChat
+Supports PDF, DOCX, PPTX, Excel, HTML, and plain text. PDF/PPTX/DOCX/HTML
+default to Docling (parser_docling.py); the bespoke parsers stay available
+via parser_name="legacy".
 """
 
 from .parser_base import BaseParser

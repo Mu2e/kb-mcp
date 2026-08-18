@@ -52,10 +52,9 @@ def create_engine_with_config() -> Engine:
 
     # SQLite-specific configuration
     if database_url.startswith("sqlite"):
-        # Enable foreign keys for SQLite
         engine = create_engine(
             database_url,
-            connect_args={"check_same_thread": False}
+            connect_args={"check_same_thread": False},
         )
 
         @event.listens_for(engine, "connect")
@@ -248,20 +247,13 @@ def _setup_fulltext_search_trigger(engine: Engine) -> None:
     The text_search_vector combines:
     - document.title or document.title_gen (weight 'A' - highest)
     - chunk.text (weight 'B')
+    - chunk.section_path (weight 'C')
     - document.summary (weight 'D' - lower)
 
     Args:
         engine: SQLAlchemy engine connected to PostgreSQL
     """
-    # Check if function exists
-    check_function_sql = text("""
-        SELECT EXISTS (
-            SELECT 1 FROM pg_proc
-            WHERE proname = 'update_chunk_text_search_vector'
-        );
-    """)
-
-    # Check if trigger exists
+    # Check if trigger exists (function is always re-installed via CREATE OR REPLACE)
     check_trigger_sql = text("""
         SELECT EXISTS (
             SELECT 1 FROM pg_trigger
@@ -270,38 +262,37 @@ def _setup_fulltext_search_trigger(engine: Engine) -> None:
     """)
 
     with engine.connect() as conn:
-        function_exists = conn.execute(check_function_sql).scalar()
         trigger_exists = conn.execute(check_trigger_sql).scalar()
 
-        # Only create function if it doesn't exist
-        if not function_exists:
-            create_function_sql = text("""
-                CREATE FUNCTION update_chunk_text_search_vector()
-                RETURNS TRIGGER AS $$
-                DECLARE
-                    doc_title TEXT;
-                    doc_summary TEXT;
-                BEGIN
-                    -- Get document title (prefer title, fallback to title_gen) and summary
-                    SELECT
-                        COALESCE(title, title_gen, ''),
-                        COALESCE(summary, '')
-                    INTO doc_title, doc_summary
-                    FROM documents
-                    WHERE id = NEW.document_id;
+        # CREATE OR REPLACE ensures the function picks up changes (e.g.
+        # adding section_path with weight 'C' alongside chunk.text now that
+        # chunk.text holds clean content rather than baked-in context).
+        create_function_sql = text("""
+            CREATE OR REPLACE FUNCTION update_chunk_text_search_vector()
+            RETURNS TRIGGER AS $$
+            DECLARE
+                doc_title TEXT;
+                doc_summary TEXT;
+            BEGIN
+                SELECT
+                    COALESCE(title, title_gen, ''),
+                    COALESCE(summary, '')
+                INTO doc_title, doc_summary
+                FROM documents
+                WHERE id = NEW.document_id;
 
-                    -- Build the weighted tsvector
-                    NEW.text_search_vector :=
-                        setweight(to_tsvector('english', doc_title), 'A') ||
-                        setweight(to_tsvector('english', COALESCE(NEW.text, '')), 'B') ||
-                        setweight(to_tsvector('english', doc_summary), 'D');
+                NEW.text_search_vector :=
+                    setweight(to_tsvector('english', doc_title), 'A') ||
+                    setweight(to_tsvector('english', COALESCE(NEW.text, '')), 'B') ||
+                    setweight(to_tsvector('english', COALESCE(NEW.section_path, '')), 'C') ||
+                    setweight(to_tsvector('english', doc_summary), 'D');
 
-                    RETURN NEW;
-                END;
-                $$ LANGUAGE plpgsql;
-            """)
-            conn.execute(create_function_sql)
-            logger.info("Created full-text search trigger function")
+                RETURN NEW;
+            END;
+            $$ LANGUAGE plpgsql;
+        """)
+        conn.execute(create_function_sql)
+        logger.info("Installed full-text search trigger function (with section_path)")
 
         # Only create trigger if it doesn't exist
         if not trigger_exists:
@@ -315,6 +306,70 @@ def _setup_fulltext_search_trigger(engine: Engine) -> None:
             logger.info("Created full-text search trigger")
 
         conn.commit()
+
+
+def _ensure_documents_columns(engine) -> None:
+    """Idempotently add columns introduced after the initial schema.
+
+    `Base.metadata.create_all()` only creates missing tables; it does not add
+    new columns to tables that already exist. This helper patches that gap for
+    a small, hand-maintained list of post-v0.2 columns. Replace with Alembic
+    when schema drift outgrows this approach.
+    """
+    from sqlalchemy import inspect as sa_inspect
+
+    inspector = sa_inspect(engine)
+    if "documents" not in inspector.get_table_names():
+        return
+
+    is_pg = engine.url.drivername.startswith("postgresql")
+    existing = {col["name"] for col in inspector.get_columns("documents")}
+
+    # (column_name, postgres_type, sqlite_type)
+    new_columns = [
+        ("parser_output", "JSONB", "JSON"),
+    ]
+
+    for col_name, pg_type, sqlite_type in new_columns:
+        if col_name in existing:
+            continue
+        col_type = pg_type if is_pg else sqlite_type
+        with engine.begin() as conn:
+            conn.execute(text(f"ALTER TABLE documents ADD COLUMN {col_name} {col_type}"))
+        logger.info(f"Added documents.{col_name} ({col_type})")
+
+
+def _ensure_chunks_columns(engine) -> None:
+    """Idempotent ALTER for chunks columns added post-v0.2.
+
+    Sister to `_ensure_documents_columns`. Covers the page-anchored
+    provenance columns: page_start / page_end / bbox / body_self_refs. They
+    are populated only by the DoclingDocument-aware chunker; legacy chunks
+    leave them NULL.
+    """
+    from sqlalchemy import inspect as sa_inspect
+
+    inspector = sa_inspect(engine)
+    if "chunks" not in inspector.get_table_names():
+        return
+
+    is_pg = engine.url.drivername.startswith("postgresql")
+    existing = {col["name"] for col in inspector.get_columns("chunks")}
+
+    new_columns = [
+        ("page_start", "INTEGER", "INTEGER"),
+        ("page_end", "INTEGER", "INTEGER"),
+        ("bbox", "JSONB", "JSON"),
+        ("body_self_refs", "JSONB", "JSON"),
+    ]
+
+    for col_name, pg_type, sqlite_type in new_columns:
+        if col_name in existing:
+            continue
+        col_type = pg_type if is_pg else sqlite_type
+        with engine.begin() as conn:
+            conn.execute(text(f"ALTER TABLE chunks ADD COLUMN {col_name} {col_type}"))
+        logger.info(f"Added chunks.{col_name} ({col_type})")
 
 
 def init_db(create_tables: bool = True) -> None:
@@ -365,6 +420,19 @@ def init_db(create_tables: bool = True) -> None:
         # Create all tables (including SearchLog from search module and eval models)
         Base.metadata.create_all(bind=engine)
         logger.info("Database tables created/verified")
+
+        # Bring existing tables up to the latest schema. Base.metadata.create_all
+        # only creates tables that don't exist yet — it never adds columns to
+        # existing tables, so without Alembic we patch the known column drift here.
+        try:
+            _ensure_documents_columns(engine)
+        except Exception as e:
+            logger.warning(f"Could not patch documents schema: {e}")
+
+        try:
+            _ensure_chunks_columns(engine)
+        except Exception as e:
+            logger.warning(f"Could not patch chunks schema: {e}")
 
         # Set up full-text search trigger AFTER tables are created
         if database_url.startswith('postgresql'):
