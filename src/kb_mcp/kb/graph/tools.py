@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 def extract_all(
     source_id: Optional[str] = None,
     parser_id: Optional[str] = None,
+    doc_types: Optional[List[str]] = None,
     force: bool = False,
     limit: Optional[int] = None,
     batch_size: Optional[int] = None,
@@ -25,11 +26,16 @@ def extract_all(
     Extract knowledge graph relations from all documents matching filters.
 
     This function processes documents in batch, similar to parse_all and chunk_and_embed_all.
-    By default, it skips documents that already have extraction logs (unless force=True).
+    By default, it skips documents that already have extraction logs (unless force=True),
+    and only processes documents with `doc_type="text"` — sections, tables, and images
+    largely re-cover the parent text and would otherwise produce duplicate relations.
 
     Args:
         source_id: Optional source ID filter.
         parser_id: Optional parser ID filter.
+        doc_types: List of doc_type strings to include. Defaults to ["text"] — graph
+                   relations are extracted from the parent text doc only. Pass
+                   ["text", "section"] (or similar) to opt structural records back in.
         force: If True, re-process documents even if they already have extraction logs.
                If False (default), skip documents with existing extraction logs.
         limit: If provided, process only this many documents (useful for testing/incremental processing).
@@ -52,6 +58,8 @@ def extract_all(
             "error_details": List[Dict[str, Any]]
         }
     """
+    if doc_types is None:
+        doc_types = ["text"]
     from ...config import get_batch_config
 
     # Get batch size from config if not provided
@@ -86,6 +94,8 @@ def extract_all(
                 query = query.filter(Document.source_id == source_id)
             if parser_id:
                 query = query.filter(Document.parser_id == parser_id)
+            if doc_types:
+                query = query.filter(Document.doc_type.in_(doc_types))
 
             # Apply limit if provided (overall limit across all batches)
             if limit and total_processed >= limit:
@@ -107,7 +117,7 @@ def extract_all(
             if total_processed == 0:
                 logger.info(
                     f"Processing documents in batches of {batch_size} "
-                    f"(source_id={source_id}, parser_id={parser_id}, force={force}, limit={limit})"
+                    f"(source_id={source_id}, parser_id={parser_id}, doc_types={doc_types}, force={force}, limit={limit})"
                 )
 
             for document in tqdm(documents, desc="Extracting graph relations", unit="doc", disable=total_processed > 0):
@@ -151,7 +161,7 @@ def extract_all(
     if total_processed == 0:
         logger.info(
             f"No documents found to extract "
-            f"(source_id={source_id}, parser_id={parser_id}, force={force})"
+            f"(source_id={source_id}, parser_id={parser_id}, doc_types={doc_types}, force={force})"
         )
 
     logger.info(

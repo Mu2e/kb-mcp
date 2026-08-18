@@ -153,11 +153,16 @@ def cmd_extract_all(args):
     from ..graph import extract_all
 
     try:
+        doc_types = getattr(args, "doc_types", None)
+        if doc_types:
+            doc_types = [t.strip() for t in doc_types.split(",") if t.strip()]
+
         print(f"Extracting graph relations from documents...")
         if args.source_id:
             print(f"  Source ID: {args.source_id}")
         if args.parser_id:
             print(f"  Parser ID: {args.parser_id}")
+        print(f"  Doc types: {doc_types or ['text']} (default: text)")
         if args.force:
             print(f"  Force: Re-processing documents with existing relations")
         if args.limit:
@@ -166,6 +171,7 @@ def cmd_extract_all(args):
         result = extract_all(
             source_id=args.source_id,
             parser_id=args.parser_id,
+            doc_types=doc_types,
             force=args.force,
             limit=args.limit,
             batch_size=getattr(args, 'batch_size', None),
@@ -241,6 +247,12 @@ def setup_commands(subparsers):
     extract_all_parser.add_argument(
         "--parser-id",
         help="Filter by parser ID"
+    )
+    extract_all_parser.add_argument(
+        "--doc-types",
+        dest="doc_types",
+        help="Comma-separated list of doc_types to include. Default: 'text'. "
+             "Pass 'text,section' or similar to opt structural records back in."
     )
     extract_all_parser.add_argument(
         "--force",
