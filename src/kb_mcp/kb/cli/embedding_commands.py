@@ -173,7 +173,7 @@ def cmd_embed(args):
             # Chunk and embed the document
             chunks = chunk_and_embed(
                 document,
-                strategy=args.strategy,
+                chunk_strategy=args.strategy,
                 chunk_config={
                     "chunk_size": args.chunk_size,
                     "chunk_overlap": args.chunk_overlap,
