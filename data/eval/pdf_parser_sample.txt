@@ -1,0 +1,33 @@
+# PDF parser benchmark sample — development / evaluation corpus
+#
+# One path per line, # for comments. A small DocDB sample for parser
+# benchmarking and retrieval-eval development. Selection covers the format
+# families seen in DocDB: meeting summaries, slide decks (small + large),
+# technical-note slides with math, multi-column reports, single-page
+# tables.
+#
+# This is a *starter* set of 12 locally-cached DocDB PDFs — expand by
+# pulling more (different doc-types, older entries, multi-column journal
+# papers) from DocDB before running formal parser comparisons.
+
+# --- Meeting summaries / short text ---
+data/sources/mu2e-docdb/mu2e-docdb-56281.pdf
+data/sources/mu2e-docdb/mu2e-docdb-56287.pdf
+data/sources/mu2e-docdb/mu2e-docdb-56293.pdf
+data/sources/mu2e-docdb/mu2e-docdb-56296.pdf
+data/sources/mu2e-docdb/mu2e-docdb-56305.pdf
+
+# --- Slide decks (small) ---
+data/sources/mu2e-docdb/mu2e-docdb-56290-ops-planning-3-apr-26.pdf
+data/sources/mu2e-docdb/mu2e-docdb-53490.pdf
+
+# --- Slide decks (medium) ---
+data/sources/mu2e-docdb/mu2e-docdb-56035.pdf
+data/sources/mu2e-docdb/mu2e-docdb-55825-mu2ePACSpring2026.pdf
+
+# --- Slide decks (large, many figures + tables) ---
+data/sources/mu2e-docdb/mu2e-docdb-56299-MB-398.pdf
+data/sources/mu2e-docdb/mu2e-docdb-56302-STM Downstream Update - April 3 - DocDB 56302.pdf
+
+# --- Single-page table (procurements list) ---
+data/sources/mu2e-docdb/mu2e-docdb-56278-Procurements - Mu2e - Last Three months plus not finished - v2026-03-30.pdf

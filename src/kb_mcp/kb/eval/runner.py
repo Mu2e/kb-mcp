@@ -317,6 +317,7 @@ def evaluate_single_question(
     run: EvalRun,
     question_id: str,
     use_llm_judge: bool = False,
+    rerank: Optional[bool] = None,
     session=None,
 ) -> EvalResult:
     """Evaluate a single question using run configuration.
@@ -389,6 +390,7 @@ def evaluate_single_question(
                 source_id=source_id_filter,
                 parser_id=parser_id_filter,
                 filter=es_filter,
+                rerank=rerank,
                 session=session,
             )
         retrieval_time = time.time() - start_time
@@ -584,6 +586,7 @@ def execute_eval_run(
     run_id: str,
     use_llm_judge: bool = False,
     workers: int = 1,
+    rerank: Optional[bool] = None,
     session=None,
 ) -> Dict:
     """Execute an evaluation run.
@@ -595,6 +598,8 @@ def execute_eval_run(
         run_id: Run ID to execute
         use_llm_judge: Whether to run LLM judge (requires judge_strategy in run config)
         workers: Number of parallel workers (default 1)
+        rerank: Whether to apply cross-encoder reranking during retrieval
+            (True/False; None reads the RERANKER_ENABLED config default)
         session: Database session
 
     Returns:
@@ -680,6 +685,7 @@ def execute_eval_run(
             run=run_snapshot,
             question_id=question_id,
             use_llm_judge=use_llm_judge,
+            rerank=rerank,
             session=None,
         )
         return result
@@ -740,6 +746,7 @@ def eval(
     judge_strategy: Optional[Dict] = None,
     use_llm_judge: bool = False,
     workers: int = 1,
+    rerank: Optional[bool] = None,
     meta: Optional[Dict] = None,
     session=None,
 ) -> Dict:
@@ -759,6 +766,9 @@ def eval(
         search_filters: Optional document filters for search
         judge_strategy: Optional LLM judge configuration (e.g., {"enabled": True, "model": "gpt-4"})
         use_llm_judge: Whether to run LLM judge (requires judge_strategy)
+        workers: Number of parallel workers (default 1)
+        rerank: Whether to apply cross-encoder reranking during retrieval
+            (True/False; None reads the RERANKER_ENABLED config default)
         meta: Optional metadata dict
         session: Database session
 
@@ -800,6 +810,7 @@ def eval(
         run_id=run_id,
         use_llm_judge=use_llm_judge,
         workers=workers,
+        rerank=rerank,
         session=None,
     )
 

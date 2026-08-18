@@ -1,0 +1,280 @@
+{
+  "name": "Mu2e Benchmark v1",
+  "description": "Hand-curated evaluation questions for the Mu2e knowledge base, covering 4 categories: factual, figure/image, procedural, and cross-document synthesis. Each question includes an expected answer for LLM judge evaluation.",
+  "version": "1.1",
+  "questions": [
+    {
+      "question": "What material are the tracker straw tubes made of?",
+      "answer": "The tracker straw tubes are made of two layers of ~6 micrometer Mylar, spiral wound, with a ~3 micrometer layer of adhesive between layers, for a total wall thickness of 15 micrometers.",
+      "bucket": "facts",
+      "source_document_id": "b44bbaf8-64fb-4c7f-957b-30d658228793",
+      "expected_source": "mu2e-wiki/TrackerIntro"
+    },
+    {
+      "question": "How many crystals does the Mu2e calorimeter have?",
+      "answer": "The Mu2e calorimeter has a total of 674 CsI crystals, arranged in two annular disks.",
+      "bucket": "facts",
+      "source_document_id": "bdf0b02d-0c4c-4e6d-bf05-cd9979410375",
+      "expected_source": "mu2e-wiki/CalorimeterIntro"
+    },
+    {
+      "question": "What is the magnetic field strength in the detector solenoid?",
+      "answer": "The Detector Solenoid provides a uniform magnetic field of 1 Tesla.",
+      "bucket": "facts",
+      "source_document_id": "563b0a82-dda2-4772-b4cd-bd97e8b2aef8",
+      "expected_source": "mu2e-wiki/DetectorIntro"
+    },
+    {
+      "question": "What backgrounds does Mu2e need to control?",
+      "answer": "The primary backgrounds are: Decay In Orbit (DIO), Radiative Pion Capture, Electrons or Muons from Cosmic Rays, Radiative Muon Capture, Delayed particles from the beamline, and Misreconstruction.",
+      "bucket": "facts",
+      "source_document_id": "72b9e618-791e-490f-bc63-993711d95fa1",
+      "expected_source": "mu2e-wiki/BackgroundsPhysIntro"
+    },
+    {
+      "question": "What is the momentum of the conversion electron signal in Mu2e?",
+      "answer": "The conversion electron signal has a well-known momentum of 105 MeV/c.",
+      "bucket": "facts",
+      "source_document_id": "b44bbaf8-64fb-4c7f-957b-30d658228793",
+      "expected_source": "mu2e-wiki/TrackerIntro"
+    },
+    {
+      "question": "What energy resolution does the calorimeter need?",
+      "answer": "An energy resolution of about 5% at 100 MeV is desirable to confirm the electron momentum measurement from the tracker.",
+      "bucket": "facts",
+      "source_document_id": "bdf0b02d-0c4c-4e6d-bf05-cd9979410375",
+      "expected_source": "mu2e-wiki/CalorimeterIntro"
+    },
+    {
+      "question": "What timing resolution is required for the calorimeter?",
+      "answer": "A timing resolution better than ~0.5 ns is required to ensure that energy deposits in the calorimeter are in time with events reconstructed in the tracker.",
+      "bucket": "facts",
+      "source_document_id": "bdf0b02d-0c4c-4e6d-bf05-cd9979410375",
+      "expected_source": "mu2e-wiki/CalorimeterIntro"
+    },
+    {
+      "question": "What services does the art framework provide for Mu2e modules?",
+      "answer": "The art framework provides: Tracer (informational messages), TimeTracker (time reporting per module), MemoryTracker (memory reporting per module), TFileService (manages ROOT histogram output files with per-module subdirectories), and RandomNumberService (random number generation).",
+      "bucket": "facts",
+      "source_document_id": "4a61d6cf-0098-4193-89af-402b1a2de1ab",
+      "expected_source": "mu2e-wiki/ArtServices"
+    },
+    {
+      "question": "What is the purpose of the conditions database in Mu2e?",
+      "answer": "The conditions database maintains calibration constants including detector alignment, gas gain in straws, time-space relationships for straws, SiPM gain, and ADC calibration curves. It consists of two PostgreSQL databases accessed via HTTP protocol through the DbService and ProditionsService in art jobs.",
+      "bucket": "facts",
+      "source_document_id": "f9b17465-1177-455f-92a9-4c9df779cfc2",
+      "expected_source": "mu2e-wiki/ConditionsData"
+    },
+    {
+      "question": "What are the different Mu2e identities and credentials needed at Fermilab?",
+      "answer": "You need: a Fermilab kerberos principal (xyz@FNAL.GOV) for linux computing resources, a Fermilab SSO identity (xyz@services.fnal.gov) for web services, a CILogon certificate for browser-based access, and a Hypernews identity for email lists.",
+      "bucket": "facts",
+      "source_document_id": "9977218a-cf2d-4669-808c-000bd46aa7fe",
+      "expected_source": "mu2e-wiki/Authentication"
+    },
+    {
+      "question": "Show me the layout of the Mu2e detector",
+      "answer": "The DetectorIntro page contains a diagram showing the overall detector layout including the Production Solenoid, Transport Solenoid, and Detector Solenoid with the tracker, calorimeter, and stopping target inside.",
+      "bucket": "figures",
+      "source_document_id": "563b0a82-dda2-4772-b4cd-bd97e8b2aef8",
+      "expected_source": "mu2e-wiki/DetectorIntro"
+    },
+    {
+      "question": "What does the tracker geometry look like?",
+      "answer": "The TrackerIntro page contains diagrams showing the tracker geometry with its straw tube arrangement in stations and panels within the Detector Solenoid bore.",
+      "bucket": "figures",
+      "source_document_id": "b44bbaf8-64fb-4c7f-957b-30d658228793",
+      "expected_source": "mu2e-wiki/TrackerIntro"
+    },
+    {
+      "question": "Describe the calorimeter disk arrangement",
+      "answer": "The CalorimeterIntro page shows the calorimeter consisting of two annular disks of CsI crystals positioned downstream of the tracker inside the Detector Solenoid.",
+      "bucket": "figures",
+      "source_document_id": "bdf0b02d-0c4c-4e6d-bf05-cd9979410375",
+      "expected_source": "mu2e-wiki/CalorimeterIntro"
+    },
+    {
+      "question": "What does the momentum spectrum of conversion electrons look like?",
+      "answer": "The BackgroundsPhysIntro page describes the signal as a monoenergetic peak at 105 MeV/c on top of a steeply falling DIO spectrum, where the DIO background rate drops rapidly as electron energy approaches the signal region.",
+      "bucket": "figures",
+      "source_document_id": "72b9e618-791e-490f-bc63-993711d95fa1",
+      "expected_source": "mu2e-wiki/BackgroundsPhysIntro"
+    },
+    {
+      "question": "Describe the Mu2e solenoid system layout",
+      "answer": "The DetectorIntro page shows three solenoids: the Production Solenoid (where protons hit the target), the Transport Solenoid (S-shaped, selects and transports muons), and the Detector Solenoid (houses the stopping target, tracker, and calorimeter).",
+      "bucket": "figures",
+      "source_document_id": "563b0a82-dda2-4772-b4cd-bd97e8b2aef8",
+      "expected_source": "mu2e-wiki/DetectorIntro"
+    },
+    {
+      "question": "Show me the event display for Mu2e",
+      "answer": "The EventDisplays page describes several event displays including the main REve-based EventDisplay from the Analysis Tools Group, a Geometry Browser using GDML files, and Stntuple 2-D views.",
+      "bucket": "figures",
+      "source_document_id": "0841d008-e403-49d5-9268-8f93cc5cb0c3",
+      "expected_source": "mu2e-wiki/EventDisplays"
+    },
+    {
+      "question": "What does the analysis workflow diagram look like?",
+      "answer": "The AnalysisWorkflow page describes the data flow from interactive testing through grid submission, covering FCL file preparation, job testing, and submission procedures.",
+      "bucket": "figures",
+      "source_document_id": "36e288ce-712d-442d-bbec-6c41f653cd19",
+      "expected_source": "mu2e-wiki/AnalysisWorkflow"
+    },
+    {
+      "question": "Show me the computing infrastructure diagram for Mu2e",
+      "answer": "The ComputingInfrastructure page describes the computing infrastructure including authentication systems, interactive machines, VPN access, disk storage, FermiCloud VMs, and the mu2epro production account.",
+      "bucket": "figures",
+      "source_document_id": "9bfa4a0b-9ce8-403b-a3f1-c5cd1120bd73",
+      "expected_source": "mu2e-wiki/ComputingInfrastructure"
+    },
+    {
+      "question": "What does the calorimeter data quality monitoring display show?",
+      "answer": "The Calorimeter_Data_Quality page describes DQM displays including CaloDigiDQM which uses indexed storage and monitors energy deposits, timing, and hit rates per crystal.",
+      "bucket": "figures",
+      "source_document_id": "1a83d3ca-316a-4421-a13b-62e9ed0132c6",
+      "expected_source": "mu2e-wiki/Calorimeter_Data_Quality"
+    },
+    {
+      "question": "What does the conditions database architecture look like?",
+      "answer": "The ConditionsData page describes the architecture with two PostgreSQL databases (mu2e_conditions_dev and mu2e_conditions_prd) accessed via HTTP through DbService and ProditionsService in art jobs, with calibration tables cached on disk.",
+      "bucket": "figures",
+      "source_document_id": "f9b17465-1177-455f-92a9-4c9df779cfc2",
+      "expected_source": "mu2e-wiki/ConditionsData"
+    },
+    {
+      "question": "How do I set up the Mu2e software environment?",
+      "answer": "Three steps from a clean shell: (1) create recommended login scripts (see Shells#Setup_scripts), (2) run 'mu2einit' (see LoginTutorial), (3) run setup commands like 'muse setup', 'setup mu2egrid', or 'setup sam_web_client' depending on your task.",
+      "bucket": "procedural",
+      "source_document_id": "0a8ae32d-cb84-4c95-9b62-282281393310",
+      "expected_source": "mu2e-wiki/CodeEnvironment"
+    },
+    {
+      "question": "How do I submit a grid job for Mu2e?",
+      "answer": "First test interactively with 'mu2e -S fcllist.txt -n 100 -c <your_job_fcl>', then create FCL files customized for different input/output files, and submit to the grid following the SubmitJobs documentation. Prerequisites include reviewing Grids, Dcache, DataTransfer, and JobPlan pages.",
+      "bucket": "procedural",
+      "source_document_id": "36e288ce-712d-442d-bbec-6c41f653cd19",
+      "expected_source": "mu2e-wiki/AnalysisWorkflow"
+    },
+    {
+      "question": "How do I check out and build the Offline code?",
+      "answer": "The code is managed using git in the Mu2e GitHub organization. It is built using Muse (Mu2e setup and build scripts) with scons as the internal build tool. C++ modules inherit from art base classes and are compiled into shared object libraries loaded by the framework on demand.",
+      "bucket": "procedural",
+      "source_document_id": "856a1919-3221-4c4d-801c-277381d686cf",
+      "expected_source": "mu2e-wiki/CheckoutAndBuildCodeTutorial"
+    },
+    {
+      "question": "How do I create a new art module?",
+      "answer": "Write a C++ module inheriting from an art base class (e.g., art::EDProducer). Implement beginJob (called once), beginRun (on run changes), and produce/analyze (every event). The module is compiled into a shared object library loaded by the framework on demand.",
+      "bucket": "procedural",
+      "source_document_id": "8f8b3f62-ad6e-44ce-b552-2e74cefdfac6",
+      "expected_source": "mu2e-wiki/CodeArtFclTutorial"
+    },
+    {
+      "question": "How do I access the Mu2e conditions database?",
+      "answer": "The conditions database is accessed via HTTP protocol through DbService (low-level) and ProditionsService (high-level) in art jobs. The two databases are mu2e_conditions_dev (development) and mu2e_conditions_prd (production/users).",
+      "bucket": "procedural",
+      "source_document_id": "f9b17465-1177-455f-92a9-4c9df779cfc2",
+      "expected_source": "mu2e-wiki/ConditionsData"
+    },
+    {
+      "question": "How do I run the event display?",
+      "answer": "The main REve-based EventDisplay is at https://github.com/Mu2e/EventDisplay with nominal configuration in EventDisplay/examples/nominalexample.fcl. There is also a Geometry Browser using GDML files created by 'mu2e -c Offline/Mu2eG4/fcl/gdmldump.fcl' and visualized via ROOT macros.",
+      "bucket": "procedural",
+      "source_document_id": "0841d008-e403-49d5-9268-8f93cc5cb0c3",
+      "expected_source": "mu2e-wiki/EventDisplays"
+    },
+    {
+      "question": "How do I configure FHiCL files for Mu2e?",
+      "answer": "FHiCL (pronounced 'fickle') is the control language for art. You provide a FCL file when starting an art executable to specify which modules to run, their parameters (input data, cuts), and what services to use. Setup with 'source /cvmfs/mu2e.opensciencegrid.org/setupmu2e-art.sh'.",
+      "bucket": "procedural",
+      "source_document_id": "8f8b3f62-ad6e-44ce-b552-2e74cefdfac6",
+      "expected_source": "mu2e-wiki/CodeArtFclTutorial"
+    },
+    {
+      "question": "How do I archive files to tape at Fermilab?",
+      "answer": "Divide data into ~2GB chunks, create tar files following the naming convention 'data_tier.owner.description.configuration.sequencer.file_format' with unique names, copy to a mu2egpvm machine, then upload to tape.",
+      "bucket": "procedural",
+      "source_document_id": "9aa07d2d-401c-4abc-98db-13705de6caea",
+      "expected_source": "mu2e-wiki/An_example_of_how_to_archive_files_to_tape"
+    },
+    {
+      "question": "How do I get a computing account for Mu2e?",
+      "answer": "If new to Fermilab, follow the Mu2e FermilabID page to get a Fermilab ID and computing accounts (can take one month). If already a Fermilab user, fill out the 'Update my Affiliation/Experiment/Collaboration Membership Request Form', click 'Add', enter 'MU2E', and add work locations. Then follow the Day 1 CheckList.",
+      "bucket": "procedural",
+      "source_document_id": "27ec798c-66ea-4d56-b7cf-e53437c7dd13",
+      "expected_source": "mu2e-wiki/ComputingAccounts"
+    },
+    {
+      "question": "How do I authenticate with Kerberos at Fermilab?",
+      "answer": "Use your Fermilab kerberos principal (xyz@FNAL.GOV, where xyz is your Fermilab username) and kerberos password to log into lab-supplied linux computing resources. This is separate from SSO, CILogon, and Hypernews identities.",
+      "bucket": "procedural",
+      "source_document_id": "9977218a-cf2d-4669-808c-000bd46aa7fe",
+      "expected_source": "mu2e-wiki/Authentication"
+    },
+    {
+      "question": "What are all the subsystems of the Mu2e detector?",
+      "answer": "The Mu2e detector subsystems include: Proton Beam, Production Solenoid, Production Target, Extinction Monitor, Transport Solenoid, Detector Solenoid, Muon Stopping Target, Tracker, Calorimeter, Cosmic Ray Veto, Stopping Target Monitor, Trigger and DAQ, Muon Beamline, Shielding, and Detector Control System.",
+      "bucket": "synthesis",
+      "source_document_id": "563b0a82-dda2-4772-b4cd-bd97e8b2aef8",
+      "expected_source": "mu2e-wiki/DetectorIntro"
+    },
+    {
+      "question": "How do the solenoids work together in the Mu2e beamline?",
+      "answer": "The Production Solenoid captures pions and muons from proton-target interactions, the Transport Solenoid (S-shaped) selects charge and momentum to transport low-energy muons while filtering out other particles, and the Detector Solenoid provides a 1 Tesla field housing the stopping target, tracker, and calorimeter for measuring conversion electrons.",
+      "bucket": "synthesis",
+      "source_document_id": "563b0a82-dda2-4772-b4cd-bd97e8b2aef8",
+      "expected_source": "mu2e-wiki/DetectorIntro"
+    },
+    {
+      "question": "What are the main physics backgrounds and how are they simulated?",
+      "answer": "The main backgrounds are DIO (muon decay in orbit producing near-signal-energy electrons), Radiative Pion Capture (pion capture producing photons that pair-produce electrons), Cosmic Ray muons/electrons, Radiative Muon Capture (muon capture producing photons), and Delayed beamline particles. These are studied with dedicated simulations of particle energies and rates.",
+      "bucket": "synthesis",
+      "source_document_id": "72b9e618-791e-490f-bc63-993711d95fa1",
+      "expected_source": "mu2e-wiki/BackgroundsPhysIntro"
+    },
+    {
+      "question": "What software tools are available for Mu2e analysis?",
+      "answer": "Mu2e uses the art framework for event processing with FHiCL configuration, Muse for building code, git/GitHub for version control, CVMFS for code distribution, ROOT for analysis and histogramming, and several event displays. Grid computing is available via mu2egrid for large-scale production.",
+      "bucket": "synthesis",
+      "source_document_id": "56f8b6e0-31e4-4a33-9290-b2f82d97452b",
+      "expected_source": "mu2e-wiki/Analysis_Tools"
+    },
+    {
+      "question": "Compare the tracker and calorimeter data processing pipelines",
+      "answer": "The tracker measures charged particle momentum via straw tube hits in a 1 Tesla field, while the calorimeter measures energy and timing using 674 CsI crystals in two disks. The calorimeter provides independent confirmation of tracker momentum measurements and uses its superior timing resolution (~0.5 ns) to reject out-of-time backgrounds.",
+      "bucket": "synthesis",
+      "source_document_id": null,
+      "expected_source": "mu2e-wiki/CalorimeterIntro + mu2e-wiki/TrackerIntro"
+    },
+    {
+      "question": "What computing infrastructure does Mu2e use?",
+      "answer": "Mu2e uses Kerberos and certificate-based authentication, interactive mu2egpvm machines with VPN and remote desktop access, FermiCloud OpenStack VMs, disk storage with monitoring, CVMFS for code distribution, grid computing for batch jobs, and a dedicated mu2epro account for production operations.",
+      "bucket": "synthesis",
+      "source_document_id": "9bfa4a0b-9ce8-403b-a3f1-c5cd1120bd73",
+      "expected_source": "mu2e-wiki/ComputingInfrastructure"
+    },
+    {
+      "question": "How does the Mu2e code distribution system work?",
+      "answer": "Code is managed via git in the Mu2e GitHub organization, built using Muse with scons, and distributed via CVMFS (published releases at /cvmfs/mu2e.opensciencegrid.org/Offline). Additional tools include Spack for building, Jenkins for central builds, and Docker for portable containers.",
+      "bucket": "synthesis",
+      "source_document_id": "650f1c65-88c0-4692-8c9e-273e5a54b55d",
+      "expected_source": "mu2e-wiki/Code"
+    },
+    {
+      "question": "What data quality monitoring exists for the calorimeter?",
+      "answer": "The calorimeter DQM includes CaloDigiDQM which uses indexed storage for efficient monitoring of energy deposits, timing, and hit rates per crystal. It replaces the legacy CaloDQMOffline module with improved performance, avoiding repeated per-event string-heavy bookkeeping.",
+      "bucket": "synthesis",
+      "source_document_id": "1a83d3ca-316a-4421-a13b-62e9ed0132c6",
+      "expected_source": "mu2e-wiki/Calorimeter_Data_Quality"
+    },
+    {
+      "question": "What is the conditions database architecture and how is it accessed?",
+      "answer": "The conditions system uses two PostgreSQL databases (mu2e_conditions_dev and mu2e_conditions_prd), accessed via HTTP through DbService (low-level) and ProditionsService (high-level) in art jobs. Calibration tables are periodically cached on disk with CID-based filenames. Data includes detector alignment, straw gas gain, time-space relationships, SiPM gain, and ADC calibration curves.",
+      "bucket": "synthesis",
+      "source_document_id": "f9b17465-1177-455f-92a9-4c9df779cfc2",
+      "expected_source": "mu2e-wiki/ConditionsData"
+    }
+  ]
+}

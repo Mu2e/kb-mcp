@@ -56,6 +56,7 @@ from .db_models import get_eval_run, get_or_create_eval_generation
 # Metrics
 from .metrics import (
     compute_hit_rate,
+    compute_recall_at_k,
     get_rank_distribution,
     get_summary_stats,
 )
@@ -78,6 +79,7 @@ __all__ = [
     "get_or_create_eval_generation",
     # Metrics
     "compute_hit_rate",
+    "compute_recall_at_k",
     "get_rank_distribution",
     "get_summary_stats",
 ]
