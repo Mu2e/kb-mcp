@@ -261,7 +261,8 @@ def search_fulltext(
             # Sort chunks by score (best first)
             chunks.sort(key=lambda x: x["score"], reverse=True)
 
-            final_results.append({
+            from .provenance import doc_provenance
+            result_dict = {
                 "doc_uid": doc.id,
                 "doc_id": doc.doc_id,
                 "doc_source_id": doc.source_id,
@@ -270,7 +271,9 @@ def search_fulltext(
                 "best_score": chunks[0]["score"],  # Using score as similarity for fulltext
                 "chunks": chunks,
                 "document": doc,
-            })
+            }
+            result_dict.update(doc_provenance(doc))
+            final_results.append(result_dict)
 
         # Sort documents by best chunk similarity (score for fulltext)
         final_results.sort(

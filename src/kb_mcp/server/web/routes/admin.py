@@ -16,7 +16,6 @@ def setup_admin_routes(app, oauth_provider, session_manager: WebSessionManager):
     # Load API key manager directly (API keys are always available, even without OAuth)
     api_key_manager = ApiKeyManager(get_api_keys_file())
 
-    @app.route("/admin")
     async def admin_page(request):
         """Admin interface (OAuth protected, requires admin permissions)."""
         # Force re-verification on every admin page load for maximum security
@@ -94,8 +93,8 @@ def setup_admin_routes(app, oauth_provider, session_manager: WebSessionManager):
             None,
             username
         ))
+    app.add_route("/admin", admin_page)
 
-    @app.route("/admin/generate", methods=["POST"])
     async def admin_generate(request):
         """Generate API key."""
         # Force re-verification for sensitive admin operation
@@ -154,8 +153,8 @@ def setup_admin_routes(app, oauth_provider, session_manager: WebSessionManager):
                 ),
                 status_code=400
             )
+    app.add_route("/admin/generate", admin_generate, methods=["POST"])
 
-    @app.route("/admin/revoke", methods=["POST"])
     async def admin_revoke(request):
         """Revoke API key."""
         # Force re-verification for sensitive admin operation
@@ -208,3 +207,4 @@ def setup_admin_routes(app, oauth_provider, session_manager: WebSessionManager):
                 status_code=400
             )
 
+    app.add_route("/admin/revoke", admin_revoke, methods=["POST"])

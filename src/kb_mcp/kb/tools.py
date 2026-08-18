@@ -6,6 +6,7 @@ import shutil
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Union
 
+from sqlalchemy import inspect as sqlalchemy_inspect
 from tqdm import tqdm
 
 from .database import get_db_session
@@ -776,6 +777,14 @@ def embed_all(
         )
 
         if embedding_table is not None:
+            # Handle bootstrap case where config exists but table was never created.
+            inspector = sqlalchemy_inspect(session.bind)
+            if embedding_table.name not in inspector.get_table_names():
+                logger.info(
+                    f"Embedding table '{embedding_table.name}' missing; creating it now"
+                )
+                embedding_table.create(bind=session.bind, checkfirst=True)
+
             # Do LEFT JOIN to find chunks without embeddings
             query = query.outerjoin(
                 embedding_table,
@@ -897,6 +906,7 @@ def summarize_all(
     embedding_model: Optional[str] = None,
     parser_name: Optional[str] = None,
     batch_size: int = 10,
+    doc_types: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """Generate summaries for all documents from a source that don't have them yet.
 
@@ -912,6 +922,13 @@ def summarize_all(
         embedding_provider: Optional embedding provider (used if embed_summary_chunk=True and embedding_name not provided)
         embedding_model: Optional embedding model (used if embed_summary_chunk=True and embedding_name not provided)
         parser_name: Optional parser ID to filter documents by (e.g., "marker", "nougat", "docling").
+        batch_size: Commit summaries to the DB every N documents (default: 10).
+        doc_types: Optional list of doc_types to summarise. Default ``["text"]`` —
+            i.e., only the parent text doc per PDF/PPTX, not its section/table
+            children. Pass ``None`` plus an explicit override to include
+            structural records (e.g., ``["text", "section", "table"]``) — at
+            production scale this can be 30× more LLM calls. ``"image"`` records
+            are always excluded (their description already lives in ``text``).
 
     Returns:
         Dictionary with:
@@ -925,21 +942,27 @@ def summarize_all(
     Example:
         ```python
         from kb_mcp.kb.tools import summarize_all
-        # Generate summaries and create chunks (but don't embed yet)
+        # Default: only doc_type='text' parents
         result = summarize_all("inspire-hep", create_summary_chunk=True)
         print(f"Summarized {result['summarized']} documents, created {result['chunked']} chunks")
 
-        # Generate summaries and create+embed chunks
-        result = summarize_all("inspire-hep", create_summary_chunk=True, embed_summary_chunk=True)
+        # Include section + table records too (heavy)
+        result = summarize_all("inspire-hep", doc_types=["text", "section", "table"])
         ```
     """
     # Summary module availability is checked by doc.generate_summary()
 
-    logger.info(f"Starting summarize_all for source_id: {source_id}" + (f", parser_name: {parser_name}" if parser_name else ""))
+    if doc_types is None:
+        doc_types = ["text"]
+
+    logger.info(
+        f"Starting summarize_all for source_id={source_id} doc_types={doc_types}"
+        + (f", parser_name={parser_name}" if parser_name else "")
+    )
 
     with get_db_session() as session:
         # Find documents without summaries
-        # Exclude image documents - they already have descriptions in their text field
+        # Image documents always excluded — their description lives in `text`.
         from sqlalchemy import or_
         query = session.query(Document).filter(
             Document.source_id == source_id,
@@ -949,7 +972,8 @@ def summarize_all(
                 Document.summary.is_(None),
                 Document.summary == ""
             ),  # No summary yet (None or empty string)
-            Document.doc_type != "image"
+            Document.doc_type != "image",
+            Document.doc_type.in_(doc_types),
         )
 
         if parser_name is not None:
@@ -1452,5 +1476,3 @@ def export_source(
         "skipped_needs_review": skipped_needs_review,
         "errors": errors,
     }
-
-

@@ -294,6 +294,7 @@ def cmd_summarize_all(args):
             embedding_model=args.embedding_model,
             parser_name=args.parser_name,
             batch_size=args.batch_size,
+            doc_types=args.doc_types,
         )
 
         print(f"\n  Completed:")
@@ -1240,6 +1241,13 @@ def setup_commands(subparsers):
         type=int,
         default=10,
         help="Commit to DB every N successfully summarized documents (default: 10)"
+    )
+    summarize_all_parser.add_argument(
+        "--doc-types",
+        nargs="+",
+        default=["text"],
+        help="doc_types to summarise (default: text). Pass space-separated to include "
+             "more, e.g. --doc-types text section table. Image records are always excluded."
     )
     summarize_all_parser.set_defaults(func=cmd_summarize_all)
 

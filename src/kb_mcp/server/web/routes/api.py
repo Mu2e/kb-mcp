@@ -21,7 +21,6 @@ def setup_api_routes(app, session_manager: WebSessionManager):
     upload_dir = Path(data_dir) / "uploads"
     upload_dir.mkdir(parents=True, exist_ok=True)
 
-    @app.route("/api/get")
     async def api_get(request: Request):
         """JSON API endpoint for getting documents with filters."""
         # Check authentication first
@@ -165,8 +164,8 @@ def setup_api_routes(app, session_manager: WebSessionManager):
                 {"error": str(e)},
                 status_code=500
             )
+    app.add_route("/api/get", api_get)
 
-    @app.route("/api/document/{doc_id}")
     async def api_document(request: Request):
         """JSON API endpoint for getting a single document."""
         # Check authentication first
@@ -198,8 +197,8 @@ def setup_api_routes(app, session_manager: WebSessionManager):
                 {"error": str(e)},
                 status_code=500
             )
+    app.add_route("/api/document/{doc_id}", api_document)
 
-    @app.route("/api/statistics")
     async def api_statistics(request: Request):
         """JSON API endpoint for getting statistics grid."""
         # Check authentication first
@@ -228,8 +227,8 @@ def setup_api_routes(app, session_manager: WebSessionManager):
                 {"error": str(e)},
                 status_code=500
             )
+    app.add_route("/api/statistics", api_statistics)
 
-    @app.route("/api/document/{doc_id}/chunks")
     async def api_get_chunks(request: Request):
         """JSON API endpoint for getting chunks for a document."""
         # Check authentication first
@@ -277,8 +276,8 @@ def setup_api_routes(app, session_manager: WebSessionManager):
                 {"error": str(e)},
                 status_code=500
             )
+    app.add_route("/api/document/{doc_id}/chunks", api_get_chunks)
 
-    @app.route("/api/options")
     async def api_options(request: Request):
         """JSON API endpoint for getting filter options with filtered counts."""
         # Check authentication first
@@ -350,8 +349,8 @@ def setup_api_routes(app, session_manager: WebSessionManager):
                 {"error": str(e)},
                 status_code=500
             )
+    app.add_route("/api/options", api_options)
 
-    @app.route("/files/image/{doc_id}")
     async def api_image(request: Request):
         """Serve image binary data."""
         # Check authentication first
@@ -401,8 +400,8 @@ def setup_api_routes(app, session_manager: WebSessionManager):
                 status_code=500,
                 media_type="text/plain"
             )
+    app.add_route("/files/image/{doc_id}", api_image)
 
-    @app.route("/files/uploaded/{filename}")
     async def serve_uploaded_file(request: Request):
         """Serve uploaded files from data/uploads directory."""
         # Check authentication first
@@ -454,8 +453,8 @@ def setup_api_routes(app, session_manager: WebSessionManager):
                 status_code=500,
                 media_type="text/plain"
             )
+    app.add_route("/files/uploaded/{filename}", serve_uploaded_file)
 
-    @app.route("/files/local/{filename}")
     async def serve_local_file(request: Request):
         """Serve local files from data/sources directory."""
         # Check authentication first
@@ -511,8 +510,8 @@ def setup_api_routes(app, session_manager: WebSessionManager):
                 status_code=500,
                 media_type="text/plain"
             )
+    app.add_route("/files/local/{filename}", serve_local_file)
 
-    @app.route("/api/search")
     async def api_search(request: Request):
         """JSON API endpoint for search (hybrid, semantic, or fulltext)."""
         # Check authentication first
@@ -629,8 +628,8 @@ def setup_api_routes(app, session_manager: WebSessionManager):
                 {"error": str(e)},
                 status_code=500
             )
+    app.add_route("/api/search", api_search)
 
-    @app.route("/api/metadata-keys")
     async def api_metadata_keys(request: Request):
         """JSON API endpoint for getting all available metadata keys."""
         # Check authentication first
@@ -654,8 +653,8 @@ def setup_api_routes(app, session_manager: WebSessionManager):
                 {"error": str(e)},
                 status_code=500
             )
+    app.add_route("/api/metadata-keys", api_metadata_keys)
 
-    @app.route("/api/logs/{doc_id}")
     async def api_logs_document(request: Request):
         """JSON API endpoint for getting all logs for a document."""
         # Check authentication first
@@ -676,8 +675,8 @@ def setup_api_routes(app, session_manager: WebSessionManager):
                 {"error": str(e)},
                 status_code=500
             )
+    app.add_route("/api/logs/{doc_id}", api_logs_document)
 
-    @app.route("/api/logs")
     async def api_logs(request: Request):
         """JSON API endpoint for getting search logs with filters."""
         # Check authentication first
@@ -721,8 +720,8 @@ def setup_api_routes(app, session_manager: WebSessionManager):
                 {"error": str(e)},
                 status_code=500
             )
+    app.add_route("/api/logs", api_logs)
 
-    @app.route("/api/similar")
     async def api_similar(request: Request):
         """JSON API endpoint for finding similar documents to a chunk or document."""
         # Check authentication first
@@ -816,8 +815,8 @@ def setup_api_routes(app, session_manager: WebSessionManager):
                 {"error": str(e)},
                 status_code=500
             )
+    app.add_route("/api/similar", api_similar)
 
-    @app.route("/api/graph/node")
     async def api_graph_node(request: Request):
         """JSON API endpoint for getting node information."""
         # Check authentication first
@@ -872,8 +871,8 @@ def setup_api_routes(app, session_manager: WebSessionManager):
                 {"error": str(e)},
                 status_code=500
             )
+    app.add_route("/api/graph/node", api_graph_node)
 
-    @app.route("/api/graph/paths")
     async def api_graph_paths(request: Request):
         """JSON API endpoint for finding paths between two nodes."""
         # Check authentication first
@@ -925,3 +924,4 @@ def setup_api_routes(app, session_manager: WebSessionManager):
                 status_code=500
             )
 
+    app.add_route("/api/graph/paths", api_graph_paths)

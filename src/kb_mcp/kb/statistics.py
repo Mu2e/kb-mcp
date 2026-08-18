@@ -159,19 +159,25 @@ def get_statistics(
             doc_query = doc_query.filter(Document.doc_type == doc_type)
         total_documents_count = doc_query.count()
         
-        # Count documents without chunks
-        # Get all document IDs that have chunks (with filters)
-        chunked_doc_ids = sess.query(Chunk.document_id).distinct()
-        if source_id or doc_type:
-            chunked_doc_ids = chunked_doc_ids.join(Document)
-            if source_id:
-                chunked_doc_ids = chunked_doc_ids.filter(Document.source_id == source_id)
-            if doc_type:
-                chunked_doc_ids = chunked_doc_ids.filter(Document.doc_type == doc_type)
-        chunked_doc_ids_set = set(row[0] for row in chunked_doc_ids.all())
-        
-        # Documents without chunks = total documents - documents with chunks
-        documents_without_chunks = total_documents_count - len(chunked_doc_ids_set)
+        # Count text documents without chunks (exclude images — they aren't chunked)
+        text_doc_query = sess.query(Document).filter(Document.doc_type != 'image')
+        if source_id:
+            text_doc_query = text_doc_query.filter(Document.source_id == source_id)
+        if doc_type:
+            text_doc_query = text_doc_query.filter(Document.doc_type == doc_type)
+        total_text_documents = text_doc_query.count()
+
+        chunked_doc_ids = sess.query(Chunk.document_id).distinct().join(
+            Document, Chunk.document_id == Document.id
+        ).filter(Document.doc_type != 'image')
+        if source_id:
+            chunked_doc_ids = chunked_doc_ids.filter(Document.source_id == source_id)
+        if doc_type:
+            chunked_doc_ids = chunked_doc_ids.filter(Document.doc_type == doc_type)
+        chunked_doc_ids_count = chunked_doc_ids.count()
+
+        # Documents without chunks = text documents - text documents with chunks
+        documents_without_chunks = total_text_documents - chunked_doc_ids_count
         
         # Count chunks without embeddings for each embedding type
         chunks_without_embeddings = {}

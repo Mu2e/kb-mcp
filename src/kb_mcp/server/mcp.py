@@ -279,7 +279,8 @@ def kb_search(
     query: str,
     max_results: int = 5,
     search_type: str = "hybrid",
-    search_filter: str | None = None,
+    search_filter: dict | None = None,
+    rerank: bool | None = None,
 ) -> str:
     """Search documents in the knowledge base.
 
@@ -291,6 +292,8 @@ def kb_search(
         max_results: Max documents to return (default: 5)
         search_type: "hybrid" (recommended), "semantic", or "fulltext" (default: "hybrid")
         search_filter: Optional JSON filter, e.g. `{"term": {"source_id": "inspire-sld"}}`
+        rerank: Whether to apply cross-encoder reranking (default: None = use server config).
+                Set True to force reranking, False to disable.
 
     Returns:
         JSON with results in [[DOCUMENT_METADATA]]/[[CONTENT_START]] blocks.
@@ -302,10 +305,13 @@ def kb_search(
     try:
         filter_dict = None
         if search_filter:
-            try:
-                filter_dict = json.loads(search_filter)
-            except json.JSONDecodeError as e:
-                return json.dumps({"error": f"Invalid filter JSON: {e}"}, indent=2)
+            if isinstance(search_filter, dict):
+                filter_dict = search_filter
+            elif isinstance(search_filter, str):
+                try:
+                    filter_dict = json.loads(search_filter)
+                except json.JSONDecodeError as e:
+                    return json.dumps({"error": f"Invalid filter JSON: {e}"}, indent=2)
 
         # Select search function based on type
         if search_type == "semantic":
@@ -315,11 +321,40 @@ def kb_search(
         else:  # hybrid (default)
             search_fn = search
 
-        response = search_fn(
+        # Apply query router if enabled and using hybrid search
+        route_info = None
+        doc_type_boost = None
+        if search_fn is search:
+            from ..config import get_search_config
+            search_config = get_search_config()
+            if search_config.get('router_enabled', False):
+                from ..kb.search.router import get_router
+                router = get_router()
+                route = router.route(query)
+                route_info = {"query_type": route.query_type.value, "reasoning": route.reasoning}
+                # Router overrides defaults unless caller explicitly set them
+                if max_results == 5:  # default value — let router override
+                    max_results = route.max_results
+                if rerank is None:
+                    rerank = route.rerank
+                # doc_type boost: e.g. {"table": 1.7} for table-shaped queries.
+                # search_hybrid applies it after RRF.
+                doc_type_boost = route.doc_type_boost
+
+        # Build search kwargs
+        search_kwargs = dict(
             query=query,
             max_results=max_results,
             filter=filter_dict,
         )
+        # Only pass rerank / doc_type_boost to hybrid search (which supports them).
+        if search_fn is search:
+            if rerank is not None:
+                search_kwargs["rerank"] = rerank
+            if doc_type_boost:
+                search_kwargs["doc_type_boost"] = doc_type_boost
+
+        response = search_fn(**search_kwargs)
 
         results = response.get("results", [])
 
@@ -328,10 +363,14 @@ def kb_search(
 
         formatted_results = _format_search_results(results)
 
-        return json.dumps({
+        result_json = {
             "count": len(formatted_results),
             "results": formatted_results,
-        }, indent=2)
+        }
+        if route_info:
+            result_json["route"] = route_info
+
+        return json.dumps(result_json, indent=2)
 
     except Exception as e:
         logger.error(f"Error in kb_search: {e}", exc_info=True)

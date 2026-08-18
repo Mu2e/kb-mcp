@@ -342,6 +342,7 @@ def search(
     rrf_k: Optional[int] = None,
     explain_analyse: bool = False,
     max_chunks_per_doc: Optional[int] = None,
+    rerank: Optional[bool] = None,
     **kwargs
 ) -> Dict[str, Any]:
     """
@@ -432,6 +433,7 @@ def search(
         rrf_k=rrf_k,
         explain_analyse=explain_analyse,
         max_chunks_per_doc=max_chunks_per_doc,
+        rerank=rerank,
         **kwargs
     )
 

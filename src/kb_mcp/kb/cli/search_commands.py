@@ -7,6 +7,20 @@ from ..search import search, get_similar
 from ..logs import get_search_logs
 
 
+def _score(chunk):
+    """Render whichever score key the search backend put on the chunk.
+
+    Hybrid-search results carry `rrf_score` (and `rerank_score` when the
+    cross-encoder fired), semantic-only results carry `similarity`.
+    Surface whichever is present so the renderer works for all three
+    search variants without KeyErroring.
+    """
+    for k in ("rerank_score", "rrf_score", "similarity"):
+        if k in chunk:
+            return f"{k}={chunk[k]:.4f}"
+    return "(no score)"
+
+
 def cmd_search(args):
     """Search for documents using vector similarity."""
     try:
@@ -55,14 +69,14 @@ def cmd_search(args):
             if doc.doc_type:
                 print(f"   Type: {doc.doc_type}")
             if doc_result['chunks']:
-                print(f"   Best similarity: {doc_result['chunks'][0]['similarity']:.4f}")
+                print(f"   Best score: {_score(doc_result['chunks'][0])}")
             print(f"   Matching chunks: {len(doc_result['chunks'])}")
 
             # Show top chunks
             if doc_result['chunks']:
                 print("   Top chunks:")
                 for chunk in doc_result['chunks'][:3]:  # Show top 3
-                    print(f"     - Chunk #{chunk.get('chunk_index', '?')}: similarity={chunk['similarity']:.4f}")
+                    print(f"     - Chunk #{chunk.get('chunk_index', '?')}: {_score(chunk)}")
                 if len(doc_result['chunks']) > 3:
                     print(f"     ... and {len(doc_result['chunks']) - 3} more")
             print()
@@ -132,14 +146,14 @@ def cmd_similar(args):
             if doc.doc_type:
                 print(f"   Type: {doc.doc_type}")
             if doc_result['chunks']:
-                print(f"   Best similarity: {doc_result['chunks'][0]['similarity']:.4f}")
+                print(f"   Best score: {_score(doc_result['chunks'][0])}")
             print(f"   Matching chunks: {len(doc_result['chunks'])}")
 
             # Show top chunks
             if doc_result['chunks']:
                 print("   Top chunks:")
                 for chunk in doc_result['chunks'][:3]:  # Show top 3
-                    print(f"     - Chunk #{chunk.get('chunk_index', '?')}: similarity={chunk['similarity']:.4f}")
+                    print(f"     - Chunk #{chunk.get('chunk_index', '?')}: {_score(chunk)}")
                 if len(doc_result['chunks']) > 3:
                     print(f"     ... and {len(doc_result['chunks']) - 3} more")
             print()

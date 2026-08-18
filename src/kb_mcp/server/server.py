@@ -10,6 +10,7 @@ project_root = Path(__file__).parent.parent.parent.parent
 env_path = project_root / ".env"
 load_dotenv(env_path)
 
+import contextlib
 import logging
 from mcp.server.fastmcp import FastMCP
 from mcp.server.auth.settings import AuthSettings, ClientRegistrationOptions
@@ -259,16 +260,24 @@ app.add_route("/status", status_responder)
 setup_web_routes(app, oauth_provider, web_session_manager)
 
 
-# Startup event to initialize background tasks
-@app.on_event("startup")
-async def startup_event():
-    """Start background tasks when the server starts."""
-    import asyncio
+# Startup hook to initialize background tasks. Starlette 1.0 removed
+# app.on_event — wrap the app's existing lifespan context instead.
+_inner_lifespan = app.router.lifespan_context
 
-    # Start chat cleanup task if it exists
-    if hasattr(app.state, 'chat_cleanup_task'):
-        asyncio.create_task(app.state.chat_cleanup_task())
-        logger.info("Started chat session cleanup background task")
+
+@contextlib.asynccontextmanager
+async def _lifespan_with_startup(app_):
+    async with _inner_lifespan(app_):
+        import asyncio
+
+        # Start chat cleanup task if it exists
+        if hasattr(app_.state, 'chat_cleanup_task'):
+            asyncio.create_task(app_.state.chat_cleanup_task())
+            logger.info("Started chat session cleanup background task")
+        yield
+
+
+app.router.lifespan_context = _lifespan_with_startup
 
 
 def main():

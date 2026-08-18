@@ -221,7 +221,8 @@ def _search_pgvector(
         # Sort chunks by similarity (best first)
         chunks.sort(key=lambda x: x["similarity"], reverse=True)
 
-        final_results.append({
+        from .provenance import doc_provenance
+        result_dict = {
             "doc_uid": doc.id,
             "doc_id": doc.doc_id,
             "doc_source_id": doc.source_id,
@@ -230,7 +231,9 @@ def _search_pgvector(
             "best_similarity": chunks[0]["similarity"],
             "chunks": chunks,
             "document": doc,
-        })
+        }
+        result_dict.update(doc_provenance(doc))
+        final_results.append(result_dict)
 
     # Sort documents by best chunk similarity
     final_results.sort(
