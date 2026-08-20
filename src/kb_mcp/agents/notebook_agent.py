@@ -16,6 +16,11 @@ logger = logging.getLogger(__name__)
 class NotebookAgent(BaseAgent):
     """Worker agent that maintains a persistent notebook state."""
 
+    # Workers must not be able to call back into kb_research: it spawns a
+    # NotebookAgent itself, so exposing it here would let a worker recursively
+    # spawn unbounded research jobs outside of the depth/max_depth guard.
+    EXCLUDED_TOOLS = {"kb_research"}
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.notebook = "(Notebook is empty)"
@@ -41,6 +46,8 @@ class NotebookAgent(BaseAgent):
         self.tools = []
         tool_names = []
         for t in mcp_tools_list.tools:
+            if t.name in self.EXCLUDED_TOOLS:
+                continue
             self.tools.append({
                 "type": "function",
                 "function": {
@@ -50,12 +57,20 @@ class NotebookAgent(BaseAgent):
                 }
             })
             tool_names.append(t.name)
-            
-        self.info(f"NotebookAgent initialized with tools: {', '.join(tool_names)}")        
 
-    async def run(self, query: str, model: str = "gpt-oss-120b") -> str:
+        self.info(f"NotebookAgent initialized with tools: {', '.join(tool_names)}")
+
+    async def run(self, query: str, model: str = "gpt-oss-120b", history: list | None = None) -> str:
         """Execute the notebook loop."""
-        self.info(f"starting NotebookAgent task: \"{query}\"")
+        self.info(f"starting NotebookAgent task: \"{query[:100]}...\"")
+
+        if history:
+            prior = "\n".join(
+                f"{'User' if m['role'] == 'user' else 'Assistant'}: {m['content']}"
+                for m in history if m["role"] in ("user", "assistant")
+            )
+            query = f"Previous conversation:\n{prior}\n\nCurrent task: {query}"
+
         self.notebook = "(Initial empty notebook)"
         self.call_log = []
 
@@ -147,7 +162,19 @@ class NotebookAgent(BaseAgent):
             for i, result_parts in enumerate(tool_results_map):
                 tc = message.tool_calls[i]
                 fname = tc.function.name
-                
+
+                # Emit result for UI display
+                if isinstance(result_parts, list):
+                    result_text = "\n".join(p["text"] for p in result_parts if isinstance(p, dict) and p.get("type") == "text")
+                else:
+                    result_text = str(result_parts)
+                await self.emit_event({
+                    "type": "tool_result",
+                    "tool_id": tc.id,
+                    "tool_name": fname,
+                    "result": result_text[:2000] + ("…" if len(result_text) > 2000 else ""),
+                })
+
                 # Header for the tool result
                 header_text = f"\n\n--- Result from {fname} (ID: {tc.id}) ---"
                 tool_outputs_content.append({

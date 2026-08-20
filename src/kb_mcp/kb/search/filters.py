@@ -5,6 +5,12 @@ from sqlalchemy import func, and_, or_
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.orm import aliased
 
+# Fields that are real Document columns rather than keys inside the JSON `meta` blob.
+DIRECT_COLUMNS = {
+    "insert_time", "creating_time", "update_time",
+    "source_id", "doc_type", "doc_id", "title", "title_gen",
+}
+
 
 def _parse_elasticsearch_filter(
     doc_alias: Any,
@@ -99,8 +105,7 @@ def _parse_elasticsearch_filter(
 
             field, value = next(iter(term_query.items()))
             # Check if this is a direct Document column vs metadata field
-            direct_columns = {"insert_time", "creating_time", "update_time", "source_id", "doc_type", "doc_id"}
-            if field in direct_columns:
+            if field in DIRECT_COLUMNS:
                 return getattr(doc_alias, field) == value
             return build_meta_filter(field, value, operator="==")
 
@@ -115,8 +120,7 @@ def _parse_elasticsearch_filter(
                 raise ValueError("terms query value must be a list")
 
             # Check if this is a direct Document column vs metadata field
-            direct_columns = {"insert_time", "creating_time", "update_time", "source_id", "doc_type", "doc_id"}
-            if field in direct_columns:
+            if field in DIRECT_COLUMNS:
                 # Create OR condition for direct column
                 conditions = [getattr(doc_alias, field) == value for value in values]
             else:
@@ -134,10 +138,8 @@ def _parse_elasticsearch_filter(
             if not isinstance(range_params, dict):
                 raise ValueError("range parameters must be a dictionary")
 
-            # Check if this is a direct Document column (insert_time, creating_time, update_time, source_id, doc_type, doc_id)
-            # vs a metadata field
-            direct_columns = {"insert_time", "creating_time", "update_time", "source_id", "doc_type", "doc_id"}
-            is_direct_column = field in direct_columns
+            # Check if this is a direct Document column vs a metadata field
+            is_direct_column = field in DIRECT_COLUMNS
 
             conditions = []
             if "gte" in range_params:
@@ -173,6 +175,8 @@ def _parse_elasticsearch_filter(
                 raise ValueError("match query must have exactly one field")
 
             field, value = next(iter(match_query.items()))
+            if field in DIRECT_COLUMNS:
+                return getattr(doc_alias, field).like(f"%{value}%")
             return _build_metadata_filter(doc_alias, field, f"%{value}%", dialect_name, operator="LIKE")
 
         # Handle wildcard query: pattern match with * and ? wildcards
@@ -196,6 +200,8 @@ def _parse_elasticsearch_filter(
 
             # Convert Elasticsearch wildcards (*, ?) to SQL wildcards (%, _)
             sql_pattern = pattern.replace("*", "%").replace("?", "_")
+            if field in DIRECT_COLUMNS:
+                return getattr(doc_alias, field).like(sql_pattern)
             return _build_metadata_filter(doc_alias, field, sql_pattern, dialect_name, operator="LIKE")
 
         raise ValueError(f"Unknown filter type: {filter_dict.keys()}. Supported: term, terms, range, match, wildcard, bool")
@@ -316,14 +322,16 @@ def get_filters_fallback(
             filters.append(es_filter)
 
     # Handle simple kwargs (backward compatibility)
-    # Direct field names are treated as metadata filters
+    # Direct field names are treated as metadata filters, unless they name a real column
     for key, value in kwargs.items():
         # Skip reserved parameters
         if key in ("session", "explain_analyse", "embedding_name", "max_results"):
             continue
 
-        # Treat as metadata filter
-        filter_cond = _build_metadata_filter(doc_alias, key, value, dialect_name, operator="==")
+        if key in DIRECT_COLUMNS:
+            filter_cond = getattr(doc_alias, key) == value
+        else:
+            filter_cond = _build_metadata_filter(doc_alias, key, value, dialect_name, operator="==")
         filters.append(filter_cond)
 
     return filters

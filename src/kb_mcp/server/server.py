@@ -117,32 +117,10 @@ from .web import WebSessionManager, setup_shared_auth_routes, setup_web_routes
 
 web_session_manager = WebSessionManager(oauth_provider)
 
-# Root/Status responders need access to oauth_provider and web_session_manager
+# Root responder redirects to the Knowledge Base Explorer (the web UI landing page)
 async def root_responder(request):
-    from .web import html_templates
-    active_sessions = await oauth_provider.get_active_sessions_count() if oauth_provider else 0
-    username = await web_session_manager.get_session_username(request)
-    # Get required repo/group and provider info for display
-    required_access = None
-    provider_display = None
-    if oauth_provider:
-        if isinstance(oauth_provider, GitHubOAuthProvider):
-            required_access = oauth_provider.required_repo
-            provider_display = "GitHub"
-        elif isinstance(oauth_provider, GlobusOAuthProvider):
-            required_access = oauth_provider.required_group
-            provider_display = "Globus"
-        else:
-            # API-key-only mode
-            provider_display = "API Key Only"
-    else:
-        provider_display = "Disabled"
-    from starlette.responses import HTMLResponse
-    return HTMLResponse(
-        html_templates.root_page(
-            active_sessions, required_access, username, provider_display
-        )
-    )
+    from starlette.responses import RedirectResponse
+    return RedirectResponse(url="/web?doc_type=text")
 
 async def status_responder(request):
     from .web import html_templates
@@ -282,29 +260,30 @@ app.router.lifespan_context = _lifespan_with_startup
 
 def main():
     """Run the server."""
+    import asyncio
     import uvicorn
-    
+
     if auth_config['disable_auth'] == True and USE_HTTPS:
         logger.warning("Authentication is disabled but HTTPS is enabled. Is this intended?")
         logger.warning("HTTPS is only needed if authentication is enabled.")
         logger.warning("To disable HTTPS, set USE_HTTPS=false in .env")
 
-    if USE_HTTPS:
-        uvicorn.run(
-            app,
-            host=HOST,
-            port=PORT,
-            ssl_keyfile="certs/key.pem",
-            ssl_certfile="certs/cert.pem",
-            log_level="debug",
-        )
-    else:
-        uvicorn.run(
-            app,
-            host=HOST,
-            port=PORT,
-            log_level="debug",
-        )
+    async def _serve():
+        # Start chat cleanup background task if registered
+        if hasattr(app.state, 'chat_cleanup_task'):
+            asyncio.create_task(app.state.chat_cleanup_task())
+            logger.info("Started chat session cleanup background task")
+
+        kwargs = dict(host=HOST, port=PORT, log_level="debug")
+        if USE_HTTPS:
+            kwargs["ssl_keyfile"] = "certs/key.pem"
+            kwargs["ssl_certfile"] = "certs/cert.pem"
+
+        config = uvicorn.Config(app, **kwargs)
+        server = uvicorn.Server(config)
+        await server.serve()
+
+    asyncio.run(_serve())
 
 
 if __name__ == "__main__":

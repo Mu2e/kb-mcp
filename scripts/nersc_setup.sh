@@ -8,13 +8,16 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
 fi
 
 DO_UPDATE=false
-DO_DB=true
+DB_MODE="remote"   # remote (default) | local | none
 for arg in "$@"; do
     if [[ "$arg" == "--pull" ]] || [[ "$arg" == "--update" ]]; then
         DO_UPDATE=true
     fi
     if [[ "$arg" == "--no-db" ]]; then
-        DO_DB=false
+        DB_MODE="none"
+    fi
+    if [[ "$arg" == "--local-db" ]]; then
+        DB_MODE="local"
     fi
 done
 
@@ -28,7 +31,7 @@ SHARED_SECRETS="/global/cfs/cdirs/$PROJECT_ID/secrets/kb-mcp.env" # fallback if 
 # --- Paths ---
 # User specific directory in "software" for faster loading
 SOFTWARE_BASE="/global/common/software/$PROJECT_ID/$USER"
-VENV_PATH="$SOFTWARE_BASE/${REPO_NAME}-venv"
+VENV_PATH="$SOFTWARE_BASE/${REPO_NAME}-venv2"
 SCRATCH_REPO="$SCRATCH/$REPO_NAME"
 DATA_PERSISTENT="$CFS/$PROJECT_ID/$USER/${REPO_NAME}-data"
 
@@ -154,8 +157,34 @@ if [[ -n "$PS1" ]]; then
 fi
 
 # --- Start the database ---
-if [ "$DO_DB" = true ]; then
+if [ "$DB_MODE" = "local" ]; then
     source "$SCRATCH_REPO/scripts/nersc_setup_db.sh"
+elif [ "$DB_MODE" = "remote" ]; then
+    # Default: propagate DB settings from the shared secrets file into .env.local (non-destructive)
+    PROJECT_SECRETS="/global/cfs/cdirs/${PROJECT_ID}/secrets/kb-mcp.env"
+    _env_local_file="$HOME/.kb-mcp.env.local"
+    if [ -f "$PROJECT_SECRETS" ]; then
+        _set_if_missing() {
+            local key=$1 val=$2
+            if ! grep -q "^$key=" "$_env_local_file" 2>/dev/null; then
+                echo "$key=$val" >> "$_env_local_file"
+            fi
+        }
+        while IFS= read -r line; do
+            [[ "$line" =~ ^# ]] || [[ -z "$line" ]] && continue
+            key="${line%%=*}"
+            val="${line#*=}"
+            case "$key" in
+                DB_HOST|DB_PORT|DB_USER|DB_PASSWORD|DB_NAME|DB_URL)
+                    _set_if_missing "$key" "$val" ;;
+            esac
+        done < "$PROJECT_SECRETS"
+        unset -f _set_if_missing
+        echo "Database: DB settings from $PROJECT_SECRETS written to $HOME/.kb-mcp.env.local (if not already set)"
+    else
+        echo "Warning: No shared secrets file found at $PROJECT_SECRETS — skipping DB config."
+    fi
+    echo "   Use --local-db to start a local container instead."
 else
     echo "Skipping database setup (--no-db)"
 fi

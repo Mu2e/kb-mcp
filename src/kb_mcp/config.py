@@ -20,9 +20,14 @@ load_dotenv(override=True)
 # This allows users to override settings (e.g., ALCF credentials) without
 # modifying the shared .env file (which may be a symlink on NERSC)
 env_path = find_dotenv()
-if env_path:
-    local_env_path = Path(env_path).with_name(".env.local")
+local_env_path = Path(env_path).with_name(".env.local") if env_path else None
+if local_env_path:
     load_dotenv(dotenv_path=local_env_path, override=True)
+
+
+def get_env_local_path() -> Optional[str]:
+    """Path to the user-specific `.env.local` override file, if resolvable."""
+    return str(local_env_path) if local_env_path else None
 
 # --- Helpers ---
 
@@ -30,10 +35,13 @@ def _get_bool(key: str, default: bool = False) -> bool:
     return os.getenv(key, str(default)).lower() == "true"
 
 def _get_int(key: str, default: int) -> int:
-    value = os.getenv(key)
-    if value is None or value.strip() == "":
+    val = os.getenv(key)
+    if val is None or val.strip() == "":
         return default
-    return int(value)
+    # Kubernetes injects service vars like DB_PORT=tcp://10.x.x.x:5432; extract just the port
+    if val.startswith("tcp://") and ":" in val:
+        val = val.rsplit(":", 1)[-1]
+    return int(val)
 
 # --- Configuration Getters ---
 
@@ -72,25 +80,29 @@ def get_server_config() -> dict:
 
             * `base_url` (str): Server base URL (Env: `BASE_URL`, default: 'https://127.0.0.1').
             * `port` (int): Server port (Env: `PORT`, default: 8443).
-            * `host` (str): Server host (Env: `HOST`, default: '127.0.0.1').
+            * `host` (str): Server host (Env: `SERVER_HOST`, default: '127.0.0.1').
             * `use_https` (bool): Whether HTTPS is enabled (Env: `USE_HTTPS`, default: True).
             * `log_level` (str): Logging level (Env: `LOG_LEVEL`, default: 'INFO').
             * `mcp_log_level` (str): App-specific log level (Env: `MCP_LOG_LEVEL`).
             * `audit_log_file` (str): Path to audit log (Env: `AUDIT_LOG_FILE`).
             * `max_upload_size` (int): Max upload bytes (Env: `MAX_UPLOAD_SIZE`, default: 100MB).
             * `use_firestore` (bool): Use Firestore for session storage (Env: `SESSION_STORE_FIRESTORE`, default: False).
+            * `site_name` (str): Display name for the web UI (Env: `SITE_NAME`, default: 'Knowledge Base').
+            * `hide_graph` (bool): Hide the knowledge graph from the web UI and MCP tools (Env: `HIDE_GRAPH`, default: False).
     """
     log_level = os.getenv("LOG_LEVEL", "INFO").upper()
     return {
         'base_url': os.getenv("BASE_URL", "https://127.0.0.1"),
         'port': _get_int("PORT", 8443),
-        'host': os.getenv("HOST", "127.0.0.1"),
+        'host': os.getenv("SERVER_HOST", "127.0.0.1"),
         'use_https': _get_bool("USE_HTTPS", True),
         'log_level': log_level,
         'mcp_log_level': os.getenv("MCP_LOG_LEVEL", log_level).upper(),
         'audit_log_file': os.getenv("AUDIT_LOG_FILE", ""),
         'max_upload_size': _get_int("MAX_UPLOAD_SIZE", 104857600),
         'use_firestore': _get_bool("SESSION_STORE_FIRESTORE", False),
+        'site_name': os.getenv("SITE_NAME", "Knowledge Base"),
+        'hide_graph': _get_bool("HIDE_GRAPH", False),
     }
 
 # LLM

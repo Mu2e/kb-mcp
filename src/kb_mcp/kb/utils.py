@@ -274,7 +274,12 @@ def get_metadata_keys(session=None, limit: int = 1000) -> List[str]:
         
         # Sort keys alphabetically
         sorted_keys = sorted(list(all_keys))
-        return sorted_keys
+
+        # Prepend direct Document columns (title, title_gen, doc_id) so they're
+        # selectable alongside JSON meta keys, even though they aren't part of `meta`.
+        from .search.filters import DIRECT_COLUMNS
+        direct_keys = sorted(DIRECT_COLUMNS - {"source_id", "doc_type"})
+        return direct_keys + sorted_keys
     
 
 

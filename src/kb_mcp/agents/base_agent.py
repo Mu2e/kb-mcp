@@ -14,6 +14,10 @@ logger = logging.getLogger(__name__)
 class BaseAgent:
     """Base class for MCP-enabled agents."""
 
+    # Tool names that subclasses should never receive from list_tools(), e.g.
+    # long-running tools that would otherwise let a worker recursively spawn itself.
+    EXCLUDED_TOOLS: set = set()
+
     def __init__(
         self,
         session: ClientSession,
@@ -166,6 +170,8 @@ class BaseAgent:
         # However, to maintain exact parirty with the refactor:
         
         for t in mcp_tools_list.tools:
+            if t.name in self.EXCLUDED_TOOLS:
+                continue
             self.tools.append({
                 "type": "function",
                 "function": {
@@ -175,7 +181,7 @@ class BaseAgent:
                 }
             })
             tool_names.append(t.name)
-            
+
         if self.depth > 0:
              self.info(f"discovered MCP tools: {', '.join(tool_names)}")
         else:
@@ -224,8 +230,8 @@ class BaseAgent:
             
             return content_parts
         except Exception as e:
-            logger.error(f"{prefix}Tool {fname} failed: {e}")
-            return f"Error executing {fname}: {str(e)}"
+            logger.error(f"{prefix}Tool {fname} failed: {e!r}", exc_info=True)
+            return [{"type": "text", "text": f"Error executing {fname}: {e!r}"}]
     
     async def run(self, query: str, model: str = "gpt-oss-120b") -> str:
         """Abstract run method."""

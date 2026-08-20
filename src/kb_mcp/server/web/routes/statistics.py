@@ -227,4 +227,5 @@ def setup_statistics_routes(app, session_manager: WebSessionManager, require_aut
             content=content,
             username=username
         ))
+
     app.add_route("/web/statistics", web_statistics)

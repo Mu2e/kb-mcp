@@ -1,13 +1,23 @@
 """HTML templates for server endpoints."""
 
+from ...config import get_server_config
+
+
+def get_site_name() -> str:
+    """Get the configured display name for the web UI."""
+    return get_server_config()['site_name']
+
 
 def get_default_nav_items() -> list[tuple[str, str]]:
     """Get default navigation items for all pages."""
-    return [
-        ("/", "Home"),
-        ("/web", "Knowledge Base Explorer"),
-        ("/web/chat", "Agent Chat"),
-        ("/web/graph", "Knowledge Graph"),
+    server_config = get_server_config()
+    items = [
+        ("/web", get_site_name()),
+        ("/web/chat", "Chat"),
+    ]
+    if not server_config['hide_graph']:
+        items.append(("/web/graph", "Knowledge Graph"))
+    items += [
         ("/web/eval", "Evaluations"),
         #("/web/compare", "Parser Compare"),
         ("/web/statistics", "Statistics"),
@@ -16,6 +26,7 @@ def get_default_nav_items() -> list[tuple[str, str]]:
         ("/admin", "Admin"),
         ("/status", "Status"),
     ]
+    return items
 
 
 def base_template(title: str, content: str, nav_items: list[tuple[str, str]] | None = None, username: str | None = None) -> str:
@@ -90,7 +101,7 @@ def root_page(active_sessions: int, required_access: str | None = None, username
         """
 
     content = f"""
-    <h1>MCP Server: kb-mcp</h1>
+    <h1>MCP Server: {get_site_name()}</h1>
     <p class="success-box" style="display: inline-block; padding: 10px 20px;">
         <strong>Server Status:</strong> Running
     </p>
