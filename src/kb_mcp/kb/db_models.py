@@ -247,14 +247,14 @@ class Document(Base):
         summary (str): LLM-generated detailed summary for retrieval and display.
         gist (str): LLM-generated high-level concepts/themes for embedding context.
         content_hash (str): Hash of the document content for deduplication.
-        parser_output (dict): Raw structured output of whichever parser
-            produced this document (parser-agnostic). The Docling path stores
-            the DoclingDocument JSON — self-identifying via its embedded
-            `schema_name` field — with picture bytes stripped: the structural
-            information (texts, tables, pictures-without-bytes, pages, bboxes,
-            references) that lets us re-derive chunks/tables/figures without
-            re-parsing the source file. Null when a parser has no structured
-            output to persist.
+
+    Note:
+        The structured parser output (e.g. DoclingDocument JSON) that used to
+        live on this table as `parser_output` now lives in the separate
+        `document_parser_outputs` table, one row per document, to keep this
+        table lean — `Document` is queried bare (`session.query(Document)`)
+        in many places (statistics, dedup, listing) that never need the raw
+        parse tree. See `DocumentParserOutput` / `document.parser_output_ref`.
     """
 
     __tablename__ = "documents"
@@ -350,19 +350,30 @@ class Document(Base):
     # Alternative would be separate deduplication table, but this is simpler for now
     content_hash = Column(String(64), nullable=True, index=True)
 
-    # Raw structured output of the parser that produced this document.
-    # Parser-agnostic on purpose so alternative parsers can persist their
-    # native representation side by side; the Docling path stores the
-    # DoclingDocument JSON (self-identifying via `schema_name`) — the
-    # source-of-truth representation that lets us re-derive chunks / tables /
-    # figures without re-parsing the original file.
-    parser_output = Column(JSONB, nullable=True)
-
     # Relationships
     source_ref = relationship("Source", back_populates="documents")
     raw_document = relationship("RawDocument", back_populates="documents")
     parser = relationship("Parser", back_populates="documents")
     parent = relationship("Document", remote_side=[id], backref="children")
+    parser_output_ref = relationship(
+        "DocumentParserOutput",
+        back_populates="document",
+        uselist=False,
+        cascade="all, delete-orphan",
+    )
+
+    @property
+    def parser_output(self):
+        """Structured parser output (e.g. DoclingDocument JSON), or None.
+
+        Convenience accessor over the `document_parser_outputs` table so
+        existing call sites that read `document.parser_output` keep working.
+        Triggers a lazy-load / join if `parser_output_ref` isn't already
+        loaded — callers on a hot path that don't need the payload should
+        query `DocumentParserOutput` explicitly instead of touching this.
+        """
+        ref = self.parser_output_ref
+        return ref.output if ref is not None else None
 
     # Indexes for common queries
     # index=True on columns creates single-column indexes
@@ -734,7 +745,7 @@ class Document(Base):
             title = meta.pop("title", None)  # Remove from meta to avoid duplication
 
         # Extract fields, using defaults where appropriate
-        return cls(
+        doc = cls(
             id=data.get("id"),  # Allow explicit ID, otherwise will be generated
             source_id=data["source_id"],
             doc_id=data.get("doc_id"),
@@ -745,11 +756,16 @@ class Document(Base):
             binary=data.get("binary"),
             title=title,  # Populate from data["title"] or meta["title"] (removed from meta)
             meta=meta,
-            parser_output=data.get("parser_output"),
             creating_time=data.get("creating_time"),
             update_time=data.get("update_time"),
             parent_id=data.get("parent_id")
         )
+
+        parser_output = data.get("parser_output")
+        if parser_output is not None:
+            doc.parser_output_ref = DocumentParserOutput(output=parser_output)
+
+        return doc
 
     def to_dict(self) -> dict:
         """Convert Document instance to dictionary.
@@ -922,6 +938,49 @@ class Document(Base):
         
         # Use from_dict to create the document (reuses validation logic)
         return cls.from_dict(doc_data)
+
+
+class DocumentParserOutput(Base):
+    """Table 'document_parser_outputs' — structured parser output, one row per document.
+
+    Split out from `documents.parser_output` so the (large, per-document)
+    structured parse tree doesn't get pulled along on every plain
+    `session.query(Document)` — used widely for listing, stats, and dedup,
+    none of which need the raw payload. Which parser produced the output is
+    available via `document.parser_id` (FK to `parsers.name`); this table
+    doesn't duplicate it.
+
+    Attributes:
+        document_id (str): Primary key and FK to documents.id (one-to-one).
+        output (dict): Raw structured output of whichever parser produced
+            the document (parser-agnostic). The Docling path stores the
+            DoclingDocument JSON — self-identifying via its embedded
+            `schema_name` field — with picture bytes stripped: the
+            structural information (texts, tables, pictures-without-bytes,
+            pages, bboxes, references) that lets us re-derive chunks/tables/
+            figures without re-parsing the source file.
+        created_time (datetime): Timestamp when this row was inserted.
+    """
+
+    __tablename__ = "document_parser_outputs"
+
+    document_id = Column(
+        String(36),
+        ForeignKey("documents.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    output = Column(JSONB, nullable=False)
+    created_time = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=func.now(),
+        server_default=func.now(),
+    )
+
+    document = relationship("Document", back_populates="parser_output_ref")
+
+    def __repr__(self) -> str:
+        return f"<DocumentParserOutput(document_id={self.document_id})>"
 
 
 class PrivacyFilter(Base):

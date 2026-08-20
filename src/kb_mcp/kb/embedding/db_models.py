@@ -552,6 +552,10 @@ class Chunk(Base):
         section_path (str): Section path for hierarchical context (e.g., "Chapter 1 > Section 1.2"). Used by `embed_text()` to build the prefix and indexed by the BM25 trigger (weight `C`). Optional.
         chunk_strategy (str): Foreign key to the chunk_strategies table. The strategy's `meta` carries `prepend_section_path` / `prepend_gist` flags consumed by `embed_text()`.
         meta (dict): Metadata - flexible JSON field for additional metadata.
+            Also holds page-anchored provenance populated by the
+            DoclingDocument-aware chunker: `page_start`, `page_end`, `bbox`,
+            `body_self_refs` (see column comment above). Absent for
+            legacy/non-Docling chunks.
         created_time (datetime): Timestamp when the chunk was created.
         text_search_vector (tsvector): Full-text search vector (PostgreSQL only). Auto-populated by trigger combining doc.title (A) + chunk.text (B) + chunk.section_path (C) + doc.summary (D).
     """
@@ -587,16 +591,19 @@ class Chunk(Base):
     # Section path for hierarchical context (e.g., "Chapter 1 > Section 1.2")
     section_path = Column(Text, nullable=True)
 
-    # Page-anchored provenance. Populated only by the
-    # DoclingDocument-aware chunker, which walks the persisted DoclingDocument
-    # (documents.parser_output["body"]) and
-    # carries prov[].page_no / prov[].bbox onto the chunk it emits.
-    # Legacy markdown-chunked rows leave these NULL — clients should
-    # treat absence as "page-level citation not available for this chunk".
-    page_start = Column(Integer, nullable=True)  # First page no this chunk's content spans (1-based)
-    page_end = Column(Integer, nullable=True)    # Last page no this chunk's content spans (inclusive)
-    bbox = Column(JSONB, nullable=True)          # Pydantic-dumped BoundingBox (CoordOrigin string-encoded)
-    body_self_refs = Column(JSONB, nullable=True)  # List of "#/texts/N" / "#/groups/N" crefs that contributed
+    # Page-anchored provenance lives in `meta` (see below), not dedicated
+    # columns: page_start (first page no, 1-based), page_end (last page no,
+    # inclusive), bbox (pydantic-dumped BoundingBox, CoordOrigin
+    # string-encoded), body_self_refs (list of "#/texts/N" / "#/groups/N"
+    # crefs that contributed). Populated only by the DoclingDocument-aware
+    # chunker, which walks the persisted DoclingDocument
+    # (document_parser_outputs.output["body"]) and carries prov[].page_no /
+    # prov[].bbox onto the chunk it emits. Legacy markdown-chunked rows
+    # leave these absent from meta — clients should treat absence as
+    # "page-level citation not available for this chunk". All four are
+    # opaque/write-once provenance, not queried by value, so they share the
+    # existing general-purpose `meta` column rather than each getting a
+    # dedicated one.
 
     # Chunk strategy - foreign key to chunk_strategies table
     chunk_strategy = Column(
@@ -705,6 +712,15 @@ class Chunk(Base):
         if "chunk_index" not in data:
             raise ValueError("chunk_index is required")
 
+        # page_start / page_end / bbox / body_self_refs are accepted as
+        # top-level keys (matching the pre-existing dict shape from
+        # to_dict() / the chunker) but stored inside `meta` — see class
+        # docstring. Caller-supplied `meta` wins on key collision.
+        meta = dict(data.get("meta") or {})
+        for key in ("page_start", "page_end", "bbox", "body_self_refs"):
+            if key in data and key not in meta:
+                meta[key] = data[key]
+
         return cls(
             id=data.get("id"),  # Allow explicit ID, otherwise will be generated
             document_id=data["document_id"],
@@ -714,12 +730,8 @@ class Chunk(Base):
             char_end_index=data.get("char_end_index"),
             token_length=data.get("token_length"),
             section_path=data.get("section_path"),
-            page_start=data.get("page_start"),
-            page_end=data.get("page_end"),
-            bbox=data.get("bbox"),
-            body_self_refs=data.get("body_self_refs"),
             chunk_strategy=data.get("chunk_strategy"),
-            meta=data.get("meta", {}),
+            meta=meta,
         )
 
     def to_dict(self) -> dict:
@@ -729,9 +741,14 @@ class Chunk(Base):
             Dictionary representation of the chunk
         """
         # Get meta from strategy_config relationship if available
-        meta = {}
+        strategy_meta = {}
         if self.strategy_config and self.strategy_config.meta:
-            meta = self.strategy_config.meta
+            strategy_meta = self.strategy_config.meta
+
+        # Page-anchored provenance lives in this row's own `meta` JSONB
+        # column (see class docstring) — surfaced here as top-level keys so
+        # the dict shape stays the same as before the columns were folded in.
+        own_meta = self.meta or {}
 
         return {
             "id": self.id,
@@ -742,12 +759,12 @@ class Chunk(Base):
             "char_end_index": self.char_end_index,
             "token_length": self.token_length,
             "section_path": self.section_path,
-            "page_start": self.page_start,
-            "page_end": self.page_end,
-            "bbox": self.bbox,
-            "body_self_refs": self.body_self_refs,
+            "page_start": own_meta.get("page_start"),
+            "page_end": own_meta.get("page_end"),
+            "bbox": own_meta.get("bbox"),
+            "body_self_refs": own_meta.get("body_self_refs"),
             "chunk_strategy": self.chunk_strategy,
-            "meta": meta,
+            "meta": strategy_meta,
             "created_time": self.created_time.isoformat() if self.created_time else None,
         }
 

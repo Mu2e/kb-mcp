@@ -315,6 +315,15 @@ def _ensure_documents_columns(engine) -> None:
     new columns to tables that already exist. This helper patches that gap for
     a small, hand-maintained list of post-v0.2 columns. Replace with Alembic
     when schema drift outgrows this approach.
+
+    Note: `documents.parser_output` (JSONB) used to be added here. It has
+    been superseded by the `document_parser_outputs` table (see
+    `DocumentParserOutput` in db_models.py) so `Document` stays lean for the
+    many call sites that query it bare. The ADD-COLUMN step below is kept,
+    commented out, only as a reminder for anyone writing the data-carry-
+    forward migration off an old deployment — such a script should read
+    `documents.parser_output` (if present) and copy it into
+    `document_parser_outputs`, then the column can be dropped.
     """
     from sqlalchemy import inspect as sa_inspect
 
@@ -326,9 +335,7 @@ def _ensure_documents_columns(engine) -> None:
     existing = {col["name"] for col in inspector.get_columns("documents")}
 
     # (column_name, postgres_type, sqlite_type)
-    new_columns = [
-        ("parser_output", "JSONB", "JSON"),
-    ]
+    new_columns = []
 
     for col_name, pg_type, sqlite_type in new_columns:
         if col_name in existing:
@@ -342,10 +349,16 @@ def _ensure_documents_columns(engine) -> None:
 def _ensure_chunks_columns(engine) -> None:
     """Idempotent ALTER for chunks columns added post-v0.2.
 
-    Sister to `_ensure_documents_columns`. Covers the page-anchored
-    provenance columns: page_start / page_end / bbox / body_self_refs. They
-    are populated only by the DoclingDocument-aware chunker; legacy chunks
-    leave them NULL.
+    Sister to `_ensure_documents_columns`. `page_start` / `page_end` /
+    `bbox` / `body_self_refs` used to be added here as dedicated columns.
+    They've been folded into the existing `chunks.meta` JSONB column
+    instead — all four are opaque/write-once provenance (populated only by
+    the DoclingDocument-aware chunker; nothing queries them by value yet),
+    which is exactly what `meta` is for, so a dedicated column bought
+    nothing. A data-carry-forward script for old deployments should copy
+    each of the four columns (where non-null) into
+    `chunks.meta["page_start"/"page_end"/"bbox"/"body_self_refs"]`, then the
+    columns can be dropped.
     """
     from sqlalchemy import inspect as sa_inspect
 
@@ -356,12 +369,7 @@ def _ensure_chunks_columns(engine) -> None:
     is_pg = engine.url.drivername.startswith("postgresql")
     existing = {col["name"] for col in inspector.get_columns("chunks")}
 
-    new_columns = [
-        ("page_start", "INTEGER", "INTEGER"),
-        ("page_end", "INTEGER", "INTEGER"),
-        ("bbox", "JSONB", "JSON"),
-        ("body_self_refs", "JSONB", "JSON"),
-    ]
+    new_columns = []
 
     for col_name, pg_type, sqlite_type in new_columns:
         if col_name in existing:

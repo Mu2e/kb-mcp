@@ -32,6 +32,8 @@ EXPECTED_TABLES = {
     "sources", "documents", "parsers", "chunks",
     # Simon's side
     "documents_raw", "privacy_filters", "parser_comparisons", "parser_categories",
+    # structured parser output, split out from documents.parser_output
+    "document_parser_outputs",
     # eval (shared / extended by both sides)
     "eval_generation", "eval_dataset", "eval_audit", "eval_runs",
     "eval_results", "eval_retrieved_documents",
@@ -55,44 +57,33 @@ def test_union_schema_tables_exist(engine):
 
 def test_documents_has_both_sides_columns(engine):
     cols = {c["name"] for c in inspect(engine).get_columns("documents")}
-    # Sam's structured-parsing column (parser-agnostic raw parser output)
-    assert "parser_output" in cols
     assert "content_hash" in cols
     # Simon's raw-document linkage
     assert "raw_document_id" in cols
+    # parser_output moved out of documents into its own table (see below) —
+    # documents should NOT carry it as a column anymore.
+    assert "parser_output" not in cols
 
 
-def test_chunks_have_provenance_columns(engine):
+def test_document_parser_outputs_table(engine):
+    cols = {c["name"] for c in inspect(engine).get_columns("document_parser_outputs")}
+    assert "document_id" in cols
+    assert "output" in cols
+
+
+def test_chunks_provenance_lives_in_meta(engine):
+    # bbox / body_self_refs / page_start / page_end used to be dedicated
+    # columns; they're opaque write-once provenance folded into the
+    # existing general-purpose `meta` JSONB column instead.
     cols = {c["name"] for c in inspect(engine).get_columns("chunks")}
+    assert "meta" in cols
     for col in ("page_start", "page_end", "bbox", "body_self_refs"):
-        assert col in cols, col
+        assert col not in cols, col
 
 
 def test_ensure_column_patchers_are_idempotent(engine):
-    # Fresh create_all already has the columns; the patchers must be no-ops
-    # that don't raise — and stay safe when run repeatedly.
+    # Both patchers are currently no-ops (their column lists are empty —
+    # see database.py) but must stay safe to call repeatedly.
     for _ in range(2):
         _ensure_documents_columns(engine)
         _ensure_chunks_columns(engine)
-
-    cols = {c["name"] for c in inspect(engine).get_columns("documents")}
-    assert "parser_output" in cols
-
-
-def test_ensure_column_patchers_add_missing_columns(tmp_path):
-    """Simulate pre-migration tables: drop the new columns, re-run patchers."""
-    from sqlalchemy import text
-
-    eng = create_engine(f"sqlite:///{tmp_path}/drift.db")
-    Base.metadata.create_all(eng)
-    with eng.connect() as conn:
-        conn.execute(text("ALTER TABLE documents DROP COLUMN parser_output"))
-        conn.execute(text("ALTER TABLE chunks DROP COLUMN page_start"))
-        conn.commit()
-
-    _ensure_documents_columns(eng)
-    _ensure_chunks_columns(eng)
-
-    insp = inspect(eng)
-    assert "parser_output" in {c["name"] for c in insp.get_columns("documents")}
-    assert "page_start" in {c["name"] for c in insp.get_columns("chunks")}

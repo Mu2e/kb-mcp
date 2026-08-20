@@ -322,11 +322,12 @@ def parse(
             image_dicts = []
 
         # If the parser produced a structured artifact, persist it on the doc
-        # dict so it survives round-tripping through Document.from_dict and
-        # lands in the parser-agnostic documents.parser_output column. Any
-        # parser may expose `structured_output`; the payload should
-        # self-identify its schema (DoclingDocument dumps carry `schema_name`,
-        # which downstream readers guard on).
+        # dict so it survives round-tripping through Document.from_dict,
+        # which lands it in the parser-agnostic document_parser_outputs
+        # table (one row per document). Any parser may expose
+        # `structured_output`; the payload should self-identify its schema
+        # (DoclingDocument dumps carry `schema_name`, which downstream
+        # readers guard on).
         structured_output = getattr(parser, "structured_output", None)
         if structured_output is not None:
             doc_data["parser_output"] = structured_output
