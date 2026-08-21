@@ -34,6 +34,17 @@ def get_env_local_path() -> Optional[str]:
 def _get_bool(key: str, default: bool = False) -> bool:
     return os.getenv(key, str(default)).lower() == "true"
 
+def _get_bool_or_none(key: str):
+    """Like _get_bool, but distinguishes "unset" from "set to false".
+
+    Needed for settings that override a broader one only when explicitly
+    given - e.g. WEB_REQUIRE_AUTH overriding DISABLE_AUTH.
+    """
+    val = os.getenv(key)
+    if val is None or val.strip() == "":
+        return None
+    return val.strip().lower() == "true"
+
 def _get_int(key: str, default: int) -> int:
     val = os.getenv(key)
     if val is None or val.strip() == "":
@@ -89,6 +100,9 @@ def get_server_config() -> dict:
             * `use_firestore` (bool): Use Firestore for session storage (Env: `SESSION_STORE_FIRESTORE`, default: False).
             * `site_name` (str): Display name for the web UI (Env: `SITE_NAME`, default: 'Knowledge Base').
             * `hide_graph` (bool): Hide the knowledge graph from the web UI and MCP tools (Env: `HIDE_GRAPH`, default: False).
+            * `mcp_host` (str): Bind address for the MCP server (Env: `MCP_HOST`, falls back to `SERVER_HOST`, default: '127.0.0.1').
+            * `web_host` (str): Bind address for the web UI server (Env: `WEB_HOST`, default: '127.0.0.1', i.e. loopback only).
+            * `web_port` (int): Port for the web UI server (Env: `WEB_PORT`, default: `PORT` + 1).
     """
     log_level = os.getenv("LOG_LEVEL", "INFO").upper()
     return {
@@ -103,6 +117,13 @@ def get_server_config() -> dict:
         'use_firestore': _get_bool("SESSION_STORE_FIRESTORE", False),
         'site_name': os.getenv("SITE_NAME", "Knowledge Base"),
         'hide_graph': _get_bool("HIDE_GRAPH", False),
+        # The MCP endpoint and the web UI are served by two separate uvicorn
+        # servers so they can have different exposure: MCP is reachable from
+        # the network and gated on an API key, while the web UI binds to
+        # loopback by default. See kb_mcp.server.server.
+        'mcp_host': os.getenv("MCP_HOST", os.getenv("SERVER_HOST", "127.0.0.1")),
+        'web_host': os.getenv("WEB_HOST", "127.0.0.1"),
+        'web_port': _get_int("WEB_PORT", _get_int("PORT", 8443) + 1),
     }
 
 # LLM
@@ -215,6 +236,11 @@ def get_auth_config() -> dict:
             * `github` (dict): GitHub OAuth configuration.
             * `globus` (dict): Globus OAuth configuration.
             * `oauth_provider` (str): OAuth provider name (default: None).
+            * `web_require_auth` (bool): Whether the web UI requires login
+              (Env: `WEB_REQUIRE_AUTH`; falls back to the inverse of `DISABLE_AUTH`).
+            * `mcp_require_api_key` (bool): Whether the MCP endpoint requires an API
+              key or OAuth token (Env: `MCP_REQUIRE_API_KEY`; falls back to the
+              inverse of `DISABLE_AUTH`).
     """
     data = {
         'disable_auth': _get_bool("DISABLE_AUTH", False),
@@ -244,6 +270,21 @@ def get_auth_config() -> dict:
         data['oauth_provider'] = 'github'
     else:
         data['oauth_provider'] = None
+
+    # Per-surface auth. DISABLE_AUTH remains the blanket switch; WEB_REQUIRE_AUTH
+    # and MCP_REQUIRE_API_KEY override it for one surface when explicitly set.
+    # This matters because the two are served on separate sockets with very
+    # different exposure: the web UI binds to loopback, while MCP is typically
+    # reachable from the network and so should stay gated by default.
+    web_override = _get_bool_or_none("WEB_REQUIRE_AUTH")
+    data['web_require_auth'] = (
+        web_override if web_override is not None else not data['disable_auth']
+    )
+
+    mcp_override = _get_bool_or_none("MCP_REQUIRE_API_KEY")
+    data['mcp_require_api_key'] = (
+        mcp_override if mcp_override is not None else not data['disable_auth']
+    )
 
     return data
 

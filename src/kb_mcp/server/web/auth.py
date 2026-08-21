@@ -34,13 +34,16 @@ class WebSessionManager:
         # OAuth state timeout in seconds (default: 10 minutes)
         self.oauth_state_timeout = auth_config['oauth_state_timeout']
 
-        # Flag to disable authentication for evelopment or localhost only bindings
-        disable_auth = auth_config['disable_auth']
-        self.require_auth = not disable_auth
-        if disable_auth:
+        # Whether the web UI requires login. Resolved from WEB_REQUIRE_AUTH if
+        # set, otherwise from the blanket DISABLE_AUTH - see
+        # config.get_auth_config. The web UI binds to loopback by default
+        # (WEB_HOST), which is what makes running it unauthenticated tolerable.
+        self.require_auth = auth_config['web_require_auth']
+        if not self.require_auth:
             logger.warning(
-                "AUTHENTICATION DISABLED - For development/binding to localhost only! "
-                "Remove DISABLE_AUTH or set DISABLE_AUTH=false for production."
+                "WEB AUTHENTICATION DISABLED - the web UI performs no login checks. "
+                "Only safe while it is bound to localhost (WEB_HOST=127.0.0.1). "
+                "Set WEB_REQUIRE_AUTH=true before exposing it on a network interface."
             )
         #logger.info(
         #    f"Web session timeout: {self.session_timeout} seconds "
