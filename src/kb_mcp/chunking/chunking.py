@@ -282,8 +282,11 @@ class TokensStrategy(ChunkStrategy):
 class SlideStrategy(ChunkStrategy):
     """Sliding window chunking strategy.
 
-    TODO: Implement sliding window strategy if needed.
-    For now, this uses token-based chunking.
+    Not implemented. This previously fell back to token-based chunking while
+    still tagging the resulting chunks "slide", which put rows in the database
+    that claim a strategy they were not produced by - silently corrupting any
+    comparison between chunking strategies. It now raises instead; callers who
+    want token chunks should ask for "tokens".
     """
 
     @staticmethod
@@ -304,17 +307,11 @@ class SlideStrategy(ChunkStrategy):
 
     @staticmethod
     def chunk(text: str, config: Dict[str, Any], encoding: Any) -> List[Dict[str, Any]]:
-        """Chunk text using sliding window strategy."""
-        chunk_strategy = SlideStrategy.get_strategy_name(config)
-
-        # For now, use token-based chunking but with slide strategy string
-        logger.info("Slide strategy not yet implemented, using token-based chunking")
-        # Temporarily use token-based chunking with default params
-        chunks = TokensStrategy.chunk(text, config, encoding)
-        # Override chunk_strategy in all chunks
-        for chunk in chunks:
-            chunk["chunk_strategy"] = chunk_strategy
-        return chunks
+        """Not implemented - see the class docstring."""
+        raise NotImplementedError(
+            "The 'slide' chunking strategy is not implemented. "
+            "Use 'tokens' for token-based chunking with overlap."
+        )
 
 
 class SummaryStrategy(ChunkStrategy):

@@ -525,8 +525,8 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
             except (ImportError, Exception) as e:
                 logger.debug(f"Could not load chunk strategies: {e}")
                 # Fallback to default options
-                chunk_strategy_options_html = '<option value="">Default (tokens)</option><option value="tokens">tokens</option><option value="slide">slide</option>'
-                chunk_strategy_options_html_for_similar = '<option value="summary" selected>summary</option><option value="tokens">tokens</option><option value="slide">slide</option>'
+                chunk_strategy_options_html = '<option value="">Default (tokens)</option><option value="tokens">tokens</option>'
+                chunk_strategy_options_html_for_similar = '<option value="summary" selected>summary</option><option value="tokens">tokens</option>'
             
             # For backward compatibility
             rechunk_strategy_options = chunk_strategy_options_html
@@ -1854,7 +1854,6 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
             # Fallback to default options
             chunk_strategy_options = '<option value="">Default (tokens)</option>'
             chunk_strategy_options += '<option value="tokens">tokens</option>'
-            chunk_strategy_options += '<option value="slide">slide</option>'
 
         content = f"""
             <h1>Upload Document</h1>
