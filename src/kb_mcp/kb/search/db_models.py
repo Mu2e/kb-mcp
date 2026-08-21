@@ -52,7 +52,6 @@ class SearchLog(Base):
         String(36),
         primary_key=True,
         default=lambda: str(uuid.uuid4()),
-        index=True,
     )
     
     # Search type

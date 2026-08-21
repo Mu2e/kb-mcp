@@ -109,7 +109,6 @@ class RawDocument(Base):
         String(36),
         primary_key=True,
         default=lambda: str(uuid.uuid4()),
-        index=True,
     )
     source_id = Column(
         String(256),
@@ -268,7 +267,6 @@ class Document(Base):
         String(36),
         primary_key=True,
         default=lambda: str(uuid.uuid4()),
-        index=True,
     )
 
     # Foreign key to source table
@@ -330,7 +328,9 @@ class Document(Base):
         nullable=False,
         default=func.now(),
         server_default=func.now(),
-        index=True,
+        # No index=True: idx_documents_insert_time in __table_args__ already
+        # covers this column. Declaring both created two identical indexes
+        # (ix_documents_insert_time was unused) and doubled write cost.
     )
     # Parent document reference (for hierarchical documents)
     parent_id = Column(
@@ -352,7 +352,9 @@ class Document(Base):
     # Content hash for deduplication
     # Stored here for convenience - can check duplicates quickly
     # Alternative would be separate deduplication table, but this is simpler for now
-    content_hash = Column(String(64), nullable=True, index=True)
+    # No index=True: idx_documents_content_hash in __table_args__ already
+    # covers this column (see insert_time above for the same rationale).
+    content_hash = Column(String(64), nullable=True)
 
     # Relationships
     source_ref = relationship("Source", back_populates="documents")
@@ -1016,7 +1018,6 @@ class PrivacyFilter(Base):
         String(36),
         primary_key=True,
         default=lambda: str(uuid.uuid4()),
-        index=True,
     )
     raw_document_id = Column(
         String(36),
@@ -1075,7 +1076,6 @@ class ParserComparison(Base):
         String(36),
         primary_key=True,
         default=lambda: str(uuid.uuid4()),
-        index=True,
     )
     raw_document_id = Column(
         String(36),
@@ -1129,7 +1129,6 @@ class ParserCategories(Base):
         String(36),
         primary_key=True,
         default=lambda: str(uuid.uuid4()),
-        index=True,
     )
     source_id = Column(
         String(256),

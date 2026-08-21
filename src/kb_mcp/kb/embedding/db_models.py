@@ -330,7 +330,6 @@ class ParsingLog(Base):
         String(36),
         primary_key=True,
         default=lambda: str(uuid.uuid4()),
-        index=True,
     )
 
     # Foreign key to document table (nullable since document might not exist yet during parsing)
@@ -412,7 +411,6 @@ class ChunkEmbeddingLog(Base):
         String(36),
         primary_key=True,
         default=lambda: str(uuid.uuid4()),
-        index=True,
     )
 
     # Foreign key to document table
@@ -481,7 +479,6 @@ class SummaryLog(Base):
         String(36),
         primary_key=True,
         default=lambda: str(uuid.uuid4()),
-        index=True,
     )
 
     # Foreign key to document table (nullable - logs persist if document deleted)
@@ -566,7 +563,6 @@ class Chunk(Base):
         String(36),
         primary_key=True,
         default=lambda: str(uuid.uuid4()),
-        index=True,
     )
 
     # Foreign key to document table

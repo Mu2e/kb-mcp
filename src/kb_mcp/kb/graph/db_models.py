@@ -337,13 +337,11 @@ class GraphNodeMap(Base):
         String(36),
         ForeignKey("graph_nodes.id", ondelete="CASCADE"),
         primary_key=True,
-        index=True,
     )
     document_id = Column(
         String(36),
         ForeignKey("documents.id", ondelete="CASCADE"),
         primary_key=True,
-        index=True,
     )
     count = Column(Integer, nullable=False, default=1)
     meta = Column(JSONB, nullable=True, default=dict)
