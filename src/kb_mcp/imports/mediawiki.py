@@ -13,6 +13,7 @@ import tempfile
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlencode
 
 from .base import Source
 from ..kb import add_document
@@ -79,8 +80,10 @@ class MediaWikiSource(Source):
         """
         params["format"] = "json"
 
-        # Build URL with query params
-        query_string = "&".join(f"{k}={v}" for k, v in params.items())
+        # Build URL with query params. urlencode() percent-escapes the values,
+        # which matters for page titles containing &, =, #, + or spaces - those
+        # would otherwise corrupt the query string.
+        query_string = urlencode(params)
         url = f"{self.api_url}?{query_string}"
 
         cmd = ["curl", "-s", "--max-time", str(int(self.timeout))]
