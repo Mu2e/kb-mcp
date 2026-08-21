@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import secrets
 import time
@@ -38,6 +39,15 @@ class WebSessionManager:
         # set, otherwise from the blanket DISABLE_AUTH - see
         # config.get_auth_config. The web UI binds to loopback by default
         # (WEB_HOST), which is what makes running it unauthenticated tolerable.
+        # Password gate for the write/administrative pages. Independent of
+        # require_auth: the web UI can be open for browsing on localhost while
+        # deletes, uploads and API-key management still need the password.
+        self._admin_password = auth_config['admin_password']
+        self._admin_password_hash = auth_config['admin_password_hash']
+        self.admin_password_configured = bool(
+            self._admin_password or self._admin_password_hash
+        )
+
         self.require_auth = auth_config['web_require_auth']
         if not self.require_auth:
             logger.warning(
@@ -197,6 +207,73 @@ class WebSessionManager:
         if not session_data:
             return False
         return session_data.get("has_admin", False)
+
+    # --- Admin password gate -------------------------------------------------
+    #
+    # Guards the pages that change state or hand out credentials (uploads,
+    # deletes, re-chunking, API key management) while the rest of the web UI
+    # stays browsable. This is a stopgap for the localhost deployment, where
+    # WEB_REQUIRE_AUTH is off and every visitor would otherwise be an admin;
+    # it is not a replacement for real per-user authentication.
+
+    ADMIN_COOKIE = "kb_admin"
+
+    def verify_admin_password(self, password: str) -> bool:
+        """Check a submitted password against ADMIN_PASSWORD/ADMIN_PASSWORD_HASH."""
+        if not password:
+            return False
+        if self._admin_password_hash:
+            digest = hashlib.sha256(password.encode()).hexdigest()
+            return secrets.compare_digest(digest, self._admin_password_hash.strip().lower())
+        if self._admin_password:
+            return secrets.compare_digest(password, self._admin_password)
+        return False
+
+    async def start_admin_session(self, response) -> None:
+        """Mark a browser as admin-authenticated by setting a signed-ish cookie."""
+        token = secrets.token_urlsafe(32)
+        await self.session_store.set(
+            "admin_sessions",
+            token,
+            {"created_at": time.time(), "expires_at": time.time() + self.session_timeout},
+        )
+        response.set_cookie(
+            self.ADMIN_COOKIE,
+            token,
+            max_age=self.session_timeout,
+            httponly=True,
+            secure=False,  # loopback HTTP by default
+            samesite="lax",
+        )
+
+    async def end_admin_session(self, request, response) -> None:
+        """Drop the admin cookie and its stored session."""
+        token = request.cookies.get(self.ADMIN_COOKIE)
+        if token:
+            await self.session_store.delete("admin_sessions", token)
+        response.delete_cookie(self.ADMIN_COOKIE)
+
+    async def is_admin_unlocked(self, request) -> bool:
+        """True if this browser has cleared the admin password gate.
+
+        When no password is configured the gate is open, so that existing
+        deployments (and anyone who has not set ADMIN_PASSWORD yet) are not
+        locked out of their own upload and delete pages.
+        """
+        if not self.admin_password_configured:
+            return True
+
+        token = request.cookies.get(self.ADMIN_COOKIE)
+        if not token:
+            return False
+
+        data = await self.session_store.get("admin_sessions", token)
+        if not data:
+            return False
+        if data.get("expires_at", 0) < time.time():
+            await self.session_store.delete("admin_sessions", token)
+            return False
+        return True
 
     def get_auth_warning_html(self) -> str:
         """Get HTML warning banner if authentication is disabled."""
@@ -392,3 +469,94 @@ def setup_shared_auth_routes(app, session_manager: WebSessionManager):
         return response
 
     app.add_route("/logout", logout)
+
+    async def admin_login(request):
+        """Password gate for the web UI's write/administrative pages.
+
+        GET  shows the form (with ?next= carrying the page the user wanted).
+        POST checks the password and, on success, sets the admin cookie.
+        """
+        from html import escape as html_escape
+        from . import html_templates
+
+        next_url = request.query_params.get("next", "/admin")
+        # Only allow relative paths, so ?next= cannot bounce a visitor off-site.
+        if not next_url.startswith("/") or next_url.startswith("//"):
+            next_url = "/admin"
+
+        if not session_manager.admin_password_configured:
+            return HTMLResponse(
+                html_templates.base_template(
+                    "Admin",
+                    "<div class='card'><h2>No admin password set</h2>"
+                    "<p>Administrative pages are currently unprotected because "
+                    "<code>ADMIN_PASSWORD</code> is not set in the environment.</p></div>",
+                ),
+                status_code=200,
+            )
+
+        error_html = ""
+        if request.method == "POST":
+            form = await request.form()
+            if session_manager.verify_admin_password(form.get("password", "")):
+                response = RedirectResponse(url=next_url, status_code=303)
+                await session_manager.start_admin_session(response)
+                logger.info("Admin password accepted from %s", request.client.host if request.client else "?")
+                return response
+            logger.warning(
+                "Admin password rejected from %s",
+                request.client.host if request.client else "?",
+            )
+            error_html = "<div class='error-box'>Incorrect password.</div>"
+
+        content = f"""
+        <div class="card">
+            <h2>Admin access</h2>
+            <p>This page requires the admin password.</p>
+            {error_html}
+            <form method="POST" action="/admin/login?next={html_escape(next_url, quote=True)}">
+                <div class="form-group">
+                    <label for="password">Password</label>
+                    <input type="password" id="password" name="password" autofocus>
+                </div>
+                <button type="submit" class="btn">Unlock</button>
+            </form>
+        </div>
+        """
+        return HTMLResponse(
+            html_templates.base_template("Admin access", content),
+            status_code=401 if error_html else 200,
+        )
+
+    app.add_route("/admin/login", admin_login, methods=["GET", "POST"])
+
+    async def admin_logout(request):
+        """Drop admin access for this browser."""
+        response = RedirectResponse(url="/web", status_code=303)
+        await session_manager.end_admin_session(request, response)
+        return response
+
+    app.add_route("/admin/logout", admin_logout, methods=["GET", "POST"])
+
+
+async def require_admin(request, session_manager):
+    """Guard for write/administrative routes.
+
+    Returns None when the request may proceed, or a response to return instead
+    (a redirect to the password form for pages, a 403 for API/POST endpoints).
+
+    Composes with the OAuth admin check: when an OAuth provider is configured
+    and says the user is an admin, that is honoured without a password prompt.
+    """
+    if await session_manager.is_admin_unlocked(request):
+        return None
+
+    if session_manager.require_auth and await session_manager.has_admin_access(request):
+        return None
+
+    wants_html = "text/html" in request.headers.get("accept", "")
+    if request.method == "GET" and wants_html:
+        return RedirectResponse(
+            url=f"/admin/login?next={request.url.path}", status_code=303
+        )
+    return HTMLResponse("Admin password required", status_code=403)

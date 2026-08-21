@@ -236,6 +236,10 @@ def get_auth_config() -> dict:
             * `github` (dict): GitHub OAuth configuration.
             * `globus` (dict): Globus OAuth configuration.
             * `oauth_provider` (str): OAuth provider name (default: None).
+            * `admin_password` (str): Plaintext admin password for the web UI's
+              write/administrative pages (Env: `ADMIN_PASSWORD`, default: '' = unset).
+            * `admin_password_hash` (str): sha256 hex digest of the admin password,
+              used in preference to `admin_password` when set (Env: `ADMIN_PASSWORD_HASH`).
             * `web_require_auth` (bool): Whether the web UI requires login
               (Env: `WEB_REQUIRE_AUTH`; falls back to the inverse of `DISABLE_AUTH`).
             * `mcp_require_api_key` (bool): Whether the MCP endpoint requires an API
@@ -276,6 +280,13 @@ def get_auth_config() -> dict:
     # This matters because the two are served on separate sockets with very
     # different exposure: the web UI binds to loopback, while MCP is typically
     # reachable from the network and so should stay gated by default.
+    # Admin password for the write/administrative pages of the web UI. Plain
+    # ADMIN_PASSWORD is the simple option; ADMIN_PASSWORD_HASH (sha256 hex)
+    # takes precedence when both are set, so a deployment can avoid keeping the
+    # password in plaintext without any code change.
+    data['admin_password'] = os.getenv("ADMIN_PASSWORD", "")
+    data['admin_password_hash'] = os.getenv("ADMIN_PASSWORD_HASH", "")
+
     web_override = _get_bool_or_none("WEB_REQUIRE_AUTH")
     data['web_require_auth'] = (
         web_override if web_override is not None else not data['disable_auth']

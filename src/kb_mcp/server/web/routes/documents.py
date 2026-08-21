@@ -65,11 +65,18 @@ async def require_auth_html(
             redirect_url = f"/login?redirect={return_path}"
         return None, RedirectResponse(url=redirect_url, status_code=302)
     
-    # Check admin privileges if required
+    # Check admin privileges if required.
+    # Two independent gates, either of which is sufficient:
+    #  - the ADMIN_PASSWORD gate (used when the web UI runs without login, as
+    #    it does when bound to localhost), and
+    #  - the OAuth admin check, when an OAuth provider is configured.
     if require_admin:
-        if not await session_manager.has_admin_access(request, force_reverify=True):
-            return None, RedirectResponse(url="/login?redirect=/admin", status_code=302)
-    
+        from ..auth import require_admin as require_admin_password
+
+        guard = await require_admin_password(request, session_manager)
+        if guard is not None:
+            return None, guard
+
     return session_data, None
 
 
@@ -1569,8 +1576,10 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
 
     async def rechunk_embed_document(request: Request):
         """Re-chunk and embed a document (POST)."""
-        # Check authentication first
-        session_data, redirect = await require_auth_html(request, session_manager)
+        # Mutates stored documents, so it sits behind the admin gate.
+        session_data, redirect = await require_auth_html(
+            request, session_manager, require_admin=True
+        )
         if redirect:
             return redirect
         
@@ -1661,8 +1670,10 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
 
     async def delete_document_route(request: Request):
         """Delete a document (POST)."""
-        # Check authentication first
-        session_data, redirect = await require_auth_html(request, session_manager)
+        # Mutates stored documents, so it sits behind the admin gate.
+        session_data, redirect = await require_auth_html(
+            request, session_manager, require_admin=True
+        )
         if redirect:
             return redirect
         
@@ -1738,8 +1749,10 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
 
     async def generate_summary_document(request: Request):
         """Generate summary for a document (POST)."""
-        # Check authentication first
-        session_data, redirect = await require_auth_html(request, session_manager)
+        # Mutates stored documents, so it sits behind the admin gate.
+        session_data, redirect = await require_auth_html(
+            request, session_manager, require_admin=True
+        )
         if redirect:
             return redirect
         

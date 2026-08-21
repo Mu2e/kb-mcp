@@ -1,7 +1,7 @@
 """Web interface package - consolidates all web routes."""
 
 from ...config import get_server_config
-from .auth import WebSessionManager, setup_shared_auth_routes
+from .auth import WebSessionManager, require_admin, setup_shared_auth_routes
 from .routes.documents import (
     require_auth_html,
     require_auth_api,
@@ -59,6 +59,7 @@ def setup_web_routes(app, oauth_provider, session_manager: WebSessionManager):
 
 __all__ = [
     'WebSessionManager',
+    'require_admin',
     'setup_shared_auth_routes',
     'setup_web_routes',
     'require_auth_html',

@@ -3,7 +3,7 @@
 import logging
 from starlette.responses import HTMLResponse, RedirectResponse, JSONResponse
 
-from ..auth import WebSessionManager
+from ..auth import WebSessionManager, require_admin
 from ...oauth import ApiKeyManager
 from .. import html_templates
 from ....config import get_api_keys_file
@@ -20,7 +20,10 @@ def setup_admin_routes(app, oauth_provider, session_manager: WebSessionManager):
     async def admin_page(request):
         """Admin interface (OAuth protected, requires admin permissions)."""
         # Force re-verification on every admin page load for maximum security
-        if not await session_manager.has_admin_access(request, force_reverify=True):
+        guard = await require_admin(request, session_manager)
+        if guard is not None:
+            return guard
+        if session_manager.require_auth and not await session_manager.has_admin_access(request, force_reverify=True):
             return RedirectResponse(url="/login?redirect=/admin", status_code=303)
 
         # Get username from session (already verified above)
@@ -159,7 +162,10 @@ def setup_admin_routes(app, oauth_provider, session_manager: WebSessionManager):
     async def admin_generate(request):
         """Generate API key."""
         # Force re-verification for sensitive admin operation
-        if not await session_manager.has_admin_access(request, force_reverify=True):
+        guard = await require_admin(request, session_manager)
+        if guard is not None:
+            return guard
+        if session_manager.require_auth and not await session_manager.has_admin_access(request, force_reverify=True):
             return RedirectResponse(url="/login?redirect=/admin", status_code=303)
 
         # Get username for logging (already verified above)
@@ -219,7 +225,10 @@ def setup_admin_routes(app, oauth_provider, session_manager: WebSessionManager):
     async def admin_revoke(request):
         """Revoke API key."""
         # Force re-verification for sensitive admin operation
-        if not await session_manager.has_admin_access(request, force_reverify=True):
+        guard = await require_admin(request, session_manager)
+        if guard is not None:
+            return guard
+        if session_manager.require_auth and not await session_manager.has_admin_access(request, force_reverify=True):
             return RedirectResponse(url="/login?redirect=/admin", status_code=303)
 
         # Get username for logging (already verified above)
@@ -272,7 +281,10 @@ def setup_admin_routes(app, oauth_provider, session_manager: WebSessionManager):
 
     async def admin_alcf_refresh(request):
         """Refresh the ALCF inference token (silent refresh only, no browser login)."""
-        if not await session_manager.has_admin_access(request, force_reverify=True):
+        guard = await require_admin(request, session_manager)
+        if guard is not None:
+            return guard
+        if session_manager.require_auth and not await session_manager.has_admin_access(request, force_reverify=True):
             return JSONResponse({"error": "Not authenticated"}, status_code=401)
 
         username = await session_manager.get_session_username(
