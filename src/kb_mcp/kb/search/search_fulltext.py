@@ -285,7 +285,10 @@ def search_fulltext(
 
         time_search_total = time.time() - start_time
 
-        # Log search to database
+        # Log search to database.
+        # `search_type` is set explicitly here, so drop any copy travelling in
+        # **kwargs - see the same guard in search_semantic().
+        log_kwargs = {k: v for k, v in kwargs.items() if k != "search_type"}
         log_search(
             search_type="fulltext",
             query=query,
@@ -299,7 +302,7 @@ def search_fulltext(
             filter=filter,
             time_search_total=time_search_total,
             time_deduplication=time_deduplication,
-            **kwargs
+            **log_kwargs
         )
 
         return {

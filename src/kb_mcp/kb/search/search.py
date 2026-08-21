@@ -304,7 +304,12 @@ def search_semantic(
         result['metadata']['time_embedding'] = embedding_time
         result['metadata']['time_search_total'] = time.time() - total_start
 
-        # Log search to database
+        # Log search to database.
+        # `search_type` is set explicitly here, so drop any copy travelling in
+        # **kwargs (callers such as search(search_type=...) forward it down) -
+        # otherwise log_search() gets two values for the same parameter and
+        # raises TypeError.
+        log_kwargs = {k: v for k, v in kwargs.items() if k != "search_type"}
         log_search(
             search_type="semantic",
             query=query,
@@ -323,7 +328,7 @@ def search_semantic(
             time_db_fetch=result['metadata'].get('time_db_fetch'),
             time_distance_calc=result['metadata'].get('time_distance_calc'),
             time_sort=result['metadata'].get('time_sort'),
-            **kwargs
+            **log_kwargs
         )
 
         return result

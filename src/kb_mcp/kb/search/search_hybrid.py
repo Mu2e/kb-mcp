@@ -115,6 +115,11 @@ def search_hybrid(
         total_start = time.time()
 
         # Run semantic search
+        # Don't forward `search_type` to the sub-searches: each one logs itself
+        # under its own type, and passing it down collides with the explicit
+        # search_type= argument in their log_search() calls.
+        sub_kwargs = {k: v for k, v in kwargs.items() if k != "search_type"}
+
         semantic_start = time.time()
         try:
             semantic_results = search_semantic(
@@ -129,7 +134,7 @@ def search_hybrid(
                 session=session,
                 explain_analyse=explain_analyse,
                 max_chunks_per_doc=max_chunks_per_doc,
-                **kwargs
+                **sub_kwargs
             )
         except Exception as e:
             logger.warning(f"Semantic search failed: {e}")
@@ -154,7 +159,7 @@ def search_hybrid(
                 session=session,
                 explain_analyse=explain_analyse,
                 max_chunks_per_doc=max_chunks_per_doc,
-                **kwargs
+                **sub_kwargs
             )
         except Exception as e:
             logger.warning(f"Full-text search failed: {e}")
@@ -350,6 +355,9 @@ def search_hybrid(
         # Log search to database
         from .search import log_search
 
+        # `search_type` is set explicitly here, so drop any copy travelling in
+        # **kwargs - see the same guard in search_semantic().
+        log_kwargs = {k: v for k, v in kwargs.items() if k != "search_type"}
         log_search(
             search_type="hybrid",
             query=query,
@@ -366,7 +374,7 @@ def search_hybrid(
             time_semantic=semantic_time,
             time_fulltext=fulltext_time,
             time_fusion=fusion_time,
-            **kwargs
+            **log_kwargs
         )
 
         return {
