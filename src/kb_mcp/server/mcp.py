@@ -13,6 +13,10 @@ from .mcp_prompts import BASE_SYSTEM_PROMPT
 
 logger = logging.getLogger(__name__)
 
+#: Documents returned by kb_search when the caller doesn't specify a count and
+#: the query router is off (or declines to set one).
+DEFAULT_MAX_RESULTS = 5
+
 
 # Graph imports
 from ..kb.graph import (
@@ -278,7 +282,7 @@ def _format_search_results(results: List[Dict[str, Any]], context_chars: int = 5
 
 def kb_search(
     query: str,
-    max_results: int = 5,
+    max_results: int | None = None,
     search_type: str = "hybrid",
     search_filter: dict | None = None,
     rerank: bool | None = None,
@@ -290,7 +294,7 @@ def kb_search(
 
     Args:
         query: Search query
-        max_results: Max documents to return (default: 5)
+        max_results: Max documents to return (default: 5, or chosen by the query router when enabled)
         search_type: "hybrid" (recommended), "semantic", or "fulltext" (default: "hybrid")
         search_filter: Optional JSON filter, e.g. `{"term": {"source_id": "inspire-sld"}}`
         rerank: Whether to apply cross-encoder reranking (default: None = use server config).
@@ -333,8 +337,10 @@ def kb_search(
                 router = get_router()
                 route = router.route(query)
                 route_info = {"query_type": route.query_type.value, "reasoning": route.reasoning}
-                # Router overrides defaults unless caller explicitly set them
-                if max_results == 5:  # default value — let router override
+                # Router overrides defaults unless caller explicitly set them.
+                # None means "not specified", so an explicit max_results=5 is
+                # honoured rather than being mistaken for the default.
+                if max_results is None:
                     max_results = route.max_results
                 if rerank is None:
                     rerank = route.rerank
@@ -345,7 +351,7 @@ def kb_search(
         # Build search kwargs
         search_kwargs = dict(
             query=query,
-            max_results=max_results,
+            max_results=DEFAULT_MAX_RESULTS if max_results is None else max_results,
             filter=filter_dict,
         )
         # Only pass rerank / doc_type_boost to hybrid search (which supports them).
