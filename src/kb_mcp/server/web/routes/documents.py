@@ -448,13 +448,6 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
                     status_code=404
                 )
 
-            # Build display title: use title, title_gen, or doc_id
-            doc_title_display = doc.doc_id or "N/A"
-            if doc.title:
-                doc_title_display = f"{doc.title} ({doc.doc_id or doc.id})"
-            elif doc.title_gen:
-                doc_title_display = f"{doc.title_gen} ({doc.doc_id or doc.id})"
-            
             # Format URI as link if it exists
             uri_display = uri_to_link(doc.uri) if doc.uri else "N/A"
 
@@ -585,7 +578,7 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
                 <img src="{image_url}" alt="Document Image" style="max-width: 100%; height: auto; border: 1px solid #ddd; border-radius: 4px;">
                 <div class="document-meta" style="margin-top: 10px;">
                     <strong>Size:</strong> {binary_size} bytes | 
-                    <strong>Type:</strong> {doc.source_type or "image"}
+                    <strong>Type:</strong> {html_escape(str(doc.source_type)) if doc.source_type else "image"}
                 </div>
             </div>
                     '''
@@ -1108,14 +1101,14 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
             <div class="card">
                 <h2>Document Information</h2>
                 <table>
-                    <tr><th>ID</th><td><code>{doc.id}</code></td></tr>
-                    <tr><th>Source ID</th><td>{doc.source_id}</td></tr>
-                    <tr><th>Document ID</th><td>{doc.doc_id or "N/A"}</td></tr>
-                    <tr><th>Parser</th><td>{doc.parser_id}</td></tr>
-                    <tr><th>Title</th><td>{doc.title or "N/A"}</td></tr>
+                    <tr><th>ID</th><td><code>{html_escape(str(doc.id))}</code></td></tr>
+                    <tr><th>Source ID</th><td>{html_escape(str(doc.source_id))}</td></tr>
+                    <tr><th>Document ID</th><td>{html_escape(str(doc.doc_id)) if doc.doc_id else "N/A"}</td></tr>
+                    <tr><th>Parser</th><td>{html_escape(str(doc.parser_id)) if doc.parser_id else "N/A"}</td></tr>
+                    <tr><th>Title</th><td>{html_escape(str(doc.title)) if doc.title else "N/A"}</td></tr>
                     <tr><th>URI</th><td>{uri_display}</td></tr>
-                    <tr><th>Source Type</th><td>{doc.source_type}</td></tr>
-                    <tr><th>Document Type</th><td>{doc.doc_type}</td></tr>
+                    <tr><th>Source Type</th><td>{html_escape(str(doc.source_type))}</td></tr>
+                    <tr><th>Document Type</th><td>{html_escape(str(doc.doc_type))}</td></tr>
                     <tr><th>Parent Document</th><td>{parent_display}</td></tr>
                     <tr><th>Insert Time</th><td class="utc-timestamp" data-iso="{_to_utc_iso(doc.insert_time) or ''}">{_to_utc_iso(doc.insert_time) or "N/A"}</td></tr>
                     <tr><th>Creating Time</th><td class="utc-timestamp" data-iso="{_to_utc_iso(doc.creating_time) or ''}">{_to_utc_iso(doc.creating_time) or "N/A"}</td></tr>
@@ -1500,12 +1493,14 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
             timings['build_content'] = time.time() - t0
             timings['build_content_since_start'] = time.time() - t_start
 
-            # Build page title: use title, title_gen, or doc_id
-            page_title = doc.doc_id or doc.id
+            # Build page title: use title, title_gen, or doc_id.
+            # Escaped here because it is interpolated into <title> by
+            # base_template(), which does not escape its arguments.
+            page_title = html_escape(str(doc.doc_id or doc.id))
             if doc.title:
-                page_title = f"{doc.title} ({doc.doc_id or doc.id})"
+                page_title = f"{html_escape(str(doc.title))} ({html_escape(str(doc.doc_id or doc.id))})"
             elif doc.title_gen:
-                page_title = f"{doc.title_gen} ({doc.doc_id or doc.id})"
+                page_title = f"{html_escape(str(doc.title_gen))} ({html_escape(str(doc.doc_id or doc.id))})"
             
             # Log timing information
             timings['total'] = time.time() - t_start
