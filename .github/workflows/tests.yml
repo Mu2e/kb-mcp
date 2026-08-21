@@ -1,0 +1,43 @@
+name: tests
+
+on:
+  push:
+    branches: [main, mu2e, sld]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit:
+    name: unit tests (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Oldest supported (pyproject requires-python = ">=3.10") and the
+        # version used for development.
+        python-version: ["3.10", "3.11"]
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.0.1
+        with:
+          enable-cache: true
+
+      - name: Create environment
+        run: uv venv --python ${{ matrix.python-version }}
+
+      - name: Install kb_mcp and unit-test dependencies
+        # --no-deps keeps sentence-transformers/torch and the CUDA wheels out;
+        # requirements-unit-tests.txt lists what tests/unit actually needs.
+        run: |
+          uv pip install --no-deps -e .
+          uv pip install -r requirements-unit-tests.txt
+
+      - name: Run unit tests
+        run: uv run pytest tests/unit -v
