@@ -45,6 +45,21 @@ def _get_bool_or_none(key: str):
         return None
     return val.strip().lower() == "true"
 
+def _get_str(key: str, default):
+    """Like os.getenv, but treats an empty value as unset.
+
+    `.env` files (including our own .env.example) commonly carry placeholder
+    lines such as `AGENT_MODEL=`, meaning "use the default". os.getenv only
+    applies its default when the variable is absent, so those lines silently
+    produced "" instead - e.g. the chat page showed an empty model name, and
+    CHUNK_STRATEGY resolved to "" rather than "tokens". _get_int already
+    behaved this way; this brings string settings in line.
+    """
+    val = os.getenv(key)
+    if val is None or val.strip() == "":
+        return default
+    return val
+
 def _get_int(key: str, default: int) -> int:
     val = os.getenv(key)
     if val is None or val.strip() == "":
@@ -73,13 +88,13 @@ def get_database_config() -> dict:
             * `sqlite_path` (str): Path to SQLite DB (Env: `SQLITE_DB_PATH`, default: 'data/kb.db').
     """
     return {
-        'host': os.getenv("DB_HOST", "localhost"),
+        'host': _get_str("DB_HOST", "localhost"),
         'port': _get_int("DB_PORT", 5432),
-        'name': os.getenv("DB_NAME", "kb_mcp"),
+        'name': _get_str("DB_NAME", "kb_mcp"),
         'user': os.getenv("DB_USER"),
         'password': os.getenv("DB_PASSWORD"),
-        'schema': os.getenv("DB_SCHEMA", "public"),
-        'sqlite_path': os.getenv("SQLITE_DB_PATH", "data/kb.db"),
+        'schema': _get_str("DB_SCHEMA", "public"),
+        'sqlite_path': _get_str("SQLITE_DB_PATH", "data/kb.db"),
     }
 
 # Server
@@ -104,25 +119,25 @@ def get_server_config() -> dict:
             * `web_host` (str): Bind address for the web UI server (Env: `WEB_HOST`, default: '127.0.0.1', i.e. loopback only).
             * `web_port` (int): Port for the web UI server (Env: `WEB_PORT`, default: `PORT` + 1).
     """
-    log_level = os.getenv("LOG_LEVEL", "INFO").upper()
+    log_level = _get_str("LOG_LEVEL", "INFO").upper()
     return {
-        'base_url': os.getenv("BASE_URL", "https://127.0.0.1"),
+        'base_url': _get_str("BASE_URL", "https://127.0.0.1"),
         'port': _get_int("PORT", 8443),
-        'host': os.getenv("SERVER_HOST", "127.0.0.1"),
+        'host': _get_str("SERVER_HOST", "127.0.0.1"),
         'use_https': _get_bool("USE_HTTPS", True),
         'log_level': log_level,
-        'mcp_log_level': os.getenv("MCP_LOG_LEVEL", log_level).upper(),
+        'mcp_log_level': _get_str("MCP_LOG_LEVEL", log_level).upper(),
         'audit_log_file': os.getenv("AUDIT_LOG_FILE", ""),
         'max_upload_size': _get_int("MAX_UPLOAD_SIZE", 104857600),
         'use_firestore': _get_bool("SESSION_STORE_FIRESTORE", False),
-        'site_name': os.getenv("SITE_NAME", "Knowledge Base"),
+        'site_name': _get_str("SITE_NAME", "Knowledge Base"),
         'hide_graph': _get_bool("HIDE_GRAPH", False),
         # The MCP endpoint and the web UI are served by two separate uvicorn
         # servers so they can have different exposure: MCP is reachable from
         # the network and gated on an API key, while the web UI binds to
         # loopback by default. See kb_mcp.server.server.
-        'mcp_host': os.getenv("MCP_HOST", os.getenv("SERVER_HOST", "127.0.0.1")),
-        'web_host': os.getenv("WEB_HOST", "127.0.0.1"),
+        'mcp_host': _get_str("MCP_HOST", _get_str("SERVER_HOST", "127.0.0.1")),
+        'web_host': _get_str("WEB_HOST", "127.0.0.1"),
         'web_port': _get_int("WEB_PORT", _get_int("PORT", 8443) + 1),
     }
 
@@ -133,7 +148,7 @@ def get_default_llm_model() -> str:
     **Env Variable:** `DEFAULT_LLM_MODEL` (default: `gemini-2.5-flash-lite`).
     This is used as a fallback when specific model settings (e.g., SUMMARY_MODEL) are not set.
     """
-    return os.getenv("DEFAULT_LLM_MODEL", "gemini-2.5-flash-lite")
+    return _get_str("DEFAULT_LLM_MODEL", "gemini-2.5-flash-lite")
 
 def get_llm_config() -> dict:
     """All LLM settings.
@@ -152,21 +167,21 @@ def get_llm_config() -> dict:
             * `parser_comparison_model` (str): Parser comparison model (Env: `PARSER_COMP_MODEL`, defaults to DEFAULT_LLM_MODEL).
             * `privacy_filter_model` (str): Privacy classification model (Env: `PRIVACY_FILTER_MODEL`, defaults to DEFAULT_LLM_MODEL).
     """
-    base_url_models = json.loads(os.getenv("OPENAI_BASE_URL_MODELS", "{}"))
+    base_url_models = json.loads(_get_str("OPENAI_BASE_URL_MODELS", "{}"))
     return {
         'openai_api_key': os.getenv("OPENAI_API_KEY"),
         'openai_base_url': os.getenv("OPENAI_BASE_URL"),
         'openai_base_url_models': base_url_models,
         'default_model': get_default_llm_model(),
-        'summary_model': os.getenv("SUMMARY_MODEL", get_default_llm_model()),
-        'eval_gen_model': os.getenv("EVAL_GEN_MODEL", get_default_llm_model()),
-        'eval_judge_model': os.getenv("EVAL_JUDGE_MODEL", get_default_llm_model()),
+        'summary_model': _get_str("SUMMARY_MODEL", get_default_llm_model()),
+        'eval_gen_model': _get_str("EVAL_GEN_MODEL", get_default_llm_model()),
+        'eval_judge_model': _get_str("EVAL_JUDGE_MODEL", get_default_llm_model()),
         # Vision fallback, NOT the default LLM: text-only models silently
         # refuse images, so unset means a vision-capable default.
-        'image_description_model': os.getenv("PARSE_IMAGE_DESCRIPTION_MODEL", DEFAULT_IMAGE_DESCRIPTION_MODEL),
-        'graph_relation_extraction_model': os.getenv("GRAPH_EXTRACTION_MODEL", get_default_llm_model()),
-        'parser_comparison_model': os.getenv("PARSER_COMP_MODEL", get_default_llm_model()),
-        'privacy_filter_model': os.getenv("PRIVACY_FILTER_MODEL", get_default_llm_model()),
+        'image_description_model': _get_str("PARSE_IMAGE_DESCRIPTION_MODEL", DEFAULT_IMAGE_DESCRIPTION_MODEL),
+        'graph_relation_extraction_model': _get_str("GRAPH_EXTRACTION_MODEL", get_default_llm_model()),
+        'parser_comparison_model': _get_str("PARSER_COMP_MODEL", get_default_llm_model()),
+        'privacy_filter_model': _get_str("PRIVACY_FILTER_MODEL", get_default_llm_model()),
     }
 
 # Graph
@@ -181,10 +196,10 @@ def get_graph_config() -> dict:
             * `graph_relation_extraction_model` (str): Graph relation extraction model (Env: `GRAPH_EXTRACTION_MODEL`, defaults to DEFAULT_LLM_MODEL).
     """
     return {
-        'node_similarity_threshold': float(os.getenv("GRAPH_NODE_SIMILARITY_THRESHOLD", "0.85")),
+        'node_similarity_threshold': float(_get_str("GRAPH_NODE_SIMILARITY_THRESHOLD", "0.85")),
         'embedding': get_embedding_config(),
-        'graph_relation_extraction_model': os.getenv("GRAPH_EXTRACTION_MODEL", get_default_llm_model()),
-        'domain': os.getenv("GRAPH_DOMAIN", None),  # e.g., "mu2e" for Mu2e-specific extraction
+        'graph_relation_extraction_model': _get_str("GRAPH_EXTRACTION_MODEL", get_default_llm_model()),
+        'domain': _get_str("GRAPH_DOMAIN", None),  # e.g., "mu2e" for Mu2e-specific extraction
     }
 
 # Integrations
@@ -348,17 +363,17 @@ def get_parser_config() -> dict:
             * `table_summary_num_workers` (int): Parallel worker count (Env: `PARSE_TABLE_SUMMARY_NUMWORKERS`, default: 6).
     """
     return {
-        'parser': os.getenv("KB_PARSER", "kb-mcp"),
+        'parser': _get_str("KB_PARSER", "kb-mcp"),
         'image_additional_doc': _get_bool("PARSE_IMAGE_ADDITIONAL_DOC", True),
         'image_llm_description': _get_bool("PARSE_IMAGE_LLM_DESCRIPTION", True),
-        'image_description_model': os.getenv("PARSE_IMAGE_DESCRIPTION_MODEL", DEFAULT_IMAGE_DESCRIPTION_MODEL),
+        'image_description_model': _get_str("PARSE_IMAGE_DESCRIPTION_MODEL", DEFAULT_IMAGE_DESCRIPTION_MODEL),
         'image_description_num_workers': _get_int("PARSE_IMAGE_DESCRIPTION_NUMWORKERS", 6),
-        'marker_output_base': os.getenv("MARKER_OUTPUT_BASE", "data/sources/sld-scanned/extracted_output"),
+        'marker_output_base': _get_str("MARKER_OUTPUT_BASE", "data/sources/sld-scanned/extracted_output"),
         # OCR on by default: scanned-document pipelines depend on it.
         # Born-digital-only sweeps can disable it per-deployment for speed.
         'ocr': _get_bool("PARSE_OCR", True),
         'table_llm_summary': _get_bool("PARSE_TABLE_LLM_SUMMARY", False),
-        'table_summary_model': os.getenv("PARSE_TABLE_SUMMARY_MODEL", get_default_llm_model()),
+        'table_summary_model': _get_str("PARSE_TABLE_SUMMARY_MODEL", get_default_llm_model()),
         'table_summary_num_workers': _get_int("PARSE_TABLE_SUMMARY_NUMWORKERS", 6),
         # Docling CodeFormulaV2-based formula enrichment on PDF parses.
         # Recovers equations the layout model would otherwise leave as
@@ -373,7 +388,7 @@ def get_parser_config() -> dict:
         # off-decision is the careful one — "no math on this doc").
         'formula_enrichment_auto': _get_bool("PARSE_FORMULA_ENRICHMENT_AUTO", False),
         'formula_enrichment_auto_threshold': float(
-            os.getenv("PARSE_FORMULA_ENRICHMENT_AUTO_THRESHOLD", "0.0005")
+            _get_str("PARSE_FORMULA_ENRICHMENT_AUTO_THRESHOLD", "0.0005")
         ),
     }
 
@@ -397,9 +412,9 @@ def get_embedding_config() -> dict:
               token-windowing path.
     """
     return {
-        'provider': os.getenv("EMBEDDING_PROVIDER", "st"),
+        'provider': _get_str("EMBEDDING_PROVIDER", "st"),
         'model': os.getenv("EMBEDDING_MODEL"),
-        'chunk_strategy': os.getenv("CHUNK_STRATEGY", "tokens"),
+        'chunk_strategy': _get_str("CHUNK_STRATEGY", "tokens"),
         'chunk_from_docling_json': _get_bool("CHUNK_FROM_DOCLING_JSON", False),
     }
 
@@ -413,8 +428,8 @@ def get_eval_config() -> dict:
             * `judge_model` (str): Answer judging model (Env: `EVAL_JUDGE_MODEL`, defaults to DEFAULT_LLM_MODEL).
     """
     return {
-        'gen_model': os.getenv("EVAL_GEN_MODEL", get_default_llm_model()),
-        'judge_model': os.getenv("EVAL_JUDGE_MODEL", get_default_llm_model()),
+        'gen_model': _get_str("EVAL_GEN_MODEL", get_default_llm_model()),
+        'judge_model': _get_str("EVAL_JUDGE_MODEL", get_default_llm_model()),
     }
 
 def get_search_config() -> dict:
@@ -445,7 +460,7 @@ def get_reranker_config() -> dict:
     """
     return {
         'enabled': _get_bool("RERANKER_ENABLED", False),
-        'model_name': os.getenv("RERANKER_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2"),
+        'model_name': _get_str("RERANKER_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2"),
     }
 
 def get_agent_config() -> dict:
@@ -458,7 +473,7 @@ def get_agent_config() -> dict:
             * `max_depth` (int): Maximum recursion depth for agent delegation (Env: `AGENT_MAX_DEPTH`, default: 2).
     """
     return {
-        'agent_model': os.getenv("AGENT_MODEL", get_default_llm_model()),
+        'agent_model': _get_str("AGENT_MODEL", get_default_llm_model()),
         'max_depth': _get_int("AGENT_MAX_DEPTH", 2),
         'max_tool_output_chars': _get_int("AGENT_MAX_TOOL_OUTPUT_CHARS", 30000),
         'max_aggregated_tool_output_chars': _get_int("AGENT_MAX_AGGREGATED_TOOL_OUTPUT_CHARS", 100000),
@@ -467,11 +482,11 @@ def get_agent_config() -> dict:
 # Paths
 def get_data_dir() -> str:
     """Data directory. **Env Variable:** `DATA_DIR` (default: `data`)."""
-    return os.getenv("DATA_DIR", "data")
+    return _get_str("DATA_DIR", "data")
 
 def get_api_keys_file() -> str:
     """API keys file path. **Env Variable:** `API_KEYS_FILE`."""
-    return os.getenv("API_KEYS_FILE", f"{get_data_dir()}/api_keys.json")
+    return _get_str("API_KEYS_FILE", f"{get_data_dir()}/api_keys.json")
 
 def get_all_config() -> dict:
     """Get all configuration (sanitized for logging).
