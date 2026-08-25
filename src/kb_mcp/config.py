@@ -251,6 +251,9 @@ def get_auth_config() -> dict:
             * `github` (dict): GitHub OAuth configuration.
             * `globus` (dict): Globus OAuth configuration.
             * `oauth_provider` (str): OAuth provider name (default: None).
+            * `web_public_mode` (bool): Serve the browsable pages without a session,
+              keeping only the administrative pages behind the admin password
+              (Env: `WEB_PUBLIC_MODE`, default: False).
             * `admin_password` (str): Plaintext admin password for the web UI's
               write/administrative pages (Env: `ADMIN_PASSWORD`, default: '' = unset).
             * `admin_password_hash` (str): sha256 hex digest of the admin password,
@@ -301,6 +304,12 @@ def get_auth_config() -> dict:
     # password in plaintext without any code change.
     data['admin_password'] = os.getenv("ADMIN_PASSWORD", "")
     data['admin_password_hash'] = os.getenv("ADMIN_PASSWORD_HASH", "")
+
+    # Public mode: the browsable pages (documents, chat, graph, and the API
+    # reads they depend on) are served without any session at all, while the
+    # administrative pages stay behind the admin password. Off by default, so
+    # existing deployments keep requiring a session for everything.
+    data['web_public_mode'] = _get_bool("WEB_PUBLIC_MODE", False)
 
     web_override = _get_bool_or_none("WEB_REQUIRE_AUTH")
     data['web_require_auth'] = (

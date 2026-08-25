@@ -8,8 +8,14 @@ def get_site_name() -> str:
     return get_server_config()['site_name']
 
 
-def get_default_nav_items() -> list[tuple[str, str]]:
-    """Get default navigation items for all pages."""
+def get_default_nav_items(is_admin: bool = True) -> list[tuple[str, str]]:
+    """Navigation items for all pages.
+
+    Args:
+        is_admin: When False, only the publicly browsable pages are listed.
+            Statistics, logs, evaluations, upload and admin are omitted so
+            that a logged-out visitor is not shown links they cannot follow.
+    """
     server_config = get_server_config()
     items = [
         ("/web", get_site_name()),
@@ -17,39 +23,73 @@ def get_default_nav_items() -> list[tuple[str, str]]:
     ]
     if not server_config['hide_graph']:
         items.append(("/web/graph", "Knowledge Graph"))
-    items += [
-        ("/web/eval", "Evaluations"),
-        #("/web/compare", "Parser Compare"),
-        ("/web/statistics", "Statistics"),
-        ("/web/logs", "Logs"),
-        ("/web/upload", "Upload"),
-        ("/admin", "Admin"),
-        ("/status", "Status"),
-    ]
+
+    if is_admin:
+        items += [
+            ("/web/eval", "Evaluations"),
+            #("/web/compare", "Parser Compare"),
+            ("/web/statistics", "Statistics"),
+            ("/web/logs", "Logs"),
+            ("/web/upload", "Upload"),
+            ("/admin", "Admin"),
+        ]
+    items.append(("/status", "Status"))
     return items
 
 
-def base_template(title: str, content: str, nav_items: list[tuple[str, str]] | None = None, username: str | None = None) -> str:
+def base_template(
+    title: str,
+    content: str,
+    nav_items: list[tuple[str, str]] | None = None,
+    username: str | None = None,
+    *,
+    is_admin: bool | None = None,
+) -> str:
     """Generate base HTML template with navigation and styling.
-    
+
     Args:
         title: Page title
         content: Main page content (HTML)
-        nav_items: List of (url, label) tuples for navigation. If None, uses default navigation.
-        username: Current username (if logged in)
+        nav_items: List of (url, label) tuples for navigation. If None, uses
+            navigation appropriate to `is_admin`.
+        username: Current username (if logged in). Retained for callers that
+            still pass it; the nav shows admin state rather than identity.
+        is_admin: Whether the visitor has admin access. When None it is
+            resolved from the request-independent config: if no admin password
+            is configured there is nothing to log in to, so the full menu is
+            shown (matching the behaviour before the public/admin split).
     """
+    if is_admin is None:
+        from ...config import get_auth_config
+
+        auth_config = get_auth_config()
+        gate_configured = bool(
+            auth_config['admin_password'] or auth_config['admin_password_hash']
+        )
+        if not gate_configured:
+            # Nothing to log in to, so the admin pages are open anyway.
+            is_admin = True
+        else:
+            # Callers pass the session's username; a logged-in visitor is an
+            # admin, since in public mode a session only exists after clearing
+            # /admin/login (or an OAuth login, which sets has_admin itself).
+            is_admin = bool(username)
+
     if nav_items is None:
-        nav_items = get_default_nav_items()
+        nav_items = get_default_nav_items(is_admin=is_admin)
     
     nav_html = ""
     if nav_items:
         nav_html = '<div class="nav">'
         for url, label in nav_items:
             nav_html += f'<a href="{url}">{label}</a>'
-        if username:
-            nav_html += f'<a href="/logout" class="nav-right">Logout ({username})</a>'
+        # "Logged in" here means admin: the public pages need no identity at
+        # all, so the only state worth reflecting in the nav is whether the
+        # visitor has cleared the admin gate.
+        if is_admin:
+            nav_html += '<a href="/admin/logout" class="nav-right">Logout</a>'
         else:
-            nav_html += '<a href="/login" class="nav-right">Login</a>'
+            nav_html += '<a href="/admin/login" class="nav-right">Login</a>'
         nav_html += '</div>'
     
     return f"""<!DOCTYPE html>

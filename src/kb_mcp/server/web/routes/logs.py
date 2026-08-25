@@ -23,7 +23,7 @@ def setup_logs_routes(app, session_manager: WebSessionManager, require_auth_html
     async def web_logs(request: Request):
         """Search logs page with filtering."""
         # Check authentication first
-        session_data, redirect = await require_auth_html(request, session_manager)
+        session_data, redirect = await require_auth_html(request, session_manager, require_admin=True)
         if redirect:
             return redirect
 

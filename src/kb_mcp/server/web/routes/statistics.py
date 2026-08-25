@@ -23,7 +23,7 @@ def setup_statistics_routes(app, session_manager: WebSessionManager, require_aut
     async def web_statistics(request: Request):
         """Statistics page showing chunking strategies vs embedding names."""
         # Check authentication first
-        session_data, redirect = await require_auth_html(request, session_manager)
+        session_data, redirect = await require_auth_html(request, session_manager, require_admin=True)
         if redirect:
             return redirect
 

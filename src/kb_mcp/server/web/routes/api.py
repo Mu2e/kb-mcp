@@ -221,8 +221,10 @@ def setup_api_routes(app, session_manager: WebSessionManager):
 
     async def api_statistics(request: Request):
         """JSON API endpoint for getting statistics grid."""
-        # Check authentication first
-        session_data, error_response = await require_auth_api(request, session_manager, json_response=True)
+        # Backs the admin-only /web/statistics page, so it is gated too.
+        session_data, error_response = await require_auth_api(
+            request, session_manager, json_response=True, admin_only=True
+        )
         if error_response:
             return error_response
 

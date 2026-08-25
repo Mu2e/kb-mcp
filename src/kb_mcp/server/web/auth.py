@@ -48,6 +48,10 @@ class WebSessionManager:
             self._admin_password or self._admin_password_hash
         )
 
+        # See config.get_auth_config: serve the browsable pages without a
+        # session, keeping the administrative ones behind the admin password.
+        self.public_mode = auth_config['web_public_mode']
+
         self.require_auth = auth_config['web_require_auth']
         if not self.require_auth:
             logger.warning(
@@ -216,8 +220,6 @@ class WebSessionManager:
     # WEB_REQUIRE_AUTH is off and every visitor would otherwise be an admin;
     # it is not a replacement for real per-user authentication.
 
-    ADMIN_COOKIE = "kb_admin"
-
     def verify_admin_password(self, password: str) -> bool:
         """Check a submitted password against ADMIN_PASSWORD/ADMIN_PASSWORD_HASH."""
         if not password:
@@ -230,16 +232,33 @@ class WebSessionManager:
         return False
 
     async def start_admin_session(self, response) -> None:
-        """Mark a browser as admin-authenticated by setting a signed-ish cookie."""
-        token = secrets.token_urlsafe(32)
+        """Log the browser in as an admin.
+
+        Creates an ordinary web session with has_admin=True - the same shape
+        the OAuth callback produces - rather than a parallel admin-only
+        cookie, so every existing session consumer (get_session_username,
+        has_admin_access, the nav, the page handlers) sees a logged-in user
+        without special-casing the password path. When OAuth is reintroduced
+        it becomes a second way to reach the same state.
+        """
+        session_id = secrets.token_urlsafe(32)
+        current_time = time.time()
         await self.session_store.set(
-            "admin_sessions",
-            token,
-            {"created_at": time.time(), "expires_at": time.time() + self.session_timeout},
+            "sessions",
+            session_id,
+            {
+                "username": "admin",
+                "access_token": None,
+                "provider": "password",
+                "has_admin": True,
+                "created_at": current_time,
+                "expires_at": current_time + self.session_timeout,
+                "last_verified": current_time,
+            },
         )
         response.set_cookie(
-            self.ADMIN_COOKIE,
-            token,
+            "web_session",
+            session_id,
             max_age=self.session_timeout,
             httponly=True,
             secure=False,  # loopback HTTP by default
@@ -247,33 +266,24 @@ class WebSessionManager:
         )
 
     async def end_admin_session(self, request, response) -> None:
-        """Drop the admin cookie and its stored session."""
-        token = request.cookies.get(self.ADMIN_COOKIE)
-        if token:
-            await self.session_store.delete("admin_sessions", token)
-        response.delete_cookie(self.ADMIN_COOKIE)
+        """Log the browser out."""
+        session_id = request.cookies.get("web_session")
+        if session_id:
+            await self.session_store.delete("sessions", session_id)
+        response.delete_cookie("web_session")
 
     async def is_admin_unlocked(self, request) -> bool:
-        """True if this browser has cleared the admin password gate.
+        """True if this browser is logged in as an admin.
 
-        When no password is configured the gate is open, so that existing
-        deployments (and anyone who has not set ADMIN_PASSWORD yet) are not
-        locked out of their own upload and delete pages.
+        When no password is configured there is nothing to log in to, so the
+        gate is open - existing deployments are not locked out of their own
+        upload and delete pages.
         """
         if not self.admin_password_configured:
             return True
 
-        token = request.cookies.get(self.ADMIN_COOKIE)
-        if not token:
-            return False
-
-        data = await self.session_store.get("admin_sessions", token)
-        if not data:
-            return False
-        if data.get("expires_at", 0) < time.time():
-            await self.session_store.delete("admin_sessions", token)
-            return False
-        return True
+        session_data = await self.get_session_data(request)
+        return bool(session_data and session_data.get("has_admin"))
 
     def get_auth_warning_html(self) -> str:
         """Get HTML warning banner if authentication is disabled."""
@@ -412,6 +422,15 @@ def setup_shared_auth_routes(app, session_manager: WebSessionManager):
         redirect_after_login = request.query_params.get("redirect", "/web")
         provider_name = request.query_params.get("provider")
         
+        # In public mode there is nothing to log in to here: the browsable
+        # pages need no session, and admin access comes from /admin/login.
+        # Send visitors there rather than minting an anonymous session that
+        # would silently carry admin rights.
+        if session_manager.public_mode:
+            return RedirectResponse(
+                url=f"/admin/login?next={redirect_after_login}", status_code=303
+            )
+
         # If auth is disabled, create a dev session automatically
         if not session_manager.require_auth:
             session_id = secrets.token_urlsafe(32)

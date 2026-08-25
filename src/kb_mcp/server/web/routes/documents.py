@@ -59,6 +59,16 @@ async def require_auth_html(
     """
     session_data = await session_manager.get_session_data(request)
     if not session_data:
+        # In public mode the browsable pages need no identity at all, so a
+        # missing session is fine - only the admin gate below still applies.
+        # (Without this the page would redirect to /login, which with web auth
+        # disabled just mints a throwaway session and comes straight back.)
+        if session_manager.public_mode and not require_admin:
+            # No session: an anonymous visitor. Handlers read username from
+            # this dict, so an empty one renders the public view; a logged-in
+            # admin still has a session and is handled by the branch above.
+            return {}, None
+
         if redirect_url is None:
             # Include return path in login redirect
             return_path = str(request.url.path)
@@ -84,6 +94,7 @@ async def require_auth_api(
     request: Request,
     session_manager: WebSessionManager,
     json_response: bool = False,
+    admin_only: bool = False,
 ) -> tuple[dict | None, Response | JSONResponse | None]:
     """Check authentication for API routes.
     
@@ -98,6 +109,22 @@ async def require_auth_api(
         - If not authenticated: (None, Response/JSONResponse with 401)
     """
     session_data = await session_manager.get_session_data(request)
+
+    # Public mode: the read endpoints backing the browsable pages need no
+    # session. Endpoints marked admin_only still require the admin gate.
+    if session_manager.public_mode and not admin_only:
+        if not session_data:
+            return {}, None
+
+    if admin_only:
+        from ..auth import require_admin as require_admin_password
+
+        guard = await require_admin_password(request, session_manager)
+        if guard is not None:
+            if json_response:
+                return None, JSONResponse({"error": "Admin access required"}, status_code=403)
+            return None, guard
+
     if not session_data:
         if json_response:
             return None, JSONResponse(
