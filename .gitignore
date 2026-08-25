@@ -2,6 +2,7 @@ docs/slides
 certs/
 .env
 .env.local
+.env.web
 logs/
 data
 TODO.md

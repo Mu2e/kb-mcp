@@ -156,9 +156,14 @@ function initFilters() {
 
     // Update filters when search input changes
     if (searchInput) {
-        // Update filters when focus leaves the search field
+        // Update filters when focus leaves the search field, but only if the
+        // query actually changed - otherwise every stray blur (e.g. clicking
+        // a document card while the auto-focused search box has focus) wipes
+        // and reloads the document list, breaking the pending click.
         searchInput.addEventListener('blur', function() {
-            applyFilters();
+            if (searchInput.value !== currentFilters.search) {
+                applyFilters();
+            }
         });
 
         // Also update on Enter key
@@ -683,10 +688,9 @@ function createDocumentElement(doc, isSearchResult = false, showSimilarity = tru
     div.setAttribute('data-doc-type', doc.doc_type);
     div.setAttribute('data-doc-id', doc.id);
     
-    // Make entire box clickable
+    // Make entire box clickable, but let real links/buttons handle their own navigation
     div.addEventListener('click', function(e) {
-        // Don't navigate if clicking on action buttons
-        if (!e.target.closest('.document-actions')) {
+        if (!e.target.closest('a, .document-actions')) {
             window.location.href = `/web/document/${doc.id}`;
         }
     });
