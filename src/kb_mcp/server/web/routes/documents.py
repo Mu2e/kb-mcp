@@ -727,6 +727,24 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
                 except Exception as e:
                     logger.warning(f"Could not fetch raw document for {doc.id}: {e}")
 
+            # Whether persisted structured parser output exists - drives the
+            # "Parser" field link in the Document Information card below.
+            # The payload itself is only fetched on the dedicated sub-page.
+            has_parser_output = False
+            try:
+                timings['check_parser_output_since_last'] = time.time() - t0
+                t0 = time.time()
+                from ....kb.database import get_db_session
+                from ....kb.db_models import DocumentParserOutput
+                with get_db_session() as session:
+                    has_parser_output = session.query(
+                        DocumentParserOutput.document_id
+                    ).filter(DocumentParserOutput.document_id == doc.id).first() is not None
+                timings['check_parser_output'] = time.time() - t0
+                timings['check_parser_output_since_start'] = time.time() - t_start
+            except Exception as e:
+                logger.warning(f"Could not check parser output for {doc.id}: {e}")
+
             t0 = time.time()
             timings['build_meta_html_since_last'] = time.time() - t0
             meta_html = ""
@@ -1207,7 +1225,7 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
                     <tr><th>ID</th><td><code>{html_escape(str(doc.id))}</code></td></tr>
                     <tr><th>Source ID</th><td>{html_escape(str(doc.source_id))}</td></tr>
                     <tr><th>Document ID</th><td>{html_escape(str(doc.doc_id)) if doc.doc_id else "N/A"}</td></tr>
-                    <tr><th>Parser</th><td>{html_escape(str(doc.parser_id)) if doc.parser_id else "N/A"}</td></tr>
+                    <tr><th>Parser</th><td>{f'<a href="/web/document/{doc.id}/parser-output">{html_escape(str(doc.parser_id))}</a>' if doc.parser_id and has_parser_output else (html_escape(str(doc.parser_id)) if doc.parser_id else "N/A")}</td></tr>
                     <tr><th>Title</th><td>{html_escape(str(doc.title)) if doc.title else "N/A"}</td></tr>
                     <tr><th>URI</th><td>{uri_display}</td></tr>
                     <tr><th>Source Type</th><td>{html_escape(str(doc.source_type))}</td></tr>
@@ -2715,6 +2733,123 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
                 status_code=500,
             )
 
+    async def document_parser_output(request: Request):
+        """Show the persisted structured parser output for a document."""
+        session_data, redirect = await require_auth_html(request, session_manager)
+        if redirect:
+            return redirect
+        username = session_data.get("username")
+        doc_id = request.path_params["doc_id"]
+
+        try:
+            from ....kb import get
+            from ....kb.database import get_db_session
+            from ....kb.db_models import DocumentParserOutput, is_docling_document
+
+            doc = get(uid=doc_id)
+            if not doc:
+                return HTMLResponse(
+                    html_templates.base_template(
+                        "Document Not Found",
+                        '<div class="error-box"><h2>Document Not Found</h2><p>The requested document could not be found.</p><p><a href="/web">← Back to Document List</a></p></div>',
+                        None,
+                        username,
+                    ),
+                    status_code=404,
+                )
+
+            with get_db_session() as session:
+                row = session.query(DocumentParserOutput).filter(
+                    DocumentParserOutput.document_id == doc.id
+                ).first()
+                output = row.output if row else None
+                created_time = str(row.created_time)[:19] if row and row.created_time else None
+
+            if output is None:
+                return HTMLResponse(
+                    html_templates.base_template(
+                        "No Parser Output",
+                        f'<div class="error-box"><h2>No Parser Output</h2>'
+                        f'<p>Document <code>{html_escape(doc_id)}</code> has no persisted parser output.</p>'
+                        f'<p><a href="/web/document/{doc.id}">← Back to Document</a></p></div>',
+                        None,
+                        username,
+                    ),
+                    status_code=404,
+                )
+
+            doc_label = html_escape(str(doc.doc_id or doc.id))
+
+            # --- Structured summary ---
+            if is_docling_document(output):
+                schema_name = output.get("schema_name", "DoclingDocument")
+                version = output.get("version", "")
+                num_pages = len(output.get("pages") or {})
+                num_texts = len(output.get("texts") or [])
+                num_tables = len(output.get("tables") or [])
+                num_pictures = len(output.get("pictures") or [])
+                num_groups = len(output.get("groups") or [])
+                summary_card = f"""
+<div class="card">
+    <h2>Parser Output Summary</h2>
+    <table>
+        <tr><th>Schema</th><td>{html_escape(str(schema_name))} {html_escape(str(version))}</td></tr>
+        <tr><th>Parser</th><td>{html_escape(str(doc.parser_id)) if doc.parser_id else "N/A"}</td></tr>
+        <tr><th>Pages</th><td>{num_pages}</td></tr>
+        <tr><th>Text elements</th><td>{num_texts}</td></tr>
+        <tr><th>Tables</th><td>{num_tables}</td></tr>
+        <tr><th>Pictures</th><td>{num_pictures}</td></tr>
+        <tr><th>Groups</th><td>{num_groups}</td></tr>
+        {'<tr><th>Stored</th><td>' + html_escape(created_time) + '</td></tr>' if created_time else ''}
+    </table>
+</div>"""
+            else:
+                summary_card = f"""
+<div class="card">
+    <h2>Parser Output Summary</h2>
+    <table>
+        <tr><th>Parser</th><td>{html_escape(str(doc.parser_id)) if doc.parser_id else "N/A"}</td></tr>
+        <tr><th>Format</th><td>Unrecognized / non-DoclingDocument payload</td></tr>
+        {'<tr><th>Stored</th><td>' + html_escape(created_time) + '</td></tr>' if created_time else ''}
+    </table>
+</div>"""
+
+            # --- Raw JSON (collapsed by default) ---
+            raw_json = html_escape(json.dumps(output, indent=2, default=str))
+            raw_json_card = f"""
+<div class="card">
+    <h2>Raw Output <span onclick="document.getElementById('parser-raw-json').style.display = document.getElementById('parser-raw-json').style.display === 'none' ? 'block' : 'none';" style="cursor: pointer; font-size: 0.6em; color: #2196F3; user-select: none;">[toggle]</span></h2>
+    <pre id="parser-raw-json" style="display: none; white-space: pre-wrap; max-height: 600px; overflow-y: auto; padding: 10px; background: #f9f9f9; border: 1px solid #ddd; border-radius: 4px; font-size: 12px;">{raw_json}</pre>
+</div>"""
+
+            content = f"""
+<h1>Parser Output</h1>
+<p><a href="/web/document/{doc.id}">← Back to Document</a> ({doc_label})</p>
+{summary_card}
+{raw_json_card}
+"""
+            return HTMLResponse(
+                html_templates.base_template(
+                    f"Parser Output: {doc_label}",
+                    content,
+                    None,
+                    username,
+                )
+            )
+
+        except Exception as e:
+            logger.error(f"Error fetching parser output for {doc_id}: {e}", exc_info=True)
+            error_msg = html_escape(str(e))
+            return HTMLResponse(
+                html_templates.base_template(
+                    "Error",
+                    f'<div class="error-box"><h2>Error</h2><p>{error_msg}</p><p><a href="/web">← Back</a></p></div>',
+                    None,
+                    username,
+                ),
+                status_code=500,
+            )
+
     async def raw_document_detail(request: Request):
         """Show details for a raw document, its parsed versions, and any parser comparison."""
         session_data, redirect = await require_auth_html(request, session_manager)
@@ -3049,6 +3184,7 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
     app.add_route("/web/upload/meeting-comments", upload_meeting_comments_page, methods=["GET"])
     app.add_route("/web/upload/meeting", upload_meeting_comments, methods=["POST"])
     app.add_route("/web/upload/meeting-comments", upload_meeting_comments, methods=["POST"])
+    app.add_route("/web/document/{doc_id}/parser-output", document_parser_output, methods=["GET"])
     app.add_route("/web/raw/{raw_doc_id}", raw_document_detail, methods=["GET"])
     app.add_route("/web/compare", compare_page, methods=["GET"])
 
