@@ -452,13 +452,14 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
         timings = {}
         t_start = time.time()
         
-        # Check authentication first
-        session_data = await session_manager.get_session_data(request)
-        if not session_data:
-            return RedirectResponse(url="/login?redirect=/web")
-        
-        # Get username from authenticated session
+        # Viewing a document is public; the write controls on the page are not.
+        session_data, redirect = await require_auth_html(request, session_manager)
+        if redirect:
+            return redirect
+
+        # Empty dict for an anonymous visitor in public mode.
         username = session_data.get("username")
+        is_admin_view = bool(session_data.get("has_admin"))
         timings['auth'] = time.time() - t_start
 
         doc_id = request.path_params["doc_id"]
@@ -1119,6 +1120,67 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
             timings['gap_before_content'] = t_before_content - t_after_session_exit
             timings['time_until_content_start'] = t_before_content - t_start
             t0 = time.time()
+            # Document Functions (generate summary, re-chunk, find similar,
+            # delete) are admin-only. The endpoints behind the buttons already
+            # require admin, so this only avoids showing controls that would
+            # bounce an anonymous visitor to the login page.
+            document_functions_html = ""
+            if is_admin_view:
+                document_functions_html = f'''
+    <div class="card">
+        <h2>Document Functions</h2>
+        <div style="display: flex; gap: 15px; margin-top: 20px; align-items: flex-start;">
+            <div class="card" style="flex: 1; min-width: 200px; margin-top: 0;">
+                <!-- <h2>Generate Summary</h2> -->
+                <form id="generate-summary-form" method="POST" action="/web/document/{doc.id}/generate-summary">
+                    <button type="submit" id="generate-summary-submit-btn" style="width: 100%; padding: 10px 20px; background-color: #FF9800; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 14px;">Generate Summary</button>
+                </form>
+                <div id="generate-summary-status" style="margin-top: 10px;"></div>
+            </div>
+            
+            <div class="card" style="flex: 1; min-width: 250px; margin-top: 0;">
+                <!--<h2>Re-chunk and Embed</h2>-->
+                <form id="rechunk-form" method="POST" action="/web/document/{doc.id}/rechunk-embed">
+                    <button type="submit" id="rechunk-submit-btn" style="width: 100%; padding: 10px 20px; background-color: #2196F3; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; margin-bottom: 15px;">Re-chunk and Embed</button>
+                    <div>
+                        <label for="rechunk-strategy" style="display: block; margin-bottom: 5px; font-size: 14px; color: #666;">Re-chunk Strategy:</label>
+                        <select id="rechunk-strategy" name="strategy" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                            {rechunk_strategy_options}
+                        </select>
+                    </div>
+                </form>
+                <div id="rechunk-status" style="margin-top: 10px;"></div>
+            </div>
+            
+            <div class="card" style="flex: 1; min-width: 300px; margin-top: 0;">
+                <!--<h2>Find Similar Documents</h2>-->
+                <button id="load-similar-btn" style="width: 100%; padding: 10px 20px; background-color: #4CAF50; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; margin-bottom: 15px;">Find Similar Documents</button>
+                <div style="display: flex; gap: 10px; align-items: flex-end;">
+                    <div style="flex: 1;">
+                        <label for="similar-strategy" style="display: block; margin-bottom: 5px; font-size: 14px; color: #666;">Chunk Strategy:</label>
+                        <select id="similar-strategy" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                            {chunk_strategy_options_html_for_similar}
+                        </select>
+                    </div>
+                    <div style="min-width: 100px;">
+                        <label for="similar-max-results" style="display: block; margin-bottom: 5px; font-size: 14px; color: #666;">Max Results:</label>
+                        <input type="number" id="similar-max-results" value="3" min="1" max="20" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                    </div>
+                </div>
+                <div id="similar-content" style="margin-top: 15px; color: #666;"></div>
+            </div>
+            
+            <div class="card" style="flex: 1; min-width: 200px; margin-top: 0;">
+                <!--<h2>Delete Document</h2>-->
+                <form id="delete-form" method="POST" action="/web/document/{doc.id}/delete" onsubmit="return confirm('Are you sure you want to delete this document? This will also delete all chunks and embeddings. This action cannot be undone.');">
+                    <button type="submit" id="delete-submit-btn" style="width: 100%; padding: 10px 20px; background-color: #f44336; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 14px;">Delete Document</button>
+                </form>
+                <div id="delete-status" style="margin-top: 10px;"></div>
+            </div>
+        </div>
+    </div>
+'''
+
             content = f"""
             <h1>Document Details</h1>
             <p><a href="/web">← Back to Document List</a></p>
@@ -1176,58 +1238,7 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
                 </div>
                 {text_content if text_content else (f'<div class="info-box">No text content available.{" Summary is shown above." if doc.summary else ""}</div>')}
             </div>
-            <div class="card">
-                <h2>Document Functions</h2>
-                <div style="display: flex; gap: 15px; margin-top: 20px; align-items: flex-start;">
-                    <div class="card" style="flex: 1; min-width: 200px; margin-top: 0;">
-                        <!-- <h2>Generate Summary</h2> -->
-                        <form id="generate-summary-form" method="POST" action="/web/document/{doc.id}/generate-summary">
-                            <button type="submit" id="generate-summary-submit-btn" style="width: 100%; padding: 10px 20px; background-color: #FF9800; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 14px;">Generate Summary</button>
-                        </form>
-                        <div id="generate-summary-status" style="margin-top: 10px;"></div>
-                    </div>
-                    
-                    <div class="card" style="flex: 1; min-width: 250px; margin-top: 0;">
-                        <!--<h2>Re-chunk and Embed</h2>-->
-                        <form id="rechunk-form" method="POST" action="/web/document/{doc.id}/rechunk-embed">
-                            <button type="submit" id="rechunk-submit-btn" style="width: 100%; padding: 10px 20px; background-color: #2196F3; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; margin-bottom: 15px;">Re-chunk and Embed</button>
-                            <div>
-                                <label for="rechunk-strategy" style="display: block; margin-bottom: 5px; font-size: 14px; color: #666;">Re-chunk Strategy:</label>
-                                <select id="rechunk-strategy" name="strategy" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
-                                    {rechunk_strategy_options}
-                                </select>
-                            </div>
-                        </form>
-                        <div id="rechunk-status" style="margin-top: 10px;"></div>
-                    </div>
-                    
-                    <div class="card" style="flex: 1; min-width: 300px; margin-top: 0;">
-                        <!--<h2>Find Similar Documents</h2>-->
-                        <button id="load-similar-btn" style="width: 100%; padding: 10px 20px; background-color: #4CAF50; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; margin-bottom: 15px;">Find Similar Documents</button>
-                        <div style="display: flex; gap: 10px; align-items: flex-end;">
-                            <div style="flex: 1;">
-                                <label for="similar-strategy" style="display: block; margin-bottom: 5px; font-size: 14px; color: #666;">Chunk Strategy:</label>
-                                <select id="similar-strategy" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
-                                    {chunk_strategy_options_html_for_similar}
-                                </select>
-                            </div>
-                            <div style="min-width: 100px;">
-                                <label for="similar-max-results" style="display: block; margin-bottom: 5px; font-size: 14px; color: #666;">Max Results:</label>
-                                <input type="number" id="similar-max-results" value="3" min="1" max="20" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
-                            </div>
-                        </div>
-                        <div id="similar-content" style="margin-top: 15px; color: #666;"></div>
-                    </div>
-                    
-                    <div class="card" style="flex: 1; min-width: 200px; margin-top: 0;">
-                        <!--<h2>Delete Document</h2>-->
-                        <form id="delete-form" method="POST" action="/web/document/{doc.id}/delete" onsubmit="return confirm('Are you sure you want to delete this document? This will also delete all chunks and embeddings. This action cannot be undone.');">
-                            <button type="submit" id="delete-submit-btn" style="width: 100%; padding: 10px 20px; background-color: #f44336; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 14px;">Delete Document</button>
-                        </form>
-                        <div id="delete-status" style="margin-top: 10px;"></div>
-                    </div>
-                </div>
-            </div>
+            {document_functions_html}
             
             <script>
             // Initialize chunk highlighting for this document
@@ -1567,7 +1578,10 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
         """Redirect to document detail page by human-readable doc_id string."""
         session_data = await session_manager.get_session_data(request)
         if not session_data:
-            return RedirectResponse(url="/login?redirect=/web")
+            # Public in public mode; otherwise a session is still required.
+            if not session_manager.public_mode:
+                return RedirectResponse(url="/login?redirect=/web")
+            session_data = {}
 
         doc_id_str = request.path_params["doc_id_str"]
         from ....kb import get
