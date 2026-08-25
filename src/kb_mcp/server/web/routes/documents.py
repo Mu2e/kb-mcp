@@ -63,17 +63,24 @@ async def require_auth_html(
         # missing session is fine - only the admin gate below still applies.
         # (Without this the page would redirect to /login, which with web auth
         # disabled just mints a throwaway session and comes straight back.)
-        if session_manager.public_mode and not require_admin:
+        if session_manager.public_mode:
             # No session: an anonymous visitor. Handlers read username from
             # this dict, so an empty one renders the public view; a logged-in
             # admin still has a session and is handled by the branch above.
-            return {}, None
-
-        if redirect_url is None:
-            # Include return path in login redirect
-            return_path = str(request.url.path)
-            redirect_url = f"/login?redirect={return_path}"
-        return None, RedirectResponse(url=redirect_url, status_code=302)
+            #
+            # Admin pages fall through to the gate below rather than to the
+            # /login redirect: when no ADMIN_PASSWORD is configured the gate is
+            # open, and redirecting here would make those pages unreachable
+            # instead of merely unprotected.
+            if not require_admin:
+                return {}, None
+            session_data = {}
+        else:
+            if redirect_url is None:
+                # Include return path in login redirect
+                return_path = str(request.url.path)
+                redirect_url = f"/login?redirect={return_path}"
+            return None, RedirectResponse(url=redirect_url, status_code=302)
     
     # Check admin privileges if required.
     # Two independent gates, either of which is sufficient:

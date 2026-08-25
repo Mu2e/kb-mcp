@@ -67,7 +67,10 @@ def base_template(
             auth_config['admin_password'] or auth_config['admin_password_hash']
         )
         if not gate_configured:
-            # Nothing to log in to, so the admin pages are open anyway.
+            # Nothing to log in to. is_admin_unlocked() likewise returns True
+            # in this case, so the admin pages are reachable and the nav must
+            # list them - otherwise they would be unreachable rather than
+            # merely unprotected.
             is_admin = True
         else:
             # Callers pass the session's username; a logged-in visitor is an

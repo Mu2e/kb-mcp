@@ -286,14 +286,36 @@ class WebSessionManager:
         return bool(session_data and session_data.get("has_admin"))
 
     def get_auth_warning_html(self) -> str:
-        """Get HTML warning banner if authentication is disabled."""
-        if not self.require_auth:
+        """Banner shown when the site is genuinely running without protection.
+
+        In public mode the browsable pages are meant to be open and the
+        administrative ones are behind the admin password, so there is nothing
+        to warn about - the banner only appears when nothing is protecting the
+        write pages either.
+        """
+        if self.require_auth:
+            return ""
+
+        if self.public_mode:
+            if self.admin_password_configured:
+                # Browsing is meant to be open and the write pages are behind
+                # the password, so there is nothing to warn about.
+                return ""
+            # Public mode without a password: nobody can reach the write pages
+            # at all, because there is no way to obtain an admin session.
             return """
+            <div style="background: #fff3cd; border: 1px solid #ffc107; padding: 15px; margin-bottom: 20px; border-radius: 4px;">
+                <strong>No admin password set:</strong> the administrative pages
+                (upload, delete, statistics, logs, evaluations) cannot be reached.
+                Set <code>ADMIN_PASSWORD</code> to enable them.
+            </div>
+            """
+
+        return """
             <div style="background: #fff3cd; border: 1px solid #ffc107; padding: 15px; margin-bottom: 20px; border-radius: 4px;">
                 <strong>Development or Localhost Mode:</strong> Authentication is disabled (DISABLE_AUTH=true).
             </div>
             """
-        return ""
 
     async def create_oauth_login_url(
         self, provider: BaseOAuthProvider, redirect_after_login: str = "/web"
