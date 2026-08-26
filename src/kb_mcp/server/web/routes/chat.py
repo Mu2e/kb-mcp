@@ -107,7 +107,11 @@ def setup_chat_routes(app, session_manager: WebSessionManager, require_auth_html
         if redirect:
             return redirect
 
-        username = session_data.get('username', 'Unknown')
+        # No default: base_template reads a truthy username as "this visitor
+        # is an admin". In public mode an anonymous visitor has an empty
+        # session_data, and a placeholder here would render the admin nav and
+        # a Logout link as if they were logged in.
+        username = session_data.get('username')
 
         # Check if starting chat with document context
         doc_id = request.query_params.get('doc_id')
