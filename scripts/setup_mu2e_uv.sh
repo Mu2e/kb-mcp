@@ -28,7 +28,7 @@ export UV_CACHE_DIR="${UV_CACHE_DIR:-/tmp/$USER/uv-cache}"
 # Persistent data (model weights, etc.) lives separately from both the code
 # and the disposable local-scratch environment, so it survives /tmp cleanup
 # and isn't tied to a single node. Override with: KB_DATA_DIR=/some/path
-DATA_DIR="${KB_DATA_DIR:-/exp/mu2e/app/users/scorrodi/kb-mcp-data}"
+DATA_DIR="${KB_DATA_DIR:-/exp/mu2e/data/users/$USER/kb-mcp-data}"
 
 # 1. Make sure uv is available, installing it to ~/.local/bin if not
 if ! command -v uv >/dev/null 2>&1; then
@@ -43,15 +43,19 @@ echo "Using uv: $(command -v uv) ($(uv --version))"
 if [ ! -d "$LOCAL_ENV_DIR" ]; then
     echo "Local environment not found at $LOCAL_ENV_DIR. Creating..."
     uv venv "$LOCAL_ENV_DIR" --python "$PYTHON_VERSION"
-
-    source "$LOCAL_ENV_DIR/bin/activate"
-
-    echo "Installing project requirements from $SOURCE_CODE_DIR..."
-    uv pip install -e "$SOURCE_CODE_DIR"
 else
     echo "Local environment found. Activating..."
-    source "$LOCAL_ENV_DIR/bin/activate"
 fi
+
+source "$LOCAL_ENV_DIR/bin/activate"
+
+# Install (or top up) the project every time, not just on first creation:
+# a venv built before an extra was added here would otherwise stay stale, and
+# a missing parser backend fails silently — parse just returns empty text.
+# docling is the default parser for PDF/PPTX/DOCX/HTML, so it is not optional
+# in practice; test carries pytest so the suite runs without a second install.
+echo "Installing project requirements from $SOURCE_CODE_DIR..."
+uv pip install -e "$SOURCE_CODE_DIR[docling,test]"
 
 # 3. Configure environment
 mkdir -p "$DATA_DIR/huggingface_cache"

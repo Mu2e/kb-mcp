@@ -673,7 +673,12 @@ class Chunk(Base):
             Contextual text to embed (prefix + clean text), or the raw
             `chunk.text` for special / legacy cases.
         """
-        if self.chunk_strategy in ("summary", "image", "table"):
+        from ...chunking import base_strategy
+
+        # base_strategy() so a window-tagged name (`summary_256`) matches too.
+        # Missing it would hand split summaries a Section:/Context: prefix
+        # they were never budgeted for, pushing them back over the window.
+        if base_strategy(self.chunk_strategy or "") in ("summary", "image", "table"):
             return self.text or ""
 
         clean = self.text or ""

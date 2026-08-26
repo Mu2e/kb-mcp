@@ -158,20 +158,26 @@ def get_llm_config() -> dict:
 
             * `openai_api_key` (str|None): API Key (Env: `OPENAI_API_KEY`).
             * `openai_base_url` (str|None): Custom API base URL (Env: `OPENAI_BASE_URL`).
+            * `openai_api_key_models` (dict): Per-model API key overrides (Env: `OPENAI_API_KEY_MODELS`,
+              JSON object mapping model name -> key). Needed when models are routed to different
+              endpoints via `OPENAI_BASE_URL_MODELS`: without it, one endpoint's credential is sent
+              to all of them.
             * `default_model` (str): Default model fallback (Env: `DEFAULT_LLM_MODEL`).
             * `summary_model` (str): Summarization model (Env: `SUMMARY_MODEL`, defaults to DEFAULT_LLM_MODEL).
             * `eval_gen_model` (str): Evaluation question generation model (Env: `EVAL_GEN_MODEL`, defaults to DEFAULT_LLM_MODEL).
             * `eval_judge_model` (str): Evaluation answer judging model (Env: `EVAL_JUDGE_MODEL`, defaults to DEFAULT_LLM_MODEL).
-            * `image_description_model` (str): Model for image descriptions (Env: `PARSE_IMAGE_DESCRIPTION_MODEL`, defaults to a vision-capable model — see `DEFAULT_IMAGE_DESCRIPTION_MODEL`).
+            * `image_description_model` (str): Model for image descriptions (Env: `PARSE_IMAGE_DESCRIPTION_MODEL`, defaults to `DEFAULT_IMAGE_DESCRIPTION_MODEL`). Must be vision-capable and served by the endpoint it routes to — see `OPENAI_BASE_URL_MODELS`.
             * `graph_relation_extraction_model` (str): Graph relation extraction model (Env: `GRAPH_EXTRACTION_MODEL`, defaults to DEFAULT_LLM_MODEL).
             * `parser_comparison_model` (str): Parser comparison model (Env: `PARSER_COMP_MODEL`, defaults to DEFAULT_LLM_MODEL).
             * `privacy_filter_model` (str): Privacy classification model (Env: `PRIVACY_FILTER_MODEL`, defaults to DEFAULT_LLM_MODEL).
     """
     base_url_models = json.loads(_get_str("OPENAI_BASE_URL_MODELS", "{}"))
+    api_key_models = json.loads(_get_str("OPENAI_API_KEY_MODELS", "{}"))
     return {
         'openai_api_key': os.getenv("OPENAI_API_KEY"),
         'openai_base_url': os.getenv("OPENAI_BASE_URL"),
         'openai_base_url_models': base_url_models,
+        'openai_api_key_models': api_key_models,
         'default_model': get_default_llm_model(),
         'summary_model': _get_str("SUMMARY_MODEL", get_default_llm_model()),
         'eval_gen_model': _get_str("EVAL_GEN_MODEL", get_default_llm_model()),
@@ -351,6 +357,13 @@ def get_batch_config() -> dict:
 # axis ranges and data values on the same probe — a non-starter for
 # physics-figure retrieval where hallucinated specifics get embedded
 # into search.
+# Fallback when PARSE_IMAGE_DESCRIPTION_MODEL is unset. There is no model
+# name that is correct for every deployment, so treat this as a placeholder,
+# not a guarantee: whichever model you use must (a) be served by the endpoint
+# it is routed to and (b) actually support vision. Both are checked at parse
+# time by parser/image_descriptions.py, which refuses to run and names the
+# models the endpoint does serve rather than filling the document with
+# "Image description unavailable" placeholders.
 DEFAULT_IMAGE_DESCRIPTION_MODEL = "qwen/qwen3.6"
 
 
@@ -363,7 +376,7 @@ def get_parser_config() -> dict:
             * `parser` (str): Parser framework to use (Env: `KB_PARSER`, default: 'kb-mcp').
             * `image_additional_doc` (bool): Create separate docs for images (Env: `PARSE_IMAGE_ADDITIONAL_DOC`).
             * `image_llm_description` (bool): Use LLM for image descriptions (Env: `PARSE_IMAGE_LLM_DESCRIPTION`).
-            * `image_description_model` (str): Model for descriptions (Env: `PARSE_IMAGE_DESCRIPTION_MODEL`, defaults to a vision-capable model — `qwen/qwen3.6`).
+            * `image_description_model` (str): Model for descriptions (Env: `PARSE_IMAGE_DESCRIPTION_MODEL`, defaults to `DEFAULT_IMAGE_DESCRIPTION_MODEL`). Must be vision-capable and served by the endpoint it routes to — see `OPENAI_BASE_URL_MODELS`.
             * `image_description_num_workers` (int): Parallel worker count (Env: `PARSE_IMAGE_DESCRIPTION_NUMWORKERS`, default: 6).
             * `marker_output_base` (str): Base directory for pre-existing Marker output (Env: `MARKER_OUTPUT_BASE`, default: 'data/sources/sld-scanned/extracted_output').
             * `ocr` (bool): Run OCR during Docling PDF parsing (Env: `PARSE_OCR`, default: True). Required for scanned documents (e.g. SLD scans); born-digital-only sweeps can disable it for speed.
@@ -409,22 +422,36 @@ def get_embedding_config() -> dict:
 
             * `provider` (str): Provider name (Env: `EMBEDDING_PROVIDER`, default: 'st').
             * `model` (str|None): Specific model name (Env: `EMBEDDING_MODEL`).
-            * `chunk_strategy` (str): Chunking method (Env: `CHUNK_STRATEGY`, default: 'tokens').
-            * `chunk_from_docling_json` (bool): Route PDF parents through the
-              DoclingDocument-aware chunker that walks the persisted
-              `documents.parser_output["body"]` and emits chunks with
-              page_start/page_end/body_self_refs populated
-              (Env: `CHUNK_FROM_DOCLING_JSON`, default: false). When true and
-              the parent text doc's `parser_output` holds a DoclingDocument
-              payload, the dispatch in `chunk_document()` uses
-              `chunk_from_docling_json` instead of the Markdown
-              token-windowing path.
+            * `chunk_strategy` (str): Chunking method (Env: `CHUNK_STRATEGY`,
+              default: 'tokens'). `"section"` routes text documents whose
+              `parser_output` holds a DoclingDocument payload through the
+              structure-aware walker (`chunk_from_docling_json`), which emits
+              one chunk per section (splitting only oversized sections) with
+              page_start/page_end/body_self_refs/section_path populated —
+              rather than plain token windows.
+            * `chunk_size` (int|None): Target tokens per chunk for the
+              `tokens` strategy (Env: `CHUNK_SIZE`). None means unset, and the
+              chunker sizes itself to the embedding model's window instead of
+              guessing — see `kb.embedding.budget.token_chunk_size`. Ignored
+              by `section`, which always sizes itself from the window.
+            * `chunk_overlap` (int|None): Tokens of overlap between adjacent
+              token chunks (Env: `CHUNK_OVERLAP`). Unset means 10% of
+              `chunk_size`; the chunker clamps it to half of `chunk_size`.
+
+    Both are None when unset rather than carrying a coded default, so the
+    embedding layer can tell "the operator chose this" from "nobody said",
+    and only derive a window-sized value in the second case.
     """
+    chunk_size = os.getenv("CHUNK_SIZE")
+    chunk_overlap = os.getenv("CHUNK_OVERLAP")
     return {
         'provider': _get_str("EMBEDDING_PROVIDER", "st"),
         'model': os.getenv("EMBEDDING_MODEL"),
         'chunk_strategy': _get_str("CHUNK_STRATEGY", "tokens"),
-        'chunk_from_docling_json': _get_bool("CHUNK_FROM_DOCLING_JSON", False),
+        # Empty means unset in this codebase, so `CHUNK_SIZE=` must not read
+        # as an explicit 0.
+        'chunk_size': int(chunk_size) if chunk_size else None,
+        'chunk_overlap': int(chunk_overlap) if chunk_overlap else None,
     }
 
 def get_eval_config() -> dict:
@@ -507,7 +534,13 @@ def get_all_config() -> dict:
     return {
         'database': get_database_config(),
         'server': get_server_config(),
-        'llm': {**get_llm_config(), 'openai_api_key': '***'},
+        'llm': {
+            **get_llm_config(),
+            'openai_api_key': '***',
+            # Same secrets, one level down — redact the values, keep the
+            # model names so the routing stays inspectable.
+            'openai_api_key_models': {k: '***' for k in get_llm_config()['openai_api_key_models']},
+        },
         'github': {**get_github_oauth_config(), 'client_secret': '***'},
         'globus': {**get_globus_oauth_config(), 'client_secret': '***'},
         'auth': {k: v for k, v in get_auth_config().items() if k not in ['github', 'globus', 'oauth_provider']},

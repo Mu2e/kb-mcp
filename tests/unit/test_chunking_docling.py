@@ -121,7 +121,10 @@ def test_chunk_text_is_an_exact_slice_of_document_text():
     assert chunk["page_start"] == 1
     assert chunk["page_end"] == 2
     assert chunk["body_self_refs"] == ["#/texts/0", "#/texts/1", "#/texts/2"]
-    assert chunk["chunk_strategy"] == "section"
+    # Window-encoded: a re-chunk under a different encoder must land under a
+    # distinct name rather than silently replacing this one.
+    from kb_mcp.kb.embedding.budget import get_embed_budget
+    assert chunk["chunk_strategy"] == f"section_{get_embed_budget().window}"
 
 
 def test_slice_encloses_tables_and_pictures_between_elements():

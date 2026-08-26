@@ -1,10 +1,148 @@
 """Main parse function for document parsing."""
 
+import re
 import tempfile
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from .utils import detect_mime_type, get_parser
+
+
+# MIME types the Docling defaults cover. Docling emits structural records
+# (sections, tables, figures) and a `parser_output` artefact that the
+# multi-view consumers need; the legacy per-type parsers returned flat text
+# only. Pass parser_name="legacy" (or a specific backend) to opt out.
+_DOCLING_DEFAULT_MIMES = frozenset({
+    "application/pdf",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "text/html",
+    "application/xhtml+xml",
+})
+
+# Request-level values meaning "pick the right backend for this file type",
+# as opposed to naming a concrete parser. "kb-mcp" is the historical spelling.
+AUTO_PARSER_NAMES = (None, "kb-mcp", "auto")
+
+
+def resolve_parser_name(mime_type: Optional[str], parser_name: Optional[str]) -> Optional[str]:
+    """Resolve an auto-pick request to the backend that will actually run.
+
+    `parser_name="kb-mcp"` (or None) means "choose for me"; it is not a
+    parser. Left unresolved it ends up recorded as the thing that produced a
+    document, which is useless — every row says "kb-mcp" whether Docling,
+    Marker or the legacy text path ran. Resolving it up front lets callers
+    store the real backend in `documents.parser_id`.
+
+    A concrete name is returned untouched, so this is safe to apply more than
+    once along a call path.
+
+    Args:
+        mime_type: Detected MIME type of the file, or None if unknown.
+        parser_name: Requested parser, or an auto-pick sentinel.
+
+    Returns:
+        The concrete backend name for Docling-default types, otherwise
+        `parser_name` unchanged — including the sentinel, which `get_parser()`
+        resolves per type further down.
+    """
+    if parser_name in AUTO_PARSER_NAMES and mime_type in _DOCLING_DEFAULT_MIMES:
+        return "docling"
+    return parser_name
+
+
+def inline_docling_image_descriptions(
+    text: str,
+    image_dicts: List[dict],
+    structured_output: Optional[Dict[str, Any]],
+) -> str:
+    """Replace Docling's `<!-- image -->` markers with image descriptions.
+
+    Docling doesn't emit markdown image syntax — `export_to_markdown()`
+    writes a bare `<!-- image -->` HTML comment at each picture's position.
+    The `![alt](name)` regex used for other parsers never matches it, so
+    without this the descriptions never reach the parent document's text.
+
+    Each marker becomes::
+
+        ![{description}]({image_doc_id}) [image_id:{image_doc_id} image_num:{N}]
+
+    putting the description inline where the figure sits, tagged with the
+    image record's own `doc_id` — the identifier that actually resolves via
+    the KB tools. (`meta["image_name"]` is only a bare filename like
+    `_page_29_Figure_1.png`, meaningful relative to its parent; the child's
+    doc_id is the parent's doc_id plus that name, and is what a reader or an
+    LLM can look the figure up by.) Falls back to `image_name` when the
+    record carries no doc_id.
+
+    Markers are consumed in body order and matched against the picture
+    crefs in `structured_output["body"]["children"]`. Keying on the cref —
+    rather than counting markers positionally against `image_dicts` — keeps
+    the mapping correct when a picture was skipped during extraction (e.g.
+    `picture.get_image()` returned None), which would otherwise shift every
+    later description onto the wrong image.
+
+    Args:
+        text: Markdown text from `export_to_markdown()`.
+        image_dicts: Extracted picture records, carrying `doc_id`,
+            `meta["self_ref"]`, `meta["image_number"]` and either
+            `meta["description"]` or a `text` fallback. `meta["image_name"]`
+            is used as the reference only when `doc_id` is absent.
+        structured_output: The DoclingDocument payload, for body order.
+
+    Returns:
+        `text` with markers substituted. Returned unchanged when there are
+        no markers, no structured output, or nothing to substitute.
+    """
+    if "<!-- image -->" not in text or not structured_output:
+        return text
+
+    image_by_self_ref = {}
+    for img_dict in image_dicts:
+        meta = img_dict.get("meta", {})
+        self_ref = meta.get("self_ref")
+        if self_ref and (meta.get("description") or img_dict.get("text")):
+            image_by_self_ref[self_ref] = img_dict
+    if not image_by_self_ref:
+        return text
+
+    body_children = (structured_output.get("body") or {}).get("children") or []
+    picture_crefs = [
+        child.get("cref") for child in body_children
+        if isinstance(child, dict)
+        and (child.get("cref") or "").startswith("#/pictures/")
+    ]
+    marker_iter = iter(picture_crefs)
+
+    def _replace(match):
+        cref = next(marker_iter, None)
+        if cref is None:
+            return match.group(0)
+        img_dict = image_by_self_ref.get(cref)
+        if img_dict is None:
+            return match.group(0)
+        meta = img_dict.get("meta", {})
+        # Prefer the image record's own doc_id — that's the resolvable
+        # identifier. image_name is a bare filename and only a fallback.
+        image_ref = img_dict.get("doc_id") or meta.get("image_name")
+        image_number = meta.get("image_number")
+        # Inline the VLM description only. `img_dict["text"]` also bundles
+        # nearby_text + caption for the figure record's own retrieval, but
+        # those are the paragraphs already surrounding this marker —
+        # re-inlining them would duplicate that prose into the parent text.
+        description = (meta.get("description") or img_dict.get("text") or "").strip()
+        description = " ".join(description.split())
+        if not description:
+            return match.group(0)
+        if image_ref is None:
+            return f"![{description}]()"
+        if image_number is not None:
+            image_tag = f"[image_id:{image_ref} image_num:{image_number}]"
+        else:
+            image_tag = f"[image_id:{image_ref}]"
+        return f"![{description}]({image_ref}) {image_tag}"
+
+    return re.sub(r'<!-- image -->', _replace, text)
 
 
 def parse(
@@ -205,43 +343,11 @@ def parse(
         text_extraction_start = time.time()
         image_dicts = []
 
-        # Default PDF parser is Docling (DocLayNet + TableFormer). Pass
-        # parser_name="pypdf2" for the legacy fast path or
-        # parser_name="marker" for marker-pdf.
-        if mime_type == "application/pdf" and parser_name in (None, "kb-mcp"):
-            parser_name = "docling"
-
-        # Default PPTX parser is also Docling (since 2026-04-26). The
-        # unified Docling path emits structural records (sections,
-        # tables, figures) and a structured `parser_output` artefact that
-        # the downstream multi-view consumers use; the legacy parser_pptx
-        # returned only flat text. Pass parser_name="legacy" for the
-        # python-pptx route.
-        _PPTX_MIME = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
-        if mime_type == _PPTX_MIME and parser_name in (None, "kb-mcp"):
-            parser_name = "docling"
-
-        # Default HTML / XHTML parser is Docling (since 2026-04-26).
-        # Mu2e Wiki content is the primary HTML source; the importer wraps
-        # API-rendered MediaWiki HTML in a minimal shell and writes it as
-        # text/html. Docling's HTML reader produces markdown-formatted
-        # text with link syntax preserved, table records, and a
-        # `parser_output` artefact — the previous TextParser route
-        # stripped HTML to flat text. Pass parser_name="legacy" for
-        # TextParser.
-        if mime_type in ("text/html", "application/xhtml+xml") and parser_name in (None, "kb-mcp"):
-            parser_name = "docling"
-
-        # Default DOCX parser is Docling (since 2026-04-26).
-        # Smoke on a synthetic Mu2e-style tech note (no real DOCX in our
-        # local cache; DocDB has few): Docling preserves heading
-        # hierarchy as Markdown, extracts tables as doc_type="table"
-        # records, populates parser_output. Legacy parser_docx returned
-        # only flat text with no structural records. Pass
-        # parser_name="legacy" for the python-docx route.
-        _DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-        if mime_type == _DOCX_MIME and parser_name in (None, "kb-mcp"):
-            parser_name = "docling"
+        # Turn the "pick one for me" request into the backend that will
+        # actually run. Callers that record which parser produced a document
+        # resolve this first (see add_document) and pass the concrete name in,
+        # so this is a no-op for them.
+        parser_name = resolve_parser_name(mime_type, parser_name)
 
         # Optional PDF-only parsers, resolved lazily via importlib so their
         # heavy dependencies stay optional extras.
@@ -334,22 +440,27 @@ def parse(
 
         text_extraction_time = time.time() - text_extraction_start
         
-        # Generate image descriptions in parallel if enabled
+        # Generate image descriptions in parallel if enabled.
+        # Token counters are collected here and stashed in meta below: the
+        # documents row doesn't exist yet at parse time, so ingest() is what
+        # persists them once there's an id to attribute them to.
+        image_description_usage: Dict[str, Any] = {}
+        table_summary_usage: Dict[str, Any] = {}
         image_description_time = 0.0
         if generate_llm_descriptions and image_dicts:
             from .image_descriptions import generate_image_descriptions
             
             image_description_start = time.time()
             # Generate descriptions and update image dicts
-            image_dicts = generate_image_descriptions(text, image_dicts)
+            image_dicts = generate_image_descriptions(
+                text, image_dicts, usage_out=image_description_usage
+            )
             image_description_time = time.time() - image_description_start
-            
-            # Replace placeholders in main text with descriptions
-            import re
             
             # Map image_name to generated description and metadata.
             image_descriptions = {}
             image_meta_by_name = {}
+            image_doc_id_by_name = {}
             for img_dict in image_dicts:
                 if "text" not in img_dict or not img_dict["text"]:
                     continue
@@ -358,27 +469,37 @@ def parse(
                     continue
                 image_descriptions[image_name] = img_dict["text"]
                 image_meta_by_name[image_name] = img_dict.get("meta", {})
+                image_doc_id_by_name[image_name] = img_dict.get("doc_id")
 
             def replace_image_placeholder(match):
                 alt_text = match.group(1)
                 image_name = match.group(2)
-                
+
                 description = image_descriptions.get(image_name)
                 if description:
                     image_meta = image_meta_by_name.get(image_name, {})
                     image_number = image_meta.get("image_number")
+                    # Tag with the image record's own doc_id — the resolvable
+                    # identifier — falling back to the bare filename. The link
+                    # target stays `image_name`, which is what the original
+                    # markdown referenced.
+                    image_ref = image_doc_id_by_name.get(image_name) or image_name
                     if image_number is not None:
-                        image_tag = f"[image_id:{image_name} image_num:{image_number}]"
+                        image_tag = f"[image_id:{image_ref} image_num:{image_number}]"
                     else:
-                        image_tag = f"[image_id:{image_name}]"
+                        image_tag = f"[image_id:{image_ref}]"
 
                     # Keep a stable image tag in the text for traceability.
                     return f"![{description}]({image_name}) {image_tag}"
-                
+
                 return match.group(0) # No change if no description
 
             # Regex to match markdown image tags: ![alt](image_name)
             text = re.sub(r'!\[(.*?)\]\((.*?)\)', replace_image_placeholder, text)
+
+            text = inline_docling_image_descriptions(
+                text, image_dicts, structured_output
+            )
 
             # Fallback for old standard parser placeholders [Image n] if any remain
             for img_dict in image_dicts:
@@ -417,12 +538,10 @@ def parse(
             from .table_summaries import generate_table_summaries
 
             table_summary_start = time.time()
-            table_dicts = generate_table_summaries(table_dicts)
+            table_dicts = generate_table_summaries(
+                table_dicts, usage_out=table_summary_usage
+            )
             table_summary_time = time.time() - table_summary_start
-
-        # Sections-as-records. One dict per section_header in
-        # body order; lets search match at the section level via doc_type="section".
-        section_dicts = list(getattr(parser, "section_dicts", None) or [])
 
         # Set text on main document dict
         doc_data["text"] = text
@@ -439,15 +558,24 @@ def parse(
             "table_summary_time_seconds": round(table_summary_time, 3) if table_summary_time > 0 else None,
             "total_time_seconds": round(text_extraction_time + image_description_time + table_summary_time, 3),
         }
+
+        # Carry LLM token usage out of parsing the same way timing is carried.
+        # ingest() pops this and writes llm_usage rows against the document id.
+        parsing_usage = {}
+        if image_description_usage:
+            parsing_usage["image_description"] = image_description_usage
+        if table_summary_usage:
+            parsing_usage["table_summary"] = table_summary_usage
+        if parsing_usage:
+            doc_data["meta"]["_parsing_llm_usage"] = parsing_usage
         
-        # Return main document dict + section dicts + table dicts + image
-        # document dicts. Tables and sections are always emitted (no
-        # extract_images gate) — they're structural records, not raw image
-        # binaries.
+        # Return main document dict + table dicts + image document dicts.
+        # Tables are always emitted (no extract_images gate) — they're
+        # structural records, not raw image binaries.
         if create_additional_docs:
-            return [doc_data] + section_dicts + table_dicts + filtered_image_dicts
+            return [doc_data] + table_dicts + filtered_image_dicts
         else:
-            return [doc_data] + section_dicts + table_dicts
+            return [doc_data] + table_dicts
         
     finally:
         # Clean up temp file if we created it

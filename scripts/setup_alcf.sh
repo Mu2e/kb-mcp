@@ -83,8 +83,21 @@ fi
 # Only do setup if not in list-only mode
 if [ "$LIST_MODELS" = false ]; then
     # Lets make sure we have the dependencies installed
-    # mainly adds globus support
-    pip install -e ".[alcf]"
+    # mainly adds globus support.
+    #
+    # The project venv is created by scripts/setup_mu2e_uv.sh and has no `pip`
+    # binary inside it — a bare `pip` here resolves to whatever else is on
+    # PATH (on mu2egpvm* that's a broken cvmfs python2 pip). Prefer uv, and
+    # only fall back to pip when uv isn't available.
+    if command -v uv >/dev/null 2>&1; then
+        uv pip install -e ".[alcf]" || return 1
+    elif python -m pip --version >/dev/null 2>&1; then
+        python -m pip install -e ".[alcf]" || return 1
+    else
+        echo "Error: neither uv nor python -m pip is available; cannot install the [alcf] extra."
+        echo "       Source scripts/setup_mu2e_uv.sh first."
+        return 1
+    fi
 
     # get the latest script to authenticate with alcf
     curl -O https://raw.githubusercontent.com/argonne-lcf/inference-endpoints/refs/heads/main/inference_auth_token.py

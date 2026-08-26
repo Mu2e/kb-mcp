@@ -33,7 +33,7 @@ class GroupedHelpFormatter(argparse.RawDescriptionHelpFormatter):
 
             # Define groups with their commands in order (only primary names, aliases shown separately)
             command_groups = [
-                ("Document Operations", ["ingest", "get", "embed", "drop", "search", "similar"]),
+                ("Document Operations", ["ingest", "reparse", "get", "embed", "drop", "search", "similar"]),
                 ("Chunks, Embeddings & Sources", ["source", "chunks", "embedding"]),  # "emb" is an alias, will be shown
                 ("Knowledge Graph", ["graph"]),
                 ("Evaluation & Benchmarking", ["eval"]),
@@ -169,7 +169,7 @@ def main():
                 parser.print_help()
                 sys.exit(1)
         elif args.command == "logs":
-            from .tools_commands import cmd_logs_chunking, cmd_logs_parsing
+            from .tools_commands import cmd_logs_chunking, cmd_logs_parsing, cmd_logs_tokens
             from .search_commands import cmd_search_logs
             if args.logs_command == "search":
                 cmd_search_logs(args)
@@ -177,6 +177,8 @@ def main():
                 cmd_logs_chunking(args)
             elif args.logs_command == "parsing":
                 cmd_logs_parsing(args)
+            elif args.logs_command == "tokens":
+                cmd_logs_tokens(args)
             else:
                 parser.print_help()
                 sys.exit(1)

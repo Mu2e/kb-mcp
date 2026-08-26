@@ -25,6 +25,7 @@ def search_hybrid(
     max_chunks_per_doc: Optional[int] = None,
     rerank: Optional[bool] = None,
     doc_type_boost: Optional[Dict[str, float]] = None,
+    chunk_strategy_boost: Optional[Dict[str, float]] = None,
     expand_context: bool = False,
     expand_context_window: int = 1,
     **kwargs
@@ -260,61 +261,72 @@ def search_hybrid(
                 
         final_results = list(final_docs_map.values())
 
-        # Apply doc_type boosts from the query router plus the per-record
-        # meta signals. Both adjust each
-        # chunk's rrf_score after fusion and before final sort:
+        # Apply doc_type / chunk_strategy boosts from the query router plus
+        # the per-record meta signals. All adjust each chunk's rrf_score
+        # after fusion and before final sort:
         #
         #   * `doc_type_boost` — router-supplied factor per doc_type (e.g.
-        #     {"table": 1.7} for TABLE-typed queries).
+        #     {"table": 1.7} for TABLE-typed queries). Applies uniformly to
+        #     every chunk of a matching document.
+        #   * `chunk_strategy_boost` — router-supplied factor per
+        #     chunk_strategy (e.g. {"section": 1.3} for SYNTHESIS-typed
+        #     queries). Applies per-chunk, since a document's chunks can
+        #     carry a strategy the document's own doc_type doesn't name
+        #     (e.g. "section"-strategy chunks of a doc_type="text" document).
         #   * `num_rows / num_cols` — tables with fewer than 2 of either
         #     dimension are almost always page-layout artifacts; halve.
-        #   * `level` — sections at level 1 or 2 are top-level topic units
-        #     (good for SYNTHESIS); level >= 3 is paragraph-tier and gets
-        #     reduced.
         #   * `caption` — captioned image records carry an explicit
         #     authorial label that's stronger than incidental nearby_text;
         #     small bump.
         #
         # All factors compose multiplicatively. doc_provenance() makes the
-        # signals available on each result dict; falling back to 1.0 means
-        # records without a given key are unaffected.
+        # doc_type-level signals available on each result dict; falling back
+        # to 1.0 means records without a given key are unaffected.
         for doc in final_results:
-            factor = 1.0
-            applied = {}
+            doc_factor = 1.0
+            doc_applied = {}
 
             doc_type = doc.get("doc_type")
             if doc_type_boost:
                 f = doc_type_boost.get(doc_type)
                 if f and f != 1.0:
-                    factor *= f
-                    applied["doc_type_boost"] = f
+                    doc_factor *= f
+                    doc_applied["doc_type_boost"] = f
 
             if doc_type == "table":
                 num_rows = doc.get("num_rows")
                 num_cols = doc.get("num_cols")
                 if (num_rows is not None and num_rows < 2) or (num_cols is not None and num_cols < 2):
-                    factor *= 0.5
-                    applied["tiny_table_penalty"] = 0.5
-
-            if doc_type == "section":
-                level = doc.get("level")
-                if level is not None and level >= 3:
-                    factor *= 0.85
-                    applied["deep_section_penalty"] = 0.85
+                    doc_factor *= 0.5
+                    doc_applied["tiny_table_penalty"] = 0.5
 
             if doc_type == "image" and doc.get("caption"):
-                factor *= 1.15
-                applied["captioned_image_bump"] = 1.15
+                doc_factor *= 1.15
+                doc_applied["captioned_image_bump"] = 1.15
 
-            if factor != 1.0:
-                for chunk in doc["chunks"]:
+            for chunk in doc["chunks"]:
+                factor = doc_factor
+                applied = dict(doc_applied)
+
+                if chunk_strategy_boost:
+                    f = chunk_strategy_boost.get(chunk.get("chunk_strategy"))
+                    if f and f != 1.0:
+                        factor *= f
+                        applied["chunk_strategy_boost"] = f
+
+                if factor != 1.0:
                     chunk["rrf_score"] = chunk.get("rrf_score", 0.0) * factor
                     rrf_rank = chunk.setdefault("rrf_rank", {})
                     rrf_rank.update(applied)
 
-        # sort based on rrf_score
+        # sort based on rrf_score. Collapse split summaries again here: each
+        # backend already kept only its best summary chunk, but fusion merges
+        # on chunk_id, so if the two backends retained *different* pieces of
+        # one summary both survived into the fused document — and every piece
+        # rebuilds to the same full summary text.
+        from .chunk_text import collapse_summary_chunks
         for doc in final_results:
-            doc["chunks"].sort(key=lambda x: x["rrf_score"], reverse=True)
+            doc["chunks"] = collapse_summary_chunks(doc["chunks"], score_key="rrf_score")
             doc["best_rrf"] = doc["chunks"][0]["rrf_score"]
 
         final_results.sort(key=lambda x: x["best_rrf"], reverse=True)

@@ -234,10 +234,16 @@ def get_similar(
         if chunking_strategy is None:
             chunking_strategy = "summary"
 
-        # Get chunks for this document, optionally filtered by chunking_strategy
+        # Get chunks for this document, optionally filtered by chunking_strategy.
+        # Match the window-tagged stored name as well as the bare requested one
+        # ("summary" also finds "summary_256"), so this keeps working across
+        # the rename and against rows written before it. Built as an explicit
+        # IN list rather than a regex so it holds on SQLite too.
         chunk_query = session.query(Chunk).filter(Chunk.document_id == document_id)
         if chunking_strategy:
-            chunk_query = chunk_query.filter(Chunk.chunk_strategy == chunking_strategy)
+            from ...kb.embedding.chunking import resolve_strategy_name
+            wanted = {chunking_strategy, resolve_strategy_name(chunking_strategy)}
+            chunk_query = chunk_query.filter(Chunk.chunk_strategy.in_(wanted))
         chunks = chunk_query.all()
 
         if not chunks:

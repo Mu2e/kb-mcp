@@ -158,9 +158,11 @@ def _format_search_results(results: List[Dict[str, Any]], context_chars: int = 5
         doc_id = doc.id or doc_identifier
 
         # Prepare Content Body & Determine Status
+        from ..chunking import base_strategy
         summary_chunks = [
             c for c in chunks
-            if c.get("chunk_strategy") == "summary" or (c.get("char_start") is None and c.get("text"))
+            if base_strategy(c.get("chunk_strategy") or "") == "summary"
+            or (c.get("char_start") is None and c.get("text"))
         ]
         positioned_chunks = [c for c in chunks if c.get("char_start") is not None and c.get("char_end") is not None]
 
@@ -377,6 +379,7 @@ def kb_search(
         # Apply query router if enabled and using hybrid search
         route_info = None
         doc_type_boost = None
+        chunk_strategy_boost = None
         if search_fn is search:
             from ..config import get_search_config
             search_config = get_search_config()
@@ -395,6 +398,10 @@ def kb_search(
                 # doc_type boost: e.g. {"table": 1.7} for table-shaped queries.
                 # search_hybrid applies it after RRF.
                 doc_type_boost = route.doc_type_boost
+                # chunk_strategy boost: e.g. {"section": 1.3} for synthesis
+                # queries — keyed on the chunk's own strategy rather than its
+                # parent document's doc_type.
+                chunk_strategy_boost = route.chunk_strategy_boost
 
         # Build search kwargs
         search_kwargs = dict(
@@ -402,12 +409,15 @@ def kb_search(
             max_results=DEFAULT_MAX_RESULTS if max_results is None else max_results,
             filter=filter_dict,
         )
-        # Only pass rerank / doc_type_boost to hybrid search (which supports them).
+        # Only pass rerank / doc_type_boost / chunk_strategy_boost to hybrid
+        # search (which supports them).
         if search_fn is search:
             if rerank is not None:
                 search_kwargs["rerank"] = rerank
             if doc_type_boost:
                 search_kwargs["doc_type_boost"] = doc_type_boost
+            if chunk_strategy_boost:
+                search_kwargs["chunk_strategy_boost"] = chunk_strategy_boost
 
         response = search_fn(**search_kwargs)
 

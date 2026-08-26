@@ -1,8 +1,8 @@
 """Hierarchical context expansion for search hits.
 
 When `expand_context=True` is passed to a search call, this module attaches
-parent provenance + reading-order neighbours to every section / table /
-image hit. Result enrichment only — no LLM calls, no schema change.
+parent provenance + reading-order neighbours to every table / image hit.
+Result enrichment only — no LLM calls, no schema change.
 
 Dedup against hit text keeps the LLM's prompt context tight: if the
 parent's summary or a neighbour paragraph is already a substring of the
@@ -44,7 +44,7 @@ def attach_parent_provenance(
     window: int = 1,
 ) -> None:
     """Mutate `final_results` in place, attaching `parent_provenance` to every
-    section / table / image hit.
+    table / image hit.
 
     Each enriched result gains:
         result["parent_provenance"] = {
@@ -64,11 +64,15 @@ def attach_parent_provenance(
 
     with get_db_session(session) as session:
         # Collect parent UUIDs in one pass to avoid N+1 queries.
+        # "section"-strategy chunks live on doc_type="text" documents (they
+        # are their own parent, chunked with section boundaries respected)
+        # so only table / image records — genuinely separate child
+        # documents — need parent lookup here.
         parent_uids = {
             r["document"].parent_id
             for r in final_results
             if r.get("document") is not None
-            and r["document"].doc_type in ("section", "table", "image")
+            and r["document"].doc_type in ("table", "image")
             and r["document"].parent_id
         }
         parents_by_uid: Dict[str, Document] = {}
@@ -78,7 +82,7 @@ def attach_parent_provenance(
 
         for r in final_results:
             doc = r.get("document")
-            if doc is None or doc.doc_type not in ("section", "table", "image"):
+            if doc is None or doc.doc_type not in ("table", "image"):
                 continue
             parent = parents_by_uid.get(doc.parent_id) if doc.parent_id else None
             if parent is None:

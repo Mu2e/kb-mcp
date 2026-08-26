@@ -7,6 +7,7 @@ import time
 from typing import Dict, Optional
 
 from ..llm import get_openai_client
+from ..llm.usage import STAGE_PRIVACY_FILTER, record_llm_usage
 from ..config import get_llm_config
 
 logger = logging.getLogger(__name__)
@@ -51,12 +52,16 @@ Return ONLY a valid JSON object in this exact format:
 def classify_privacy(
     text: str,
     model: Optional[str] = None,
+    document_id: Optional[str] = None,
+    raw_document_id: Optional[str] = None,
 ) -> Dict[str, str]:
     """Classify a document's privacy level using an LLM.
 
     Args:
         text: Document text to classify (will be truncated to 32k chars)
         model: Model to use (overrides PRIVACY_FILTER_MODEL or DEFAULT_LLM_MODEL env var)
+        document_id: Parsed document classified. Only used to attribute tokens.
+        raw_document_id: Source file classified. Only used to attribute tokens.
 
     Returns:
         Dictionary with:
@@ -100,6 +105,14 @@ def classify_privacy(
             response_format={"type": "json_object"},
         )
         elapsed = time.time() - start_time
+
+        record_llm_usage(
+            getattr(response, "usage", None),
+            stage=STAGE_PRIVACY_FILTER,
+            model=model,
+            document_id=document_id,
+            raw_document_id=raw_document_id,
+        )
 
         content = response.choices[0].message.content.strip()
 

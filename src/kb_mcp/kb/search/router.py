@@ -49,6 +49,12 @@ class SearchRoute:
     # tells search_hybrid to boost chunks of table records by 50 %. None means
     # no per-doc_type bias.
     doc_type_boost: Optional[Dict[str, float]] = None
+    # chunk_strategy → rrf_score multiplier applied after fusion, same shape
+    # as doc_type_boost but keyed on the chunk's own chunk_strategy rather
+    # than its parent document's doc_type. Used for the "section" strategy
+    # (section-boundary chunks of a text document), which has no doc_type
+    # of its own to key off.
+    chunk_strategy_boost: Optional[Dict[str, float]] = None
 
 
 # --- Keyword patterns for rule-based classification ---
@@ -234,11 +240,11 @@ class QueryRouter:
                 max_results=10,       # More results for cross-doc reasoning
                 rerank=True,          # Rerank to surface best synthesis chunks
                 reasoning="Cross-document question — boosting section + summary context",
-                # Sections aggregate paragraph-level text under one heading, which
-                # is exactly what synthesis queries (compare / overview / list-all)
-                # want. A modest boost lifts them above raw chunks without
-                # drowning them.
-                doc_type_boost={"section": 1.3},
+                # "section"-strategy chunks aggregate paragraph-level text
+                # under one heading, which is exactly what synthesis queries
+                # (compare / overview / list-all) want. A modest boost lifts
+                # them above plain token chunks without drowning them.
+                chunk_strategy_boost={"section": 1.3},
             )
 
         if query_type == QueryType.PROCEDURAL:

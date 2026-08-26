@@ -32,11 +32,12 @@ from .config import (
 # 8x8 solid red PNG. Small enough to inline, big enough for any vision model
 # to answer "what colour is this?" — the cheapest way to tell a vision model
 # from a text-only one that politely refuses at HTTP 200.
-_RED_PNG_B64 = (
+# Public: image_descriptions.py runs the same probe as its parse-time preflight.
+RED_PNG_B64 = (
     "iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAEUlEQVR42mP4z8CAFTEMLQkAKP8"
     "/wc53yE8AAAAASUVORK5CYII="
 )
-_RED_WORDS = ("red", "crimson", "scarlet", "maroon", "vermilion")
+RED_WORDS = ("red", "crimson", "scarlet", "maroon", "vermilion")
 
 # Import sources are reachability-only: we check the host answers HTTP, not
 # that credentials work, because logging in has side effects (SSO session).
@@ -232,7 +233,7 @@ def check_vision(model: str, base_url: str, timeout: float = DEFAULT_TIMEOUT) ->
                         {"type": "text", "text": "What color is this image? Answer with one word."},
                         {
                             "type": "image_url",
-                            "image_url": {"url": f"data:image/png;base64,{_RED_PNG_B64}"},
+                            "image_url": {"url": f"data:image/png;base64,{RED_PNG_B64}"},
                         },
                     ],
                 }
@@ -246,7 +247,7 @@ def check_vision(model: str, base_url: str, timeout: float = DEFAULT_TIMEOUT) ->
         if not content:
             raise ValueError("model returned empty content — vision likely unsupported")
         reply = content.replace("\n", " ")[:80]
-        if not any(word in content.lower() for word in _RED_WORDS):
+        if not any(word in content.lower() for word in RED_WORDS):
             raise ValueError(
                 f"could not identify the test image (answered {reply!r}, expected 'red') — "
                 f"model is probably text-only; set PARSE_IMAGE_DESCRIPTION_MODEL to a "

@@ -3,6 +3,7 @@
 import hashlib
 import logging
 import os
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -416,6 +417,39 @@ def add_parsed_many(
     return result
 
 
+def _record_parsing_usage(
+    parsing_usage: Dict[str, Any],
+    document_id: str | None,
+    raw_document_id: str | None,
+) -> None:
+    """Write llm_usage rows for token counts collected during parsing.
+
+    Parsing happens before the document row exists, so image-description and
+    table-summary calls can't write their own rows at the time. `parse()`
+    stashes the per-stage totals in `meta["_parsing_llm_usage"]` and ingest
+    hands them here once there's an id to attribute them to.
+
+    One row per stage (not per API call): the counters arrive pre-aggregated
+    by `UsageAccumulator`, and per-call granularity for a 400-figure document
+    would bloat the table without answering a question anyone asks.
+    """
+    from ...llm.usage import USAGE_FIELDS, record_llm_usage
+
+    for batch in parsing_usage.values():
+        for stage, counters in (batch.get("by_stage") or {}).items():
+            snapshot = {field: counters.get(field, 0) for field in USAGE_FIELDS}
+            if not snapshot["total_tokens"]:
+                continue
+            record_llm_usage(
+                snapshot,
+                stage=stage,
+                model=counters.get("model"),
+                document_id=document_id,
+                raw_document_id=raw_document_id,
+                meta={"requests": counters.get("requests", 0), "aggregated": True},
+            )
+
+
 def add_document(
     file_path: Union[str, Path],
     *,
@@ -430,6 +464,8 @@ def add_document(
     skip_parse: bool = False,
     uri: Optional[str] = None,
     meta: Optional[Dict] = None,
+    creating_time: Optional[datetime] = None,
+    update_time: Optional[datetime] = None,
     session: Optional[Any] = None,
 ) -> Dict[str, Any]:
     """Add a document to the knowledge base from a file.
@@ -460,6 +496,10 @@ def add_document(
         uri: Optional URI for the document (e.g., external URL). If not provided and copy_to_kb is False,
              uses file:// URI. If copy_to_kb is True, uses the new file path.
         meta: Optional metadata dictionary to attach to the RawDocument
+        creating_time: When the document was created in the source system. Set on every
+                       Document produced from the file, including extracted image/table records.
+        update_time: When the document was last updated in the source system. Set on every
+                     Document produced from the file, including extracted image/table records.
         session: Optional database session. If provided, uses this session instead of creating a new one.
 
     Returns:
@@ -586,6 +626,14 @@ def add_document(
         file_size = file_stat.st_size
         source_type = detect_mime_type(actual_file_path)
 
+    # "kb-mcp" is a request to pick a backend, not a parser. Resolve it now, so
+    # the skip check below, the parsers row and documents.parser_id all record
+    # what actually ran (e.g. "docling") rather than the sentinel. Must happen
+    # before the skip check: that query compares parser_id against this name,
+    # and would never match a stored backend name if left as the sentinel.
+    from ...parser.parse import resolve_parser_name
+    parser_name = resolve_parser_name(source_type, parser_name)
+
     # Prepare URI
     if uri is None:
         uri = f"file://{actual_file_path.absolute()}"
@@ -701,8 +749,12 @@ def add_document(
 
         # Extract timing information from first document's meta (if available)
         timing_info = None
+        parsing_usage = None
         if doc_dicts and isinstance(doc_dicts[0].get("meta"), dict):
             timing_info = doc_dicts[0]["meta"].pop("_parsing_timing", None)
+            # Token usage collected during parsing, before the document row
+            # existed. Persisted below, once there's an id to attribute it to.
+            parsing_usage = doc_dicts[0]["meta"].pop("_parsing_llm_usage", None)
             # Remove filepath and filesize from metadata (internal fields not needed in DB)
             doc_dicts[0]["meta"].pop("filepath", None)
 
@@ -711,10 +763,18 @@ def add_document(
         # Convert dicts to Document objects
         documents = [Document.from_dict(doc_dict) for doc_dict in doc_dicts]
 
-        # Set raw_document_id and parser_id on all documents
+        # Set raw_document_id and parser_id on all documents. Source-system
+        # timestamps are applied here rather than through parse_data because
+        # the parser builds image/table records independently of the main
+        # document dict — they belong to the same source document and should
+        # carry the same creation/update times.
         for doc in documents:
             doc.raw_document_id = raw_doc_id
             doc.parser_id = parser.name
+            if creating_time is not None:
+                doc.creating_time = creating_time
+            if update_time is not None:
+                doc.update_time = update_time
 
         # Add all documents to the database (handles deduplication via dedup_level)
         added_docs = add_parsed_many(documents, dedup_level=dedup_level, session=db_session)
@@ -758,6 +818,14 @@ def add_document(
             hostname=socket.gethostname(),
         )
         session.add(log_entry)
+
+        # Persist the parser-stage token usage now that the document has an id.
+        if parsing_usage:
+            _record_parsing_usage(
+                parsing_usage,
+                document_id=first_doc.id if first_doc else None,
+                raw_document_id=raw_doc_id,
+            )
 
     logger.info(
         f"Ingested {result['num_documents']} document(s) from {actual_file_path.name} "

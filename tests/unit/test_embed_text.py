@@ -29,13 +29,27 @@ def test_no_section_path_returns_clean_text():
 
 
 def test_special_strategies_pass_through():
-    for strategy in ("summary", "image", "section", "table"):
+    for strategy in ("summary", "image", "table"):
         chunk = _chunk(
             text="Self-contained record text.",
             section_path="Should > Be > Ignored",
             chunk_strategy=strategy,
         )
         assert chunk.embed_text() == "Self-contained record text.", strategy
+
+
+def test_section_strategy_gets_section_path_prefix():
+    # "section"-strategy chunks are real section-boundary chunks of a text
+    # document, not a self-contained record — they get the normal prefix.
+    chunk = _chunk(
+        text="Section body text.",
+        section_path="Detector > Calorimeter",
+        chunk_strategy="section",
+    )
+    embedded = chunk.embed_text()
+    assert embedded.startswith("Section: Detector > Calorimeter")
+    assert embedded.endswith("Section body text.")
+    assert chunk.text == "Section body text."
 
 
 def test_legacy_baked_prefix_not_double_prefixed():

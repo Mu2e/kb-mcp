@@ -9,8 +9,9 @@ import html
 import io
 import logging
 import os
+import re
 from pathlib import Path
-from typing import Any, List, Tuple
+from typing import Any, List, Optional, Tuple
 
 from .parser_base import BaseParser
 
@@ -24,6 +25,54 @@ logger = logging.getLogger(__name__)
 # decides which one to use; both share the same format_options for non-PDF
 # inputs, so PPTX / DOCX / HTML / XLSX outputs are identical regardless.
 _CONVERTER_CACHE: dict = {}
+
+
+#: What Docling's Markdown export writes for a formula whose `text` is empty.
+_FORMULA_PLACEHOLDER = "<!-- formula-not-decoded -->"
+
+
+def _fill_undecoded_formulas(text: str, structured_output: Optional[dict]) -> str:
+    """Replace `<!-- formula-not-decoded -->` markers with the raw formula text.
+
+    A formula item Docling could not decode keeps its `text` empty but still
+    carries the layout model's raw reading in `orig`
+    (``"R µe = Γ( µ - + N ( A,Z ) → e - ...)"``). The Markdown export only
+    looks at `text`, so that reading is dropped and the equation reaches the
+    index as a comment carrying no signal at all.
+
+    `orig` is not LaTeX and is not as good as running the formula model, but
+    the symbols in it are what someone searching for the equation will type.
+    Falling back to it beats indexing a placeholder — and enrichment being off
+    is the default for documents whose math density doesn't justify the cost.
+
+    Markers are consumed in body order against the formula items, matching how
+    `inline_docling_image_descriptions` pairs picture markers with pictures.
+    """
+    if _FORMULA_PLACEHOLDER not in text or not structured_output:
+        return text
+
+    texts_by_ref = {
+        t.get("self_ref"): t for t in (structured_output.get("texts") or [])
+    }
+    body_children = (structured_output.get("body") or {}).get("children") or []
+    formula_refs = [
+        child.get("cref") for child in body_children
+        if isinstance(child, dict)
+        and (texts_by_ref.get(child.get("cref")) or {}).get("label") == "formula"
+    ]
+    marker_iter = iter(formula_refs)
+
+    def _replace(match):
+        ref = next(marker_iter, None)
+        if ref is None:
+            return match.group(0)
+        orig = ((texts_by_ref.get(ref) or {}).get("orig") or "").strip()
+        # Collapse the layout model's ragged spacing; keep it inline so the
+        # surrounding sentence still reads as one passage.
+        orig = " ".join(orig.split())
+        return orig or match.group(0)
+
+    return re.sub(re.escape(_FORMULA_PLACEHOLDER), _replace, text)
 
 
 def _get_converter(with_formula_enrichment: bool = False) -> Any:
@@ -41,6 +90,10 @@ def _get_converter(with_formula_enrichment: bool = False) -> Any:
       * `with_formula_enrichment=True`: PDF pipeline runs the
         `CodeFormulaV2` model on each page. Recovers `$$...$$` LaTeX
         blocks at ~+78 % parse time on equation-heavy documents.
+
+    Raises:
+        ImportError: docling is not installed.
+        RuntimeError: the converter could not be constructed.
     """
     if with_formula_enrichment in _CONVERTER_CACHE:
         return _CONVERTER_CACHE[with_formula_enrichment]
@@ -60,9 +113,15 @@ def _get_converter(with_formula_enrichment: bool = False) -> Any:
             AcceleratorOptions,
             PdfPipelineOptions,
         )
-    except ImportError:
-        logger.error("docling not installed. Install with: pip install docling")
-        return None
+    except ImportError as e:
+        # Raise rather than degrade: a missing backend used to surface as an
+        # empty parse, which the ingest pipeline happily stored as a
+        # zero-length document and reported as a successful import.
+        raise ImportError(
+            "docling is not installed, but it is the default parser for "
+            "PDF/PPTX/DOCX/HTML/XLSX. Install the extra: "
+            'pip install -e ".[docling]"'
+        ) from e
 
     # Honour cache dirs set by nersc_setup_docling.sh (must be set before torch/hf imports)
     if "DOCLING_CACHE_DIR" in os.environ:
@@ -101,8 +160,7 @@ def _get_converter(with_formula_enrichment: bool = False) -> Any:
         _CONVERTER_CACHE[with_formula_enrichment] = converter
         return converter
     except Exception as e:
-        logger.error(f"Failed to initialize docling: {e}")
-        return None
+        raise RuntimeError(f"Failed to initialize docling: {e}") from e
 
 
 def _cuda_available() -> bool:
@@ -111,147 +169,6 @@ def _cuda_available() -> bool:
         return bool(torch.cuda.is_available())
     except Exception:
         return False
-
-
-def _extract_section_records(docling_dict: dict, parent_data: dict) -> list:
-    """Walk DoclingDocument body and emit one `doc_type="section"` dict per section.
-
-    Hierarchical retrieval: chunks already carry
-    `section_path`, but to *retrieve* at the section level we need the section
-    itself as an indexable record. This helper does a flat pass over
-    `docling_dict["body"]["children"]`: every `section_header` (or `title`)
-    text element opens a new section; subsequent text and group bodies
-    accumulate into that section until the next header. Tables and pictures
-    are skipped — they're already first-class records of their own.
-
-    Sections without text (heading-only with no following body) are dropped.
-
-    Returns a list of Document-shaped dicts:
-      - doc_type="section", source_type="text/markdown"
-      - text = "<title>\\n\\n<aggregated section text>"
-      - meta = {section_index, section_title, level, page_start, page_end,
-                self_ref, parser}
-      - parent_id wired to the parent text doc later (after parent is saved)
-
-    Search backends can filter or boost on `doc_type="section"` to give
-    callers the "level=section" view the advice memo asks for.
-    """
-    body = (docling_dict.get("body") or {})
-    body_children = body.get("children") or []
-    texts_by_ref = {
-        t.get("self_ref") or f"#/texts/{i}": t
-        for i, t in enumerate(docling_dict.get("texts") or [])
-    }
-    groups_by_ref = {
-        g.get("self_ref") or f"#/groups/{i}": g
-        for i, g in enumerate(docling_dict.get("groups") or [])
-    }
-
-    sections: list = []
-    current_title: str = ""
-    current_self_ref = None
-    current_level: int = 1
-    current_parts: list = []
-    current_pages: set = set()
-
-    def flush():
-        nonlocal current_title, current_self_ref, current_level, current_parts, current_pages
-        body_text = "\n\n".join(p for p in current_parts if p).strip()
-        if body_text:
-            pages = sorted(p for p in current_pages if p is not None)
-            sections.append({
-                "title": current_title,
-                "level": current_level,
-                "self_ref": current_self_ref,
-                "text": body_text,
-                "page_start": pages[0] if pages else None,
-                "page_end": pages[-1] if pages else None,
-            })
-        current_title = ""
-        current_self_ref = None
-        current_level = 1
-        current_parts = []
-        current_pages = set()
-
-    def collect_pages_from(prov_list):
-        if not prov_list:
-            return
-        for p in prov_list:
-            pn = p.get("page_no") if isinstance(p, dict) else None
-            if pn:
-                current_pages.add(pn)
-
-    for child in body_children:
-        cref = child.get("cref") if isinstance(child, dict) else None
-        if not cref:
-            continue
-        if cref.startswith("#/texts/"):
-            t = texts_by_ref.get(cref) or {}
-            label = t.get("label")
-            txt = (t.get("text") or "").strip()
-            if label in ("section_header", "title") and txt:
-                flush()
-                current_title = txt
-                current_self_ref = t.get("self_ref")
-                current_level = t.get("level") or 1
-                collect_pages_from(t.get("prov"))
-            elif txt:
-                current_parts.append(txt)
-                collect_pages_from(t.get("prov"))
-        elif cref.startswith("#/groups/"):
-            g = groups_by_ref.get(cref) or {}
-            for sub in g.get("children") or []:
-                sub_cref = sub.get("cref") if isinstance(sub, dict) else None
-                if not sub_cref or not sub_cref.startswith("#/texts/"):
-                    continue
-                sub_t = texts_by_ref.get(sub_cref) or {}
-                sub_txt = (sub_t.get("text") or "").strip()
-                if not sub_txt:
-                    continue
-                # Prefix list items with a bullet so the chunker still treats
-                # them as a list when re-rendered into chunk.text.
-                if sub_t.get("label") == "list_item":
-                    current_parts.append(f"- {sub_txt}")
-                else:
-                    current_parts.append(sub_txt)
-                collect_pages_from(sub_t.get("prov"))
-        # tables / pictures / form_items / key_value_items: skip (own records)
-
-    flush()
-
-    section_dicts: list = []
-    parent_doc_id = parent_data.get("doc_id", "doc")
-    for idx, s in enumerate(sections):
-        text = f"{s['title']}\n\n{s['text']}".strip() if s["title"] else s["text"]
-        section_dict = {
-            "source_id": parent_data.get("source_id", "local"),
-            "doc_id": f"{parent_doc_id}-section-{idx}",
-            "doc_type": "section",
-            "source_type": "text/markdown",
-            "text": text,
-            "parent_id": parent_data.get("id"),
-            "meta": {
-                "section_index": idx,
-                "section_title": s["title"] or None,
-                "level": s["level"],
-                "page_start": s["page_start"],
-                "page_end": s["page_end"],
-                "self_ref": s["self_ref"],
-                "parser": "docling",
-                # Resolved by `add_many()` in operations.py: looks up the
-                # parent's UUID by external doc_id and sets `parent_id` on
-                # the child Document. Required for hierarchical retrieval
-                # — without it section/table/image
-                # records land with parent_id=NULL.
-                "parent_doc_id": parent_doc_id,
-            },
-        }
-        if "meta" in parent_data:
-            merged = dict(parent_data["meta"])
-            merged.update(section_dict["meta"])
-            section_dict["meta"] = merged
-        section_dicts.append(section_dict)
-    return section_dicts
 
 
 def _build_nearby_text_index(docling_dict: dict, window: int = 2) -> dict:
@@ -313,10 +230,6 @@ class DoclingParser(BaseParser):
         # doc_type="table" carrying the rendered Markdown table + provenance
         # metadata. Walked into the returned doc_dicts by `parse()`.
         self.table_dicts: list[dict] = []
-        # Sections-as-records: each entry is a Document-shaped dict with
-        # doc_type="section" — one per section_header in the body. Lets
-        # search ask for level=section matches.
-        self.section_dicts: list[dict] = []
 
     def extract_text(self) -> str:
         text, _ = self.extract_text_and_images_dict({})
@@ -347,7 +260,13 @@ class DoclingParser(BaseParser):
         try:
             from ..config import get_parser_config
             cfg = get_parser_config()
-            if cfg.get("formula_enrichment_auto", False) and self.mime_type == "application/pdf":
+            # `doc_type`, not `mime_type`: ParserBase stores the MIME type it
+            # was constructed with under that name. Reading a non-existent
+            # attribute here raised AttributeError into the except below,
+            # which silently left enrichment off — so the auto path never
+            # once fired, and it masked the manual flag too (the `elif` is
+            # unreachable once the `if` raises).
+            if cfg.get("formula_enrichment_auto", False) and self.doc_type == "application/pdf":
                 from .math_density import should_enable_formula_enrichment
                 threshold = cfg.get("formula_enrichment_auto_threshold", 0.005)
                 enable_formula, density = should_enable_formula_enrichment(
@@ -362,11 +281,15 @@ class DoclingParser(BaseParser):
             elif cfg.get("formula_enrichment", False):
                 enable_formula = True
         except Exception as cfg_err:
-            logger.debug(f"formula-enrichment dispatch fell back to default: {cfg_err}")
+            # Warning, not debug: this path silently disables a feature the
+            # operator explicitly switched on, and at debug level that hid a
+            # plain AttributeError indefinitely.
+            logger.warning(
+                "formula-enrichment dispatch failed (%s: %s); parsing without it",
+                type(cfg_err).__name__, cfg_err,
+            )
 
         converter = _get_converter(with_formula_enrichment=enable_formula)
-        if converter is None:
-            return "", []
 
         try:
             result = converter.convert(str(self.file_path))
@@ -391,13 +314,7 @@ class DoclingParser(BaseParser):
             # Markdown output (e.g. `Rate &lt; 20 kcps`). Unescape so chunks
             # carry the original text.
             text = html.unescape(doc.export_to_markdown())
-
-            # Sections-as-records. Hierarchical retrieval —
-            # one Document per section_header in the body, with the
-            # aggregated section text as `text`. Indexed alongside chunks; the
-            # router boosts these for SYNTHESIS queries that want broader
-            # context.
-            self.section_dicts = _extract_section_records(self.structured_output or {}, parent_data)
+            text = _fill_undecoded_formulas(text, self.structured_output)
 
             # Tables-as-records. Walk doc.tables, render each
             # as a Markdown table (caption + grid), and emit a Document-shaped
@@ -464,6 +381,7 @@ class DoclingParser(BaseParser):
                         "source_type": "text/markdown",
                         "text": table_text,
                         "parent_id": parent_data.get("id"),
+                        "uri": parent_data.get("uri"),
                         "meta": {
                             "table_index": idx,
                             "page": page_no,
@@ -533,6 +451,7 @@ class DoclingParser(BaseParser):
                         "source_type": parent_data.get("source_type"),
                         "binary": img_bytes,
                         "parent_id": parent_data.get("id"),
+                        "uri": parent_data.get("uri"),
                         "meta": {
                             "image_name": img_name,
                             "image_number": idx,
@@ -567,5 +486,7 @@ class DoclingParser(BaseParser):
             return text, image_dicts
 
         except Exception as e:
+            # Same reasoning as the import failure above: returning empty text
+            # here would be recorded as a successfully parsed, empty document.
             logger.error(f"Error parsing with docling: {e}", exc_info=True)
-            return "", []
+            raise

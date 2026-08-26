@@ -27,8 +27,12 @@ def test_table_doc_surfaces_table_keys():
     assert "unrelated" not in out
 
 
-def test_section_doc_surfaces_section_keys():
-    out = doc_provenance(_doc("section", {
+def test_page_range_and_section_keys_surface_regardless_of_doc_type():
+    # doc_provenance() reads these keys generically from meta — it doesn't
+    # hardcode a doc_type. Section-level info now lives on Chunk rows
+    # (chunk_strategy="section"), not a dedicated section Document, but any
+    # doc_type carrying these meta keys still surfaces them.
+    out = doc_provenance(_doc("table", {
         "page_start": 3, "page_end": 5, "section_title": "Calorimeter", "level": 2,
     }))
     assert out["page_start"] == 3

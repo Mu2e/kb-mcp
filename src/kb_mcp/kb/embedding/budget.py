@@ -213,6 +213,37 @@ class EmbedBudget:
         return budget
 
 
+# Measured over 500 corpus gists, as `Context: {gist}\n\n` in word-pieces:
+# p50 43, p90 57, p99 69, max 72. The token chunker's size has to be one
+# number for the whole corpus (it names the strategy), so it reserves the
+# worst case rather than a typical one — a document with a long gist would
+# otherwise overflow silently, which is the failure this all exists to stop.
+GIST_ALLOWANCE = 72
+
+
+def token_chunk_size(window: Optional[int] = None) -> int:
+    """Default `chunk_size` for the token chunker, in **tiktoken** units.
+
+    The token chunker slices by tiktoken offsets, but the encoder reads
+    word-pieces and truncates at its window without complaining. `chunk_size`
+    was left at 1000 — an 8191-window OpenAI-era default — long after the
+    model became a 256-window MiniLM, so ~89% of token chunks had roughly
+    three quarters of their text embedded as nothing.
+
+    So: take the window, pay the encoder's specials and the worst-case gist
+    prefix `embed_text()` prepends, then convert word-pieces to tiktoken with
+    the measured worst-case ratio.
+
+    Depends only on the window, never on the document — the number lands in
+    the strategy name (`tokens_137_14`), which has to mean the same thing for
+    every row.
+    """
+    if window is None:
+        window, _counter, _exact = _resolve()
+    content = window - SPECIAL_TOKENS - GIST_ALLOWANCE
+    return max(MIN_CONTENT_BUDGET, int(content / FALLBACK_RATIO))
+
+
 def get_embed_budget(
     gist: Optional[str] = None,
     prepend_section_path: bool = True,

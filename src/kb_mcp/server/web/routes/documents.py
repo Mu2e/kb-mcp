@@ -552,6 +552,7 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
             chunk_strategy_options_html_for_similar = '<option value="summary" selected>summary</option>'
             try:
                 from ....kb.embedding import get_chunk_strategies
+                from ....chunking import base_strategy
                 timings['get_all_strategies_since_last'] = time.time() - t0
                 t0 = time.time()
                 all_strategies = get_chunk_strategies()  # Get all strategies, not just for this document
@@ -562,7 +563,7 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
                     if strategy_name:
                         chunk_strategy_options_html += f'<option value="{html_escape(strategy_name)}">{html_escape(strategy_name)}</option>'
                         # For similar documents, include all strategies but default to summary
-                        if strategy_name != "summary":
+                        if base_strategy(strategy_name) != "summary":
                             chunk_strategy_options_html_for_similar += f'<option value="{html_escape(strategy_name)}">{html_escape(strategy_name)}</option>'
             except (ImportError, Exception) as e:
                 logger.debug(f"Could not load chunk strategies: {e}")
@@ -591,6 +592,7 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
                     <span onclick="toggleTextContent()" style="position: absolute; top: 10px; right: 10px; cursor: pointer; font-size: 16px; color: #666; user-select: none; background: white; padding: 2px 6px; border-radius: 3px;">+</span>
                 </div>
             </div>
+            <div id="unpositioned-chunks" style="display: none; margin-top: 15px;"></div>
             <script>
             function toggleTextContent() {{
                 const expanded = document.getElementById('text-expanded');

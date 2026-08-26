@@ -200,6 +200,7 @@ class PDFParser(BaseParser):
                                             "source_type": "image/png",
                                             "doc_type": "image",
                                             "binary": image_bytes,
+                                            "uri": parent_data.get("uri"),
                                             "meta": {
                                                 "page": page_num_1_indexed,
                                                 "image_number": image_counter,

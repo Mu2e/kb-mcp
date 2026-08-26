@@ -153,6 +153,91 @@ def cmd_logs_parsing(args):
             print(f"    Text Length: {log['text_length'] or 0} characters")
 
 
+def cmd_logs_tokens(args):
+    """Report LLM token usage recorded while building the knowledge base."""
+    from sqlalchemy import func as sa_func
+
+    from ..database import get_db_session
+    from ..db_models import LLMUsage
+
+    with get_db_session() as session:
+        query = session.query(
+            LLMUsage.stage,
+            LLMUsage.model,
+            sa_func.count(LLMUsage.id).label("calls"),
+            sa_func.sum(LLMUsage.prompt_tokens).label("input"),
+            sa_func.sum(LLMUsage.completion_tokens).label("output"),
+            sa_func.sum(LLMUsage.total_tokens).label("total"),
+            sa_func.sum(LLMUsage.cached_prompt_tokens).label("cached"),
+        )
+        if args.document_id:
+            query = query.filter(LLMUsage.document_id == args.document_id)
+        if args.stage:
+            query = query.filter(LLMUsage.stage == args.stage)
+        rows = query.group_by(LLMUsage.stage, LLMUsage.model).order_by(
+            sa_func.sum(LLMUsage.total_tokens).desc()
+        ).all()
+
+    if not rows:
+        scope = f" for document {args.document_id}" if args.document_id else ""
+        print(f"No token usage recorded{scope}.")
+        print(
+            "Usage is recorded per LLM call during parsing, summarization, "
+            "graph extraction, and embedding."
+        )
+        return
+
+    records = [
+        {
+            "stage": r.stage,
+            "model": r.model,
+            "calls": int(r.calls or 0),
+            "input_tokens": int(r.input or 0),
+            "output_tokens": int(r.output or 0),
+            "total_tokens": int(r.total or 0),
+            "cached_tokens": int(r.cached or 0),
+        }
+        for r in rows
+    ]
+
+    if args.json:
+        print(json.dumps(records, indent=2))
+        return
+
+    scope = f" for document {args.document_id}" if args.document_id else ""
+    print(f"LLM token usage{scope}:")
+    print("=" * 88)
+    print(f"{'Stage':<22}{'Model':<26}{'Calls':>8}{'Input':>12}{'Output':>10}{'Total':>12}")
+    print("-" * 88)
+    for rec in records:
+        model = (rec["model"] or "-")[:24]
+        print(
+            f"{rec['stage']:<22}{model:<26}{rec['calls']:>8}"
+            f"{rec['input_tokens']:>12,}{rec['output_tokens']:>10,}{rec['total_tokens']:>12,}"
+        )
+    print("-" * 88)
+    totals = {
+        key: sum(r[key] for r in records)
+        for key in ("calls", "input_tokens", "output_tokens", "total_tokens", "cached_tokens")
+    }
+    print(
+        f"{'TOTAL':<48}{totals['calls']:>8}"
+        f"{totals['input_tokens']:>12,}{totals['output_tokens']:>10,}{totals['total_tokens']:>12,}"
+    )
+    if totals["cached_tokens"]:
+        print(f"\n  ({totals['cached_tokens']:,} input tokens served from the prompt cache)")
+
+    # A stage that reports zero is ambiguous — it may simply be an endpoint
+    # that omits `usage`. Say so rather than letting it read as free.
+    silent = [r for r in records if r["total_tokens"] == 0]
+    if silent:
+        names = ", ".join(sorted({r["stage"] for r in silent}))
+        print(
+            f"\n  Note: {names} recorded calls but no tokens — that endpoint "
+            f"likely omits the 'usage' field, so these are undercounted."
+        )
+
+
 def cmd_parse_all(args):
     """Parse all raw documents for a source_id that don't have processed documents yet."""
     try:
@@ -1112,6 +1197,13 @@ def setup_commands(subparsers):
     logs_parsing_parser.add_argument("--json", action="store_true", help="Output as JSON")
     logs_parsing_parser.add_argument("--limit", type=int, help="Maximum number of logs to show (default: all)")
     logs_parsing_parser.set_defaults(func=cmd_logs_parsing)
+
+    # logs tokens
+    logs_tokens_parser = logs_subparsers.add_parser("tokens", help="Show LLM token usage for the knowledge base")
+    logs_tokens_parser.add_argument("--document-id", help="Restrict to one document")
+    logs_tokens_parser.add_argument("--stage", help="Restrict to one pipeline stage (e.g. image_description)")
+    logs_tokens_parser.add_argument("--json", action="store_true", help="Output as JSON")
+    logs_tokens_parser.set_defaults(func=cmd_logs_tokens)
 
     # Tools command (renamed from db-admin)
     tools_parser = subparsers.add_parser("tools", help="Utility tools and functions")

@@ -12,7 +12,7 @@ from tqdm import tqdm
 from .database import get_db_session
 from .db_models import Document, PrivacyFilter
 from .embedding.db_models import Chunk, get_embedding_table
-from ..chunking.chunking import get_strategy_name
+from .embedding.chunking import resolve_strategy_name
 from ..config import get_embedding_config
 
 logger = logging.getLogger(__name__)
@@ -477,24 +477,31 @@ def chunk_and_embed_all(
         
         # Determine the actual strategy name that will be created
         chunk_strategy = chunk_strategy or get_embedding_config()['chunk_strategy']
-        strategy_full_name = get_strategy_name(chunk_strategy, chunk_config)
+        # Resolved (stored) name, e.g. summary -> summary_256. The request
+        # keeps the bare name; only what lands in the DB carries the window.
+        strategy_full_name = resolve_strategy_name(chunk_strategy, chunk_config)
 
         if chunk_strategy == "summary":
-            # For summary strategy: find documents with summaries (non-empty) but without summary chunks
+            # For summary strategy: only documents that have a summary at all
             from sqlalchemy import and_
             query = query.filter(
                 Document.summary.isnot(None),
                 Document.summary != ""
             )
-            # LEFT JOIN to find documents without summary chunks
-            # Use subquery to check for existing summary chunks
-            query = query.outerjoin(
-                Chunk,
-                and_(
-                    Document.id == Chunk.document_id,
-                    Chunk.chunk_strategy == strategy_full_name
-                )
-            ).filter(Chunk.id.is_(None))
+            if not force:
+                # LEFT JOIN to find documents without summary chunks.
+                # Gated on `force` like the branch below: without the gate a
+                # document that already has a summary chunk is invisible here,
+                # so `force=True` was silently a no-op and re-chunking existing
+                # summaries — after a chunker or embedding-window change —
+                # was impossible.
+                query = query.outerjoin(
+                    Chunk,
+                    and_(
+                        Document.id == Chunk.document_id,
+                        Chunk.chunk_strategy == strategy_full_name
+                    )
+                ).filter(Chunk.id.is_(None))
         else:
             if not force:
                 # For other strategies: find documents without chunks of this specific strategy
@@ -924,10 +931,10 @@ def summarize_all(
         parser_name: Optional parser ID to filter documents by (e.g., "marker", "nougat", "docling").
         batch_size: Commit summaries to the DB every N documents (default: 10).
         doc_types: Optional list of doc_types to summarise. Default ``["text"]`` —
-            i.e., only the parent text doc per PDF/PPTX, not its section/table
+            i.e., only the parent text doc per PDF/PPTX, not its table
             children. Pass ``None`` plus an explicit override to include
-            structural records (e.g., ``["text", "section", "table"]``) — at
-            production scale this can be 30× more LLM calls. ``"image"`` records
+            structural records (e.g., ``["text", "table"]``) — at
+            production scale this can be many more LLM calls. ``"image"`` records
             are always excluded (their description already lives in ``text``).
 
     Returns:
@@ -946,8 +953,8 @@ def summarize_all(
         result = summarize_all("inspire-hep", create_summary_chunk=True)
         print(f"Summarized {result['summarized']} documents, created {result['chunked']} chunks")
 
-        # Include section + table records too (heavy)
-        result = summarize_all("inspire-hep", doc_types=["text", "section", "table"])
+        # Include table records too (heavy)
+        result = summarize_all("inspire-hep", doc_types=["text", "table"])
         ```
     """
     # Summary module availability is checked by doc.generate_summary()
@@ -1184,7 +1191,12 @@ def filter_all(
                         session.add(pf)
                         continue
 
-                    result = classify_privacy(parsed_doc.text, model=model)
+                    result = classify_privacy(
+                        parsed_doc.text,
+                        model=model,
+                        document_id=parsed_doc.id,
+                        raw_document_id=raw_doc.id,
+                    )
 
                     pf = PrivacyFilter(
                         raw_document_id=raw_doc.id,

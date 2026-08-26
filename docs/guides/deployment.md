@@ -422,6 +422,13 @@ To use Firestore instead of file-based storage (better for scaling to multiple i
 
 To migrate your knowledge base PostgreSQL database (for example from local to cloud or between remotes).
 
+**Quick dump:** `scripts/dump_db.sh [output_dir]` reads connection info from `.env` and writes a
+`pg_dump -F c` backup. `pg_dump` must match the server's major version or it refuses to run; the
+script checks the server version and, if the version available via cvmfs
+(`/cvmfs/mu2e.opensciencegrid.org/packages/postgresql`) doesn't match, falls back to running
+`pg_dump` from an official `postgres:<major>` image via `apptainer` (image cached under the backup
+dir after the first pull). Output defaults to `/exp/mu2e/data/users/$USER/kb_db_backup`.
+
 ### Export from Local Database
 
 ```bash

@@ -19,6 +19,8 @@ def get_openai_client(model: str = None, use_async: bool = False):
     Environment variables:
     - OPENAI_API_KEY: API key (required)
     - OPENAI_BASE_URL: Base URL for OpenAI API (optional)
+    - OPENAI_BASE_URL_MODELS: JSON map of model -> base URL (optional)
+    - OPENAI_API_KEY_MODELS: JSON map of model -> API key (optional)
 
     Returns:
         OpenAI or AsyncOpenAI client instance
@@ -39,7 +41,13 @@ def get_openai_client(model: str = None, use_async: bool = False):
             "Set it with: export OPENAI_API_KEY=sk-..."
         )
 
-    # Create client with optional base URL
+    # Create client with optional base URL. A model routed to its own endpoint
+    # via OPENAI_BASE_URL_MODELS usually needs that endpoint's own credential,
+    # so OPENAI_API_KEY_MODELS overrides the key alongside the URL — otherwise
+    # one provider's token gets sent to another provider's host.
+    if model and model in llm_config['openai_api_key_models']:
+        api_key = llm_config['openai_api_key_models'][model]
+
     client_kwargs = {'api_key': api_key}
     base_url = llm_config['openai_base_url']
     if model:

@@ -6,10 +6,11 @@ import logging
 import os
 import re
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 from urllib.parse import urljoin, quote
+from zoneinfo import ZoneInfo
 
 import requests
 from bs4 import BeautifulSoup
@@ -18,6 +19,31 @@ from .base import Source
 from ..kb import add_document
 
 logger = logging.getLogger(__name__)
+
+# DocDB renders its timestamps in Fermilab local time with no zone marker,
+# e.g. "10 Apr 2026, 16:28".
+_DOCDB_TZ = ZoneInfo("America/Chicago")
+_DOCDB_TIME_FORMAT = "%d %b %Y, %H:%M"
+
+
+def parse_docdb_datetime(value: Optional[str]) -> Optional[datetime]:
+    """Convert a DocDB timestamp string to an aware UTC datetime.
+
+    DocDB writes "Document Created" / "Contents Revised" as Fermilab local
+    time without a zone (e.g. "10 Apr 2026, 16:28"), so the string is
+    anchored to America/Chicago and converted to UTC for storage.
+
+    Returns None for missing or unparseable values — the timestamps are
+    nice-to-have metadata and must never fail an import.
+    """
+    if not value:
+        return None
+    try:
+        naive = datetime.strptime(value.strip(), _DOCDB_TIME_FORMAT)
+    except ValueError:
+        logger.warning(f"Could not parse DocDB timestamp {value!r}")
+        return None
+    return naive.replace(tzinfo=_DOCDB_TZ).astimezone(timezone.utc)
 
 
 class DocDBSource(Source):
@@ -156,6 +182,19 @@ class DocDBSource(Source):
             raise RuntimeError(
                 f"Session expired or login required. "
                 f"Set MU2E_DOCDB_USERNAME / MU2E_DOCDB_PASSWORD and retry."
+            )
+        # Ping SSO's "speed bump" page for a concurrent sign-on under the
+        # same identity (e.g. an active browser tab or another script
+        # logging in at the same time). It 200s with an HTML page that has
+        # none of DocDB's expected content, so _parse_list()/get_meta()
+        # would otherwise silently see "no documents" / "no metadata"
+        # instead of a clear auth failure.
+        if title and title == "Multiple Sign-On Delay":
+            raise RuntimeError(
+                "DocDB SSO returned a 'Multiple Sign-On Delay' page — "
+                "another sign-on for this identity is in progress "
+                "(e.g. a browser tab or another concurrent session). "
+                "Close it and retry."
             )
 
     def _get_html(self, doc_id: int) -> str:
@@ -473,6 +512,14 @@ class DocDBSource(Source):
         if meta.get("events"):
             kb_meta["events"] = meta["events"]
 
+        # DocDB's own timestamps, promoted to the Document columns so search
+        # and the web UI can filter on when the document was written rather
+        # than when we happened to ingest it. update_time tracks "Contents
+        # Revised" only: "Metadata Revised" moves when someone retags a
+        # topic or author, which does not change anything we parsed.
+        creating_time = parse_docdb_datetime(meta.get("created"))
+        update_time = parse_docdb_datetime(meta.get("revised_content"))
+
         document_ids: List[str] = []
 
         for file_info in meta["files"]:
@@ -519,6 +566,8 @@ class DocDBSource(Source):
                 doc_id=file_doc_id,
                 uri=file_link,          # direct RetrieveFile URL
                 meta=kb_meta,
+                creating_time=creating_time,
+                update_time=update_time,
                 copy_to_kb=True,
                 force_reparse=self.force_reparse,
                 session=session,

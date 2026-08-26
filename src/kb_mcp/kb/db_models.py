@@ -608,6 +608,7 @@ class Document(Base):
                 include_summary=include_summary,
                 include_metadata=include_metadata,
                 model=model,
+                document_id=self.id,
             )
 
             # If not attached to session, merge this document
@@ -838,7 +839,7 @@ class Document(Base):
             exists = Document.from_raw_exists(raw_doc.id)
 
             # Check if document parsed with specific parser exists
-            exists = Document.from_raw_exists(raw_doc.id, parser_id="kb-mcp")
+            exists = Document.from_raw_exists(raw_doc.id, parser_id="docling")
             ```
         """
         from .database import get_db_session
@@ -1047,6 +1048,81 @@ class PrivacyFilter(Base):
 
     def __repr__(self) -> str:
         return f"<PrivacyFilter(id={self.id}, raw_document_id={self.raw_document_id}, label={self.label})>"
+
+
+class LLMUsage(Base):
+    """Table 'llm_usage' recording token consumption of every LLM call.
+
+    One row per API request made while building the knowledge base —
+    table summaries, image descriptions, document summaries, graph
+    extraction/matching, privacy classification, and embeddings. This is the
+    only record of what a build cost: the provider's `usage` object is
+    otherwise discarded once the response content is read.
+
+    Rows are written best-effort (see `kb_mcp.llm.usage.record_llm_usage`);
+    accounting never blocks an import. A stage that reports zero tokens is
+    therefore ambiguous between "never ran" and "endpoint omits usage" —
+    `warn_if_unreported` logs the latter case once per model.
+
+    Attributes:
+        id (str): Primary key (UUID).
+        stage (str): Pipeline step, e.g. "image_description" (see STAGE_* in
+            kb_mcp.llm.usage).
+        model (str): Model the call was routed to.
+        document_id (str): FK → documents.id, when the call is attributable.
+        raw_document_id (str): FK → documents_raw.id, when known.
+        prompt_tokens (int): Input tokens billed.
+        completion_tokens (int): Output tokens billed (0 for embeddings).
+        total_tokens (int): Provider total, or input+output when not reported.
+        main_context_tokens (int): Input tokens excluding prompt-cache hits.
+        cached_prompt_tokens (int): Input tokens served from the prompt cache.
+        created_time (datetime): When the call was recorded.
+        meta (dict): Extra context (chunk counts, image identifier, etc.).
+    """
+
+    __tablename__ = "llm_usage"
+
+    id = Column(
+        String(36),
+        primary_key=True,
+        default=lambda: str(uuid.uuid4()),
+    )
+    stage = Column(String(64), nullable=False, index=True)
+    model = Column(String(256), nullable=True, index=True)
+    document_id = Column(
+        String(36),
+        ForeignKey("documents.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    raw_document_id = Column(
+        String(36),
+        ForeignKey("documents_raw.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    prompt_tokens = Column(Integer, nullable=False, default=0)
+    completion_tokens = Column(Integer, nullable=False, default=0)
+    total_tokens = Column(Integer, nullable=False, default=0)
+    main_context_tokens = Column(Integer, nullable=False, default=0)
+    cached_prompt_tokens = Column(Integer, nullable=False, default=0)
+    created_time = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=func.now(),
+        server_default=func.now(),
+        index=True,
+    )
+    meta = Column(JSONB, nullable=True, default=dict)
+
+    document = relationship("Document")
+    raw_document = relationship("RawDocument")
+
+    def __repr__(self) -> str:
+        return (
+            f"<LLMUsage(stage={self.stage}, model={self.model}, "
+            f"in={self.prompt_tokens}, out={self.completion_tokens})>"
+        )
 
 
 class ParserComparison(Base):

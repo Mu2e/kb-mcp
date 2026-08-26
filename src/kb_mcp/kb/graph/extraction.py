@@ -11,6 +11,7 @@ from tqdm import tqdm
 from ..database import get_db_session
 from ..db_models import Document
 from ...llm import get_openai_client
+from ...llm.usage import STAGE_GRAPH_EXTRACTION, record_llm_usage
 from ...config import get_graph_config
 from .graph import add_relation, get_node_types, get_verbs
 from .db_models import GraphExtractionLog
@@ -23,7 +24,8 @@ def extract_relations(
     title: Optional[str] = None,
     metadata: Optional[Dict[str, Any]] = None,
     domain_context: Optional[str] = None,
-    session=None
+    session=None,
+    document_id: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """
     Extract knowledge graph relations from a document using LLM.
@@ -33,6 +35,8 @@ def extract_relations(
         title: Document title (for context).
         metadata: Additional metadata (not used currently).
         session: Optional database session.
+        document_id: Document the text came from. Only used to attribute
+            token usage; extraction itself doesn't need it.
 
     Returns:
         List of extracted relation dictionaries with schema:
@@ -137,6 +141,13 @@ def extract_relations(
                 ],
                 response_format={"type": "json_object"},
                 max_tokens=4096 
+            )
+
+            record_llm_usage(
+                getattr(response, "usage", None),
+                stage=STAGE_GRAPH_EXTRACTION,
+                model=model,
+                document_id=document_id,
             )
 
             # Parse response
@@ -381,7 +392,8 @@ def extract_and_process_document(
                     "doc_id": document.doc_id,
                 },
                 domain_context=domain_context,
-                session=session
+                session=session,
+                document_id=document_id,
             )
             time_extraction = time.time() - start_extraction
             logger.info(f"Extraction completed in {time_extraction:.2f}s, found {len(extracted_relations)} relations")

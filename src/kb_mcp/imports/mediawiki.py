@@ -11,6 +11,7 @@ import re
 import subprocess
 import tempfile
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlencode
@@ -19,6 +20,29 @@ from .base import Source
 from ..kb import add_document
 
 logger = logging.getLogger(__name__)
+
+
+def parse_wiki_timestamp(value: Optional[str]) -> Optional[datetime]:
+    """Convert a MediaWiki API timestamp to an aware UTC datetime.
+
+    MediaWiki returns ISO-8601 with a trailing "Z" (e.g.
+    "2016-12-28T22:34:43Z"), which fromisoformat() only accepts directly
+    from Python 3.11 on; the replacement keeps this working on older
+    interpreters too.
+
+    Returns None for missing or unparseable values — timestamps are
+    nice-to-have metadata and must never fail an import.
+    """
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        logger.warning(f"Could not parse wiki timestamp {value!r}")
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 class MediaWikiSource(Source):
@@ -108,6 +132,47 @@ class MediaWikiSource(Source):
             logger.error(f"Invalid JSON response from {url}: {e}")
             logger.debug(f"Response was: {result.stdout[:500]}")
             return None
+
+    def _get_revision_times(self, title: str) -> Dict[str, Optional[datetime]]:
+        """Fetch a page's first and last revision timestamps.
+
+        This needs its own API calls: the `action=parse` request used for
+        content carries no revision data, and `rvdir` only walks one
+        direction, so the oldest and newest revisions cannot be fetched
+        together. Two cheap `action=query` calls (rvlimit=1 each) is the
+        supported way to get both.
+
+        The last-edit time comes from the newest revision rather than the
+        page's `touched` field: `touched` also moves on cache invalidation
+        and template edits, so it overstates when the page itself changed.
+
+        Never raises — a page whose history is unavailable simply imports
+        without timestamps.
+        """
+        times: Dict[str, Optional[datetime]] = {"created": None, "updated": None}
+        page_title = title.replace(" ", "_")
+
+        for key, direction in (("created", "newer"), ("updated", "older")):
+            data = self._api_request(
+                {
+                    "action": "query",
+                    "prop": "revisions",
+                    "titles": page_title,
+                    "rvprop": "timestamp",
+                    "rvlimit": "1",
+                    "rvdir": direction,
+                }
+            )
+            if not data or "error" in data:
+                continue
+            pages = (data.get("query") or {}).get("pages") or {}
+            for page in pages.values():
+                # Missing/deleted pages come back with no "revisions" key.
+                revisions = page.get("revisions") or []
+                if revisions:
+                    times[key] = parse_wiki_timestamp(revisions[0].get("timestamp"))
+
+        return times
 
     def _get_page_content(self, title: str) -> Optional[Dict[str, Any]]:
         """Fetch parsed HTML content and metadata for a wiki page.
@@ -408,6 +473,15 @@ class MediaWikiSource(Source):
             "wiki_url": self.wiki_url,
         }
 
+        # Revision history, promoted to the Document columns so search and
+        # the web UI can filter on when the page was written and last edited
+        # rather than when we happened to scrape it.
+        revision_times = self._get_revision_times(title)
+        if revision_times["created"]:
+            metadata["wiki_created"] = revision_times["created"].isoformat()
+        if revision_times["updated"]:
+            metadata["wiki_last_edit"] = revision_times["updated"].isoformat()
+
         # Add to knowledge base
         result = add_document(
             html_path,
@@ -415,6 +489,8 @@ class MediaWikiSource(Source):
             doc_id=doc_id,
             uri=uri,
             meta=metadata,
+            creating_time=revision_times["created"],
+            update_time=revision_times["updated"],
             copy_to_kb=True,
             session=session,
         )
