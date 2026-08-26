@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 from ..database import get_db_session, init_db
-from ..db_models import Document, Source
+from ..db_models import Document, DocumentParserOutput, Source
 
 logger = logging.getLogger(__name__)
 
@@ -106,6 +106,18 @@ def _update_document(existing: Document, new: Document, session: Any, update_has
     existing.creating_time = new.creating_time
     existing.update_time = new.update_time
     existing.parent_id = new.parent_id
+    # Carry over the structured parser output (document_parser_outputs row).
+    # Without this a re-parse of an existing document silently drops the
+    # fresh DoclingDocument payload, and chunking falls back from the
+    # section walker to plain token windows. Guarded on `is not None` so a
+    # parser that emits no structured output leaves a good payload in place.
+    if new.parser_output_ref is not None:
+        if existing.parser_output_ref is not None:
+            existing.parser_output_ref.output = new.parser_output_ref.output
+        else:
+            existing.parser_output_ref = DocumentParserOutput(
+                output=new.parser_output_ref.output
+            )
     if update_hash:
         existing.content_hash = new.content_hash
     if commit:
