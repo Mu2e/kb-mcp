@@ -1063,6 +1063,19 @@ def cmd_count_tokens(args):
         sys.exit(1)
 
 
+def cmd_check_connections(args):
+    """Check that every configured endpoint actually answers."""
+    from ...health import run_and_report
+
+    sys.exit(
+        run_and_report(
+            timeout=args.timeout,
+            include_sources=not args.no_sources,
+            include_vision=not args.no_vision,
+        )
+    )
+
+
 def setup_commands(subparsers):
     """Set up tools and utility commands."""
     # Drop command (top-level, for documents)
@@ -1359,6 +1372,24 @@ def setup_commands(subparsers):
         help="Filter by parser (e.g., 'marker', 'nougat', 'docling')"
     )
     count_tokens_parser.set_defaults(func=cmd_count_tokens)
+
+    check_conn_parser = tools_subparsers.add_parser(
+        "check-connections",
+        help="Check the database, embedding, LLM and source endpoints respond"
+    )
+    check_conn_parser.add_argument(
+        "--timeout", type=float, default=30.0,
+        help="Per-request timeout in seconds (default: 30)"
+    )
+    check_conn_parser.add_argument(
+        "--no-sources", action="store_true",
+        help="Skip reachability checks for DocDB and the wiki"
+    )
+    check_conn_parser.add_argument(
+        "--no-vision", action="store_true",
+        help="Skip the test-image probe of the image-description model"
+    )
+    check_conn_parser.set_defaults(func=cmd_check_connections)
 
     list_tables_parser = tools_subparsers.add_parser("list-tables", help="List all database tables")
     list_tables_parser.add_argument("--json", action="store_true", help="Output as JSON")

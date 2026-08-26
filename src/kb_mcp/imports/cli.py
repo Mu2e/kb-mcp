@@ -185,8 +185,16 @@ def main():
         description="Import documents from various external sources",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    
-    subparsers = parser.add_subparsers(dest="source", help="Data source", required=True)
+    parser.add_argument(
+        "--check-connections",
+        action="store_true",
+        help="Check that the database, embedding, LLM and source endpoints "
+             "respond, print a report and exit (no import is run)",
+    )
+
+    # required=False so `kb-import --check-connections` works with no
+    # subcommand; a bare `kb-import` still falls through to print_help below.
+    subparsers = parser.add_subparsers(dest="source", help="Data source")
     
     # Inspire source
     inspire_parser = subparsers.add_parser(
@@ -444,10 +452,16 @@ def main():
 
     # Parse arguments
     args = parser.parse_args()
-    
+
     # Call the appropriate command function
-    if hasattr(args, 'func'):
+    if args.check_connections:
+        from kb_mcp.health import run_and_report
+
+        setup_logging(getattr(args, "verbose", False))
+        exit_code = run_and_report()
+    elif hasattr(args, 'func'):
         args.func(args)
+        exit_code = 0
     else:
         parser.print_help()
         sys.exit(1)
@@ -459,7 +473,7 @@ def main():
         get_engine().dispose()
     except Exception:
         pass
-    sys.exit(0)
+    sys.exit(exit_code)
 
 
 if __name__ == "__main__":
