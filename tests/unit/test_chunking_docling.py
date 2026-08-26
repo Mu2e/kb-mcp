@@ -201,7 +201,10 @@ def test_sibling_header_pops_stack():
                  "with the sibling section path attached.", page=2),
     ]
     children = [_cref(f"#/texts/{i}") for i in range(5)]
-    chunks, _ = _build(texts, children, min_chunk_tokens=5)
+    # target_tokens keeps the section-cut floor (a fraction of the budget)
+    # below these sections, so each heading still cuts. Merging behaviour
+    # is covered separately by the candidate-cut tests.
+    chunks, _ = _build(texts, children, min_chunk_tokens=5, target_tokens=20)
 
     paths = [c["section_path"] for c in chunks]
     assert "Detector > Calorimeter" in paths
@@ -222,7 +225,8 @@ def test_chunks_do_not_overlap_and_advance_monotonically():
                  "chunk without merging forward.", page=3),
     ]
     children = [_cref(f"#/texts/{i}") for i in range(6)]
-    chunks, doc_text = _build(texts, children, min_chunk_tokens=5)
+    chunks, doc_text = _build(texts, children, min_chunk_tokens=5,
+                              target_tokens=20)
 
     assert len(chunks) == 3
     prev_end = -1
@@ -249,10 +253,14 @@ def test_tiny_fragment_merges_into_next_chunk():
     assert doc_text[chunks[0]["char_start_index"]:chunks[0]["char_end_index"]] == chunks[0]["text"]
 
 
-def test_short_section_rolls_up_to_parent_not_next_sibling():
-    """A short-but-real section (e.g. a one-line 'Overview') must not
-    bleed into the *next* sibling's chunk under the wrong section_path.
-    It should roll up to the parent heading instead."""
+def test_short_section_merges_forward_under_the_common_ancestor():
+    """A short-but-real section (e.g. a one-line 'Overview') must not be
+    labelled with the *next* sibling's section_path.
+
+    It used to be force-flushed on its own under the parent heading. It
+    now merges into the following chunk instead — better context for
+    retrieval — and that chunk is labelled with the ancestor common to
+    both sections, which describes the combined span honestly."""
     texts = [
         _text(0, "Detector", label="section_header", level=1),
         _text(1, "Overview", label="section_header", level=2),
@@ -263,20 +271,24 @@ def test_short_section_rolls_up_to_parent_not_next_sibling():
                  "on its own, well past the token floor.", page=2),
     ]
     children = [_cref(f"#/texts/{i}") for i in range(5)]
-    chunks, _ = _build(texts, children, min_chunk_tokens=10)
+    chunks, doc_text = _build(texts, children, min_chunk_tokens=10)
 
-    assert len(chunks) == 2
-    overview_chunk = next(c for c in chunks if "Short overview" in c["text"])
-    calo_chunk = next(c for c in chunks if "calorimeter section" in c["text"])
+    # The short section merged into the one that follows it.
+    assert len(chunks) == 1
+    merged = chunks[0]
+    assert "Short overview" in merged["text"]
+    assert "calorimeter section" in merged["text"]
+    # Labelled with the shared ancestor — never with just "Calorimeter",
+    # which would claim the overview belongs to a section it precedes.
+    assert merged["section_path"] == "Detector"
+    _assert_partitions(chunks, doc_text)
 
-    # Rolled up to the parent, not mislabeled as the next sibling.
-    assert overview_chunk["section_path"] == "Detector"
-    assert calo_chunk["section_path"] == "Detector > Calorimeter"
 
-
-def test_short_top_level_section_rolls_up_to_no_parent():
-    """Same rollup at the top level (no parent heading at all): the short
-    section still must not inherit the next sibling's section_path."""
+def test_short_top_level_section_keeps_the_section_it_opened_in():
+    """Same at the top level, where the merged sections share no ancestor
+    at all: the chunk must still carry a section_path, and it must be the
+    section the chunk *opened* in — never the next sibling's, which would
+    claim the intro belongs to a section that follows it."""
     texts = [
         _text(0, "Introduction", label="section_header", level=1),
         _text(1, "Short intro.", page=1),
@@ -286,14 +298,16 @@ def test_short_top_level_section_rolls_up_to_no_parent():
                  "on its own, well past the token floor.", page=2),
     ]
     children = [_cref(f"#/texts/{i}") for i in range(4)]
-    chunks, _ = _build(texts, children, min_chunk_tokens=10)
+    chunks, doc_text = _build(texts, children, min_chunk_tokens=10)
 
-    assert len(chunks) == 2
-    intro_chunk = next(c for c in chunks if "Short intro" in c["text"])
-    calo_chunk = next(c for c in chunks if "calorimeter section" in c["text"])
-
-    assert intro_chunk["section_path"] is None
-    assert calo_chunk["section_path"] == "Calorimeter"
+    assert len(chunks) == 1
+    merged = chunks[0]
+    assert "Short intro" in merged["text"]
+    assert "calorimeter section" in merged["text"]
+    # Flat hierarchy: no common ancestor exists, so the opening section
+    # is used rather than dropping the label entirely.
+    assert merged["section_path"] == "Introduction"
+    _assert_partitions(chunks, doc_text)
 
 
 def test_oversized_span_is_split_under_hard_cap():
@@ -529,3 +543,100 @@ def test_a_heading_only_run_still_emits_at_end_of_document():
     assert len(chunks) >= 1
     _assert_partitions(chunks, doc_text)
     assert "GitHubWorkflow" in chunks[0]["text"]
+
+
+# --- headings as candidate cut points ------------------------------------
+#
+# A heading closes the current chunk only once that chunk is substantial
+# enough to stand on its own. Cutting on every heading produced one chunk
+# per heading no matter how little sat under it — a finding, the figure it
+# describes and the implication drawn from it split three ways, each too
+# partial to answer anything.
+
+
+def test_sibling_sections_merge_until_the_cut_floor():
+    """Small adjacent sections join into one chunk rather than each
+    emitting alone."""
+    texts = [
+        _text(0, "Observations", label="section_header", level=2),
+        _text(1, "Strong downward trend across the scanned interval.", page=1),
+        _text(2, "Implication", label="section_header", level=2),
+        _text(3, "Keep the parameter tightly scanned in the next card.", page=1),
+    ]
+    children = [_cref(f"#/texts/{i}") for i in range(4)]
+    chunks, doc_text = _build(texts, children, min_chunk_tokens=5)
+
+    assert len(chunks) == 1
+    assert "Strong downward trend" in chunks[0]["text"]
+    assert "tightly scanned" in chunks[0]["text"]
+    _assert_partitions(chunks, doc_text)
+
+
+def test_a_substantial_section_still_cuts_at_the_next_heading():
+    """Merging must not run past a chunk that already stands on its own —
+    otherwise every document collapses toward one chunk per budget."""
+    body = " ".join(f"word{i}" for i in range(400))
+    texts = [
+        _text(0, "First", label="section_header", level=1),
+        _text(1, body, page=1),
+        _text(2, "Second", label="section_header", level=1),
+        _text(3, body, page=2),
+    ]
+    children = [_cref(f"#/texts/{i}") for i in range(4)]
+    chunks, doc_text = _build(texts, children, min_chunk_tokens=5)
+
+    assert len(chunks) > 1
+    _assert_partitions(chunks, doc_text)
+
+
+def test_descending_into_a_subsection_keeps_the_deeper_path():
+    """Opening under a parent and descending into its child is not
+    merging across a boundary — the deeper path still covers the content
+    and is the more useful label."""
+    texts = [
+        _text(0, "Detector", label="section_header", level=1),
+        _text(1, "Calorimeter", label="section_header", level=2),
+        _text(2, "Crystal geometry and readout electronics.", page=1),
+    ]
+    children = [_cref(f"#/texts/{i}") for i in range(3)]
+    chunks, _ = _build(texts, children, min_chunk_tokens=5)
+
+    assert len(chunks) == 1
+    assert chunks[0]["section_path"] == "Detector > Calorimeter"
+
+
+def test_merged_chunk_never_claims_a_section_it_only_precedes():
+    """The failure mode this labelling exists to prevent: content from an
+    earlier section must never be filed under a later sibling."""
+    texts = [
+        _text(0, "Detector", label="section_header", level=1),
+        _text(1, "Overview", label="section_header", level=2),
+        _text(2, "Short overview.", page=1),
+        _text(3, "Calorimeter", label="section_header", level=2),
+        _text(4, "Crystal geometry and readout electronics in detail.", page=2),
+    ]
+    children = [_cref(f"#/texts/{i}") for i in range(5)]
+    chunks, _ = _build(texts, children, min_chunk_tokens=10)
+
+    merged = next(c for c in chunks if "Short overview" in c["text"])
+    # Must not be filed under Calorimeter, which the overview precedes.
+    assert merged["section_path"] != "Detector > Calorimeter"
+    assert merged["section_path"] in ("Detector", "Detector > Overview")
+
+
+def test_every_chunk_keeps_a_section_path_when_headings_exist():
+    """A merged chunk must not lose its label: an empty section_path
+    drops the `Section:` prefix at embed time and leaves the reranker
+    without context. On a flat document (no shared ancestor) the opening
+    section is used rather than nothing."""
+    texts = []
+    children = []
+    for i in range(6):
+        texts.append(_text(len(texts), f"Section {i}",
+                           label="section_header", level=1))
+        children.append(_cref(f"#/texts/{len(texts)-1}"))
+        texts.append(_text(len(texts), f"Body text for section {i}.", page=1))
+        children.append(_cref(f"#/texts/{len(texts)-1}"))
+    chunks, _ = _build(texts, children, min_chunk_tokens=5)
+
+    assert all(c["section_path"] for c in chunks)

@@ -17,6 +17,23 @@ _PAGE_FURNITURE_LABELS = frozenset({"page_header", "page_footer"})
 _MIN_ANCHOR_LEN = 24
 _MAX_SHORT_JUMP = 400
 
+# A heading is a *candidate* cut point, not a mandatory one. Cutting on
+# every heading gives a chunk per heading regardless of how little sits
+# under it, which on finely-sectioned documents means a corpus of 30-token
+# fragments: a bare finding with the figure it describes and the
+# implication drawn from it split across three chunks, each too partial to
+# answer anything on its own.
+#
+# So a heading closes the current chunk only once that chunk carries at
+# least this fraction of the embedding budget. Below it, the heading joins
+# the chunk in progress and accumulation continues.
+#
+# Not 1.0: packing to the window makes a chunk whose embedding is the
+# average of several topics and sharply matches none of them. Retrieval
+# wants a coherent passage somewhat under the window, so this leaves room
+# to finish a section rather than stopping mid-thought.
+_SECTION_CUT_FRACTION = 0.6
+
 # Characters Docling's Markdown export backslash-escapes. The body tree
 # stores the *raw* text, so a node containing any of these never matches
 # the export literally — on a maths-heavy document that is 40% of all
@@ -25,7 +42,7 @@ _MD_ESCAPABLE = set(r"\`*_{}[]()#+-.!|<>~")
 
 
 def _find_loose(haystack: str, needle: str, start: int):
-    """Find `needle` in `haystack` at/after `start`, tolerating escaping.
+    r"""Find `needle` in `haystack` at/after `start`, tolerating escaping.
 
     Exact search first — that is the common case and stays O(n). Only if
     it fails do we retry character by character, letting a backslash in
@@ -267,8 +284,64 @@ def chunk_from_docling_json(
     # to the Markdown token chunker rather than take a blind split.
     located_any = False
 
+    # The header stack as it stood when the current chunk opened. A chunk
+    # that merged across sibling headings must not be labelled with just
+    # the last one — see `section_path`.
+    open_stack: List[tuple[int, str]] = []
+
     def section_path() -> Optional[str]:
-        return " > ".join(t for _, t in header_stack) or None
+        """Section path describing everything in the current chunk.
+
+        For a chunk that lies inside one section this is just that
+        section's path. For a chunk that merged across sibling headings,
+        it is the deepest path common to where the chunk opened and where
+        it now ends — the shared ancestor that honestly covers all of it.
+        Labelling such a chunk with only its *last* heading would attribute
+        content to a sibling section it isn't part of, which retrieves
+        confidently and wrongly.
+
+        Descending into a subsection is not merging across a boundary:
+        if the chunk opened at `Detector` and the walk is now inside
+        `Detector > Calorimeter`, the opening path is a prefix of the
+        current one and the deeper path describes the chunk's content
+        better, so it wins. Only when the two paths actually diverge —
+        sibling sections — does the shared ancestor apply.
+
+        When divergent headings share no ancestor at all — the common
+        case on flat documents, where everything sits at one level — fall
+        back to the section the chunk opened in rather than to nothing.
+        An empty path would drop the `Section:` prefix at embed time and
+        leave the reranker without context, which is a worse trade than a
+        label naming the first of the sections the chunk covers.
+        """
+        if not open_stack:
+            return " > ".join(t for _, t in header_stack) or None
+        common: List[str] = []
+        for (lvl_a, txt_a), (lvl_b, txt_b) in zip(open_stack, header_stack):
+            if lvl_a != lvl_b or txt_a != txt_b:
+                break
+            common.append(txt_a)
+        if len(common) == len(open_stack):
+            # The chunk only ever descended — current path covers it all.
+            return " > ".join(t for _, t in header_stack) or None
+        if common:
+            return " > ".join(common)
+        return " > ".join(t for _, t in open_stack) or None
+
+    def note_open() -> None:
+        """Snapshot the header stack at the start of a chunk.
+
+        Taken when the first content lands after a flush, not at flush
+        time: at flush time `header_stack` has already advanced to the
+        heading that triggered the cut, and the chunk that actually opens
+        next may sit under a different one again.
+
+        `flush` clears the snapshot, so an empty `open_stack` is exactly
+        the signal that the next chunk has not opened yet — whichever of
+        the heading or the body text arrives first takes it.
+        """
+        if not open_stack:
+            open_stack[:] = header_stack
 
     def budget_cap() -> int:
         """Max body tokens for a chunk in the current section.
@@ -462,6 +535,10 @@ def chunk_from_docling_json(
         acc_pages.clear()
         acc_tokens = 0
         acc_body_tokens = 0
+        # The next chunk hasn't opened yet, and `header_stack` may still
+        # move before it does. Clear the snapshot; whatever opens the next
+        # chunk takes it (see `note_open`).
+        open_stack.clear()
         return True
 
     def locate(node_text: str) -> Optional[tuple[int, int]]:
@@ -508,6 +585,7 @@ def chunk_from_docling_json(
             page = prov[0].get("page_no")
 
         p_start, p_end = span
+        note_open()
         # Cost of extending the emitted slice out to this element — which
         # includes any untracked content sitting between the two, because
         # that content is in the slice and reaches the embedder too.
@@ -547,36 +625,65 @@ def chunk_from_docling_json(
                 # they're not content worth retrieving.
                 continue
             if label in ("section_header", "title"):
-                # Section boundary. Close the section that's ending while
-                # `header_stack` still describes it — section_path is read
-                # at flush time, so the stack must not be touched first.
-                emitted = flush()
+                # Section boundary — a *candidate* cut point. Cutting here
+                # unconditionally yields one chunk per heading no matter
+                # how little sits under it; instead the chunk in progress
+                # has to be substantial enough to stand on its own first.
+                # Below that it keeps accumulating and this heading joins
+                # it, with `section_path` falling back to the ancestor
+                # common to both (see `section_path`).
+                #
+                # Closing happens while `header_stack` still describes the
+                # section that's ending — section_path is read at flush
+                # time, so the stack must not be touched first.
                 level = t.get("level") or 1
-                if not emitted and acc_body_tokens > 0:
-                    # The closing section had body text but too little to
-                    # stand alone. Roll it up into the parent rather than
-                    # letting it inherit the *next* header's section_path
-                    # (which would mislabel it as belonging to a sibling it
-                    # isn't part of): drop the closing header from the
-                    # stack, then force-flush so the held text is
-                    # attributed one level higher.
-                    if header_stack:
-                        header_stack.pop()
-                    flush(force=True)
-                elif not emitted:
-                    # Nothing but the heading itself was accumulated — a
-                    # parent heading, or one whose body the export dropped.
-                    # Don't force-emit a heading-only chunk: leave the span
-                    # pending so it opens the next chunk instead. Its text
-                    # is kept (`emitted_upto` is untouched, so it lands in
-                    # the next slice) and the heading also reaches every
-                    # chunk beneath it via `section_path`.
+                cut_floor = int(budget_cap() * _SECTION_CUT_FRACTION)
+                # Merging across a heading is only safe while the chunk
+                # keeps a real ancestor to be labelled with. Siblings under
+                # a shared parent merge happily (that parent still
+                # describes them); a heading that would leave the merged
+                # span with no common ancestor at all — i.e. it starts a
+                # new top-level section — always cuts, because there is
+                # then no honest section_path for the combined content.
+                would_orphan = level <= 1 and bool(open_stack)
+                if acc_body_tokens >= cut_floor or would_orphan:
+                    emitted = flush()
+                else:
+                    emitted = True  # deliberately holding; not a failed flush
+                if not emitted:
+                    # The flush was declined: the section that's closing is
+                    # below the tiny-fragment floor, or holds nothing but
+                    # its own heading. Either way the span stays pending
+                    # and merges into the chunk being built.
+                    #
+                    # This used to force-flush after popping the header, to
+                    # stop the held text inheriting the *next* heading's
+                    # section_path and being mislabelled as a sibling's.
+                    # Merging makes that unnecessary and the force harmful:
+                    # `section_path` now resolves to the ancestor common to
+                    # where the chunk opened and where it ends, which
+                    # describes the combined span honestly, and forcing
+                    # here re-fragmented exactly the sections the candidate
+                    # cut is trying to join.
                     pass
 
                 # Now retarget the stack at the new heading's depth.
                 while header_stack and header_stack[-1][0] >= level:
                     header_stack.pop()
                 header_stack.append((level, txt))
+                if acc_end <= emitted_upto:
+                    # Nothing is pending, so this heading opens the next
+                    # chunk and defines its label. Overwrite rather than
+                    # fill: the snapshot left over from before the flush
+                    # describes the section that just closed.
+                    open_stack[:] = header_stack
+                elif acc_body_tokens <= 0:
+                    # Pending, but only headings so far — no body has
+                    # landed yet. This heading is still where the chunk's
+                    # *content* begins, so it defines the label; leaving
+                    # the snapshot on an ancestor would let a later
+                    # subsection claim content that precedes it.
+                    open_stack[:] = header_stack
 
                 # The heading opens the next chunk: seed the accumulator
                 # with its span so the section title is part of
