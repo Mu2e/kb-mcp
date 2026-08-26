@@ -96,10 +96,13 @@ else:
 
 
 
+from .mcp_prompts import get_server_instructions
+
 # Create FastMCP with OAuth (only if provider is configured)
 if MCP_REQUIRE_API_KEY:
     mcp = FastMCP(
         "kb-mcp",
+        instructions=get_server_instructions(),
         auth=AuthSettings(
             issuer_url=BASE_URL,
             resource_server_url=f"{BASE_URL}/mcp",
@@ -111,6 +114,7 @@ if MCP_REQUIRE_API_KEY:
 else:
     # Create FastMCP without OAuth if authentication is disabled
     mcp = FastMCP("kb-mcp",
+        instructions=get_server_instructions(),
         auth=None, # no auth needed if authentication is disabled
     )
 

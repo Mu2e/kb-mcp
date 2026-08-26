@@ -9,7 +9,6 @@ from typing import Optional, List, Dict, Any
 from mcp.types import ImageContent
 from mcp.server.fastmcp import Context
 
-from .mcp_prompts import BASE_SYSTEM_PROMPT
 
 logger = logging.getLogger(__name__)
 
@@ -287,22 +286,54 @@ def kb_search(
     search_filter: dict | None = None,
     rerank: bool | None = None,
 ) -> str:
-    """Search documents in the knowledge base.
+    """Search the Mu2e experiment knowledge base (Fermilab muon-to-electron conversion).
+
+    Mu2e DocDB and the Mu2e collaboration wiki are the authoritative sources and
+    answer most questions; published papers, meeting transcripts and uploads are
+    also indexed. The server instructions describe each source in detail.
 
     Returns formatted results with metadata blocks. Small docs (<2000 chars) in full,
     large docs as excerpts with <match> tags highlighting matches.
 
     Args:
         query: Search query
-        max_results: Max documents to return (default: 5, or chosen by the query router when enabled)
-        search_type: "hybrid" (recommended), "semantic", or "fulltext" (default: "hybrid")
-        search_filter: Optional JSON filter, e.g. `{"term": {"source_id": "inspire-sld"}}`
-        rerank: Whether to apply cross-encoder reranking (default: None = use server config).
-                Set True to force reranking, False to disable.
+        max_results: Max documents to return. Omit to let the server choose
+                (5, or a count the query router picks for this kind of query).
+        search_type: "hybrid" (default, use this). "fulltext" only to match an exact
+                string such as a DocDB number or filename; "semantic" only when the
+                wording is expected to differ entirely from the source.
+        search_filter: Optional filter, written as a subset of the Elasticsearch
+                Query DSL. Filter to the Mu2e sources when the question is
+                Mu2e-internal and papers would be noise:
+                  {"term": {"source_id": "mu2e-docdb"}}
+                  {"terms": {"source_id": ["mu2e-docdb", "mu2e-wiki"]}}
+                  {"bool": {"must": [{"term": {"source_id": "mu2e-docdb"}},
+                                     {"term": {"doc_type": "table"}}]}}
+                Fields: source_id (mu2e-docdb, mu2e-wiki, inspire-hep,
+                MeetingTranscripts, upload, test-flow), doc_type (text, section,
+                table, image, meeting_comment), doc_id, title, title_gen, the
+                insert_time/creating_time/update_time timestamps, and any
+                document metadata key.
+                Queries: term, terms, range ({"gte":..,"lte":..}), match,
+                wildcard (* and ?), bool (must / should / must_not).
+                Three departures from Elasticsearch: `match` is a plain substring
+                test, not analysed full-text (put full-text in `query` instead);
+                `range` on a metadata key compares as text, so numeric ranges only
+                sort correctly for zero-padded or ISO-8601 values; and `must_not`
+                also excludes documents that lack the field entirely.
+                Anything unsupported is reported as an error, not matched silently.
+        rerank: True to force cross-encoder reranking, False to disable. Omit to let
+                the server decide.
 
     Returns:
-        JSON with results in [[DOCUMENT_METADATA]]/[[CONTENT_START]] blocks.
-        Use kb_get() for full docs if STATUS shows EXCERPTS/SUMMARY/PREVIEW.
+        JSON. Each result carries source_id, doc_id, title and a `text` field
+        holding a [[DOCUMENT_METADATA]] header (ID, TITLE, URI, TYPE, STATUS)
+        followed by the content. Pass the header's ID to kb_get for the full
+        document whenever STATUS shows EXCERPTS, SUMMARY or PREVIEW.
+        No matches returns {"message": "No results found", "results": []} - a valid
+        empty answer, not an error to retry. A malformed or unsupported
+        search_filter returns {"error": "Invalid search_filter: ..."} naming the
+        supported queries; fix the filter rather than concluding nothing matched.
     """
     from ..kb import search
     from ..kb.search import search_semantic, search_fulltext
@@ -317,6 +348,23 @@ def kb_search(
                     filter_dict = json.loads(search_filter)
                 except json.JSONDecodeError as e:
                     return json.dumps({"error": f"Invalid filter JSON: {e}"}, indent=2)
+
+        # Validate the filter before searching. search_hybrid catches a failing
+        # branch and reports "No results found", so without this an unsupported
+        # or malformed filter is indistinguishable from one that legitimately
+        # matched nothing - and the caller has no way to learn it wrote a bad
+        # filter. Parsing here is cheap and builds no query.
+        if filter_dict:
+            from sqlalchemy.orm import aliased
+            from ..kb.db_models import Document
+            from ..kb.search.filters import _parse_elasticsearch_filter
+
+            try:
+                _parse_elasticsearch_filter(
+                    aliased(Document, name="d"), filter_dict, dialect_name="postgresql"
+                )
+            except ValueError as e:
+                return json.dumps({"error": f"Invalid search_filter: {e}"}, indent=2)
 
         # Select search function based on type
         if search_type == "semantic":
@@ -385,18 +433,26 @@ def kb_search(
 
 
 def kb_get(identifier: str) -> str:
-    """Get the complete content of a document.
+    """Get the complete text of one Mu2e knowledge base document.
 
-    Returns raw text with a metadata header, optimized for LLM reading.
+    Use this after kb_search whenever STATUS shows EXCERPTS_WITH_MATCHES,
+    SUMMARY_ONLY or PREVIEW_ONLY - those results contain only part of the document.
 
     Args:
-        identifier: Document ID in one of these formats:
-                   - "source_id/doc_id" (e.g., "inspire-sld/paper-123")
-                   - "doc_id" (just the document ID)
-                   - UUID (document's unique identifier)
+        identifier: Pass the value on the `ID:` line of a kb_search result's
+                   [[DOCUMENT_METADATA]] header, verbatim. Also accepted:
+                   - UUID (the document's unique identifier)
+                   - "source_id/doc_id" (e.g. "mu2e-docdb/56353-opsmeeting_10thApr")
+                   - "source_id_doc_id" (underscore form; kb_search emits this when
+                     the document has no UUID)
+                   - "doc_id" alone
 
     Returns:
-        Raw text with structured metadata header and full document content.
+        A metadata header, a [[DETECTED_CONCEPTS]] block listing knowledge-graph
+        nodes mentioned in the document (each with a kb_lookup_node CMD to follow),
+        then the full text between [[CONTENT_START]] and [[DOCUMENT_END]].
+        A string starting with "ERROR:" means the document was not found - that is
+        final, do not retry the same identifier.
     """
     from ..kb import get
 
@@ -473,18 +529,24 @@ def kb_get(identifier: str) -> str:
 
 
 def kb_get_image(identifier: str, image_filename: Optional[str] = None) -> ImageContent:
-    """Retrieve an image from a document as an MCP Image resource.
+    """Retrieve an image from a Mu2e knowledge base document as an MCP Image resource.
+
+    Image filenames are discovered from markdown image references in kb_get output -
+    e.g. `![](image-1.png)` or `![](_page_9_Figure_7.png)`. Pass the parent
+    document's identifier plus that filename to fetch the figure it refers to.
 
     Args:
         identifier: Document identifier in one of these formats:
-                   - "source_id/doc_id" for the parent document (requires image_filename)
+                   - "source_id/doc_id" for the parent document (requires image_filename),
+                     e.g. "mu2e-docdb/56353-opsmeeting_10thApr"
                    - "source_id/doc_id-image.png" for the image directly
                    - UUID of the image document
-        image_filename: Optional image filename (e.g., "fig1.png").
-                       If provided, constructs the image doc_id as "doc_id-image_filename"
+        image_filename: Image filename taken from a markdown reference in the parent
+                       document (e.g. "image-1.png"). Combined with the parent doc_id
+                       as "doc_id-image_filename".
 
     Returns:
-        MCP Image with base64 data and mimeType.
+        MCP Image with base64 data and mimeType. Raises if no such image exists.
     """
     from ..kb import get
 
@@ -565,6 +627,9 @@ def kb_lookup_node(identifier: str, node_type: Optional[str] = None) -> str:
 
     Returns:
         Structured text describing the node, its neighbors, and linked documents.
+        Relations carry CMD_NODE / CMD_EVIDENCE hints - literal follow-up calls.
+        "Node not found: <identifier>" means no such concept exists; try kb_search
+        rather than retrying with a variation of the name.
     """
     try:
         # Try finding by ID first, then by Name
@@ -591,7 +656,9 @@ def kb_node_relation_evidence(relation_id: str) -> str:
         relation_id: The ID of the relationship (found in kb_lookup_node output).
 
     Returns:
-        Text excerpts from documents that support this relationship.
+        Text excerpts from documents that support this relationship, each with a
+        kb_get CMD for the source document. "No specific text evidence found."
+        means the relationship has no stored evidence - that is final.
     """
     try:
         evidence = get_relation_evidence(relation_id)
@@ -632,7 +699,9 @@ def kb_find_path(start_node: str, end_node: str, max_depth: int = 4) -> str:
         max_depth: Maximum path length to search (default: 4).
 
     Returns:
-        Paths connecting the two nodes, if any exist.
+        Paths connecting the two nodes, each step carrying a CMD to look up the node
+        or its supporting evidence. "No paths found" and "Could not find start/end
+        node" are final answers, not errors to retry.
     """
     try:
         # Resolve names to IDs
@@ -690,9 +759,12 @@ async def kb_research(question: str, ctx: Context = None) -> str:
     """Run a multi-step research agent over the knowledge base and return a synthesized answer.
 
     Use this for open-ended questions that require multiple searches, cross-referencing
-    documents, or exploring the knowledge graph before an answer can be composed. It is
-    much slower and more expensive than kb_search/kb_get, so prefer those directly when a
-    single lookup will do.
+    documents, or exploring the knowledge graph before an answer can be composed.
+
+    It runs up to 10 agent iterations, each making several LLM calls, so expect it to
+    take minutes and to cost far more than a direct lookup - prefer kb_search/kb_get
+    whenever a search or two would settle the question. Progress is reported as the
+    run proceeds, so a long silence is the agent working, not a stall.
 
     Args:
         question: The research question to investigate.
@@ -837,35 +909,35 @@ def register_prompts(mcp):
     @mcp.resource("kb://sys/domain_context")
     def get_domain_context() -> str:
         """Returns domain-specific context and tool usage tips."""
-        return """
-### KNOWLEDGE BASE STRUCTURE
-This system is a **Hybrid Knowledge Base** comprising two interconnected layers:
+        # Same text the server advertises via MCP `instructions`, so a client
+        # that reads this resource and one that only sees the initialize
+        # response get the same briefing.
+        from .mcp_prompts import get_server_instructions
 
-1.  **Document Store** (Unstructured Text)
-    - Contains PDFs, logs, papers, and reports.
-    - **Primary Tool**: `kb_search("query")` -> Returns text segments matches.
-    - **Use Case**: Finding specific facts, error codes, methodologies, or general topic overviews.
-    - **Links**: Documents often mention **Nodes**, which you can look up in the Graph layer.
+        return get_server_instructions()
 
-2.  **Knowledge Graph** (Structured Concepts)
-    - Contains **Nodes** (Concepts, Entities, Components) and **Relationships**.
-    - **Primary Tools**: 
-      - `kb_lookup_node("Name" or "UUID")`: Explores a concept's immediate neighbors.
-      - `kb_find_path("Start", "End")`: Finds how two concepts are connected.
-      - `kb_node_relation_evidence("RelID")`: Gets text proving a relationship.
-    - **Use Case**: Understanding system architecture, causal chains ("What causes X?"), and verifying connections.
+    # A resource and a prompt with no database or model dependency, so a
+    # client (or a test) can verify that resource and prompt plumbing works
+    # without a populated knowledge base. Everything else here reads real KB
+    # state, which makes it useless for telling "server is misconfigured"
+    # apart from "the knowledge base is empty".
+    @mcp.resource("kb://sys/selftest")
+    def selftest_resource() -> str:
+        """Static resource for checking that resource reads work."""
+        return json.dumps(
+            {
+                "status": "ok",
+                "server": "kb-mcp",
+                "resource": "kb://sys/selftest",
+                "note": "Static self-test payload; reads no knowledge base state.",
+            },
+            indent=2,
+        )
 
-### EXECUTION STRATEGY
-- **Start Broad**: Use `kb_search` to find relevant documents.
-- **Pivot to Graph**: If documents mention a specific component (e.g., "dtc01", "Module X"), use `kb_lookup_node` to see its structural context.
-- **Deep Dive**: Use `kb_get` to read full content of highly relevant documents found via search or graph traversal.
-"""
-
-    # Register system prompt as a resource
-    @mcp.resource("prompts://agent/system")
-    def get_system_prompt() -> str:
-        """Returns the core system prompt for the Recursive Agent."""
-        return BASE_SYSTEM_PROMPT
+    @mcp.prompt()
+    def selftest(echo: str = "ping") -> str:
+        """Static prompt for checking that prompt rendering and arguments work."""
+        return f"kb-mcp self-test. Echo: {echo}"
 
     @mcp.prompt()
     def search_kb(topic: str) -> str:
