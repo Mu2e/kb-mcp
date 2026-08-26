@@ -656,9 +656,13 @@ class Chunk(Base):
         to strip a baked-in prefix. The prefix-prepending flags live on the
         ChunkStrategy meta (`prepend_section_path`, `prepend_gist`).
 
-        Special strategies (`summary`, `image`) keep their context baked into
-        `chunk.text` (they handle their own prefix logic in chunking.py) — for
-        those, `embed_text()` returns `chunk.text` unchanged.
+        Special strategies (`summary`, `image`, `table`) keep their context
+        baked into `chunk.text` (they handle their own prefix logic in
+        chunking.py) — for those, `embed_text()` returns `chunk.text`
+        unchanged. `section` chunks are NOT special here: they carry a real
+        `section_path` from the header stack they were walked under, and get
+        the normal `Section: {path}` / `Context: {gist}` prefix like token
+        chunks do.
 
         Legacy chunks created before this split have the prefix already baked
         into `chunk.text`. We detect that via the literal `Section:` /
@@ -669,7 +673,7 @@ class Chunk(Base):
             Contextual text to embed (prefix + clean text), or the raw
             `chunk.text` for special / legacy cases.
         """
-        if self.chunk_strategy in ("summary", "image", "section", "table"):
+        if self.chunk_strategy in ("summary", "image", "table"):
             return self.text or ""
 
         clean = self.text or ""

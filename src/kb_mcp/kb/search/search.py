@@ -273,7 +273,11 @@ def search_semantic(
         # Get embedder and embed the query
         # Don't pass kwargs to embedder - metadata filters should only go to search functions
         embedder = get_embedder(embedding_name=embedding_name, session=session)
-        query_embedding = embedder([query])[0]  # Get first (and only) embedding
+        # embed_query, not embedder([query]): asymmetric retrieval models
+        # (bge-*) want a query-side instruction that the indexed passages
+        # were deliberately embedded without. Symmetric models return an
+        # empty prefix, so this is a no-op for them.
+        query_embedding = embedder.embed_query(query)
         from ..embedding.embedding import _convert_embedding_to_list
         query_embedding = _convert_embedding_to_list(query_embedding)
         

@@ -2,6 +2,7 @@
 
 import logging
 import os
+import re
 from typing import List, Optional
 
 from .embedder_base import BaseEmbedder
@@ -136,6 +137,19 @@ class OpenAIEmbedder(BaseEmbedder):
 class SentenceTransformersEmbedder(BaseEmbedder):
     """SentenceTransformers embedding generator."""
 
+    # Query-side instructions for asymmetric retrieval models, keyed by the
+    # model name as it appears in EMBEDDING_MODEL. Each string is fixed by
+    # how the model was trained — these are not tunable prompts, and a
+    # model absent from this map is symmetric and gets no prefix.
+    #
+    # BAAI publishes these with bge-*-v1.5; the trailing space is part of
+    # the string. Applied to queries only (see `BaseEmbedder.query_prefix`).
+    _QUERY_PREFIXES = {
+        "bge-small-en-v1.5": "Represent this sentence for searching relevant passages: ",
+        "bge-base-en-v1.5": "Represent this sentence for searching relevant passages: ",
+        "bge-large-en-v1.5": "Represent this sentence for searching relevant passages: ",
+    }
+
     def __init__(
         self,
         model_name: str = "all-MiniLM-L6-v2",
@@ -208,8 +222,25 @@ class SentenceTransformersEmbedder(BaseEmbedder):
         # Most common models use 256 or 512 tokens
         return self._model.max_seq_length
 
+    @property
+    def query_prefix(self) -> str:
+        """Query-side instruction for asymmetric models (see base class).
+
+        Matched on the bare model name so an org-qualified id
+        ("BAAI/bge-small-en-v1.5") resolves the same as a plain one.
+        """
+        return self._QUERY_PREFIXES.get(self.model.split("/")[-1], "")
+
     def _generate_short_name(self) -> str:
-        """Generate default short name from provider and model."""
+        """Generate default short name from provider and model.
+
+        This becomes the `embedding_configs` primary key and the suffix of
+        the per-model embeddings table, so it has to survive being used as
+        an identifier: drop the org qualifier ("BAAI/bge-small-en-v1.5")
+        and anything that isn't alphanumeric or an underscore.
+        """
         # For sentence-transformers, use "st" prefix
-        model_short = self.model.replace("all-", "").replace("-", "")
+        model_short = self.model.split("/")[-1]
+        model_short = model_short.replace("all-", "").replace("-", "")
+        model_short = re.sub(r"[^0-9A-Za-z_]", "_", model_short)
         return f"st_{model_short}"
