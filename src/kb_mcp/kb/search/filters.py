@@ -1,5 +1,34 @@
-"""Shared filter utilities for Elasticsearch-style filtering."""
+"""Search filters, following a subset of the Elasticsearch Query DSL.
 
+Filter dicts use real Elasticsearch query names and shapes - `term`, `terms`,
+`range` with `gte`/`lte`, `match`, `wildcard`, and `bool` with `must`/`should`/
+`must_not` - so anyone who knows the DSL can write one without new docs. What
+is here is a subset, and it departs from Elasticsearch in four ways worth
+knowing before writing a filter:
+
+  1. `match` is a substring LIKE, not analysed full-text search. In
+     Elasticsearch `{"match": {"f": "quick fox"}}` matches on analysed terms;
+     here it means `f LIKE '%quick fox%'`. Use the search query itself for
+     full-text; `match` is for crude metadata substring tests.
+  2. Metadata comparisons are text comparisons. Values inside the JSON `meta`
+     blob are read with `->>`, which yields text, so `range` on them sorts
+     lexicographically: "9" >= "10" is true. Numeric ranges are only reliable
+     on the DIRECT_COLUMNS below, or on zero-padded / ISO-8601 values.
+  3. `must_not` drops documents that lack the field. `NOT (NULL = 'v')` is
+     NULL, so a document with no such metadata key is filtered out.
+     Elasticsearch would match it. Combine with a presence check if you mean
+     "not equal to v, or absent".
+  4. `minimum_should_match` only distinguishes 1 from all; intermediate values
+     are treated as 1 (see the TODO in the bool handler).
+
+Fields in DIRECT_COLUMNS resolve to real Document columns; every other field
+name is looked up as a key inside the JSON `meta` blob.
+
+Unsupported Elasticsearch constructs (`match_phrase`, `exists`, `prefix`,
+`nested`, `query_string`, ...) raise rather than silently matching nothing.
+"""
+
+import re
 from typing import Any, Dict, List, Optional, Tuple, Set
 from sqlalchemy import func, and_, or_
 from sqlalchemy.dialects import postgresql
@@ -343,10 +372,17 @@ def get_filters_pgvector(
     param_counter: int = 0,
 ) -> Tuple[str, Dict[str, Any]]:
     """
-    Build PostgreSQL SQL filter from Elasticsearch-style filter using unified parser.
+    Build a PostgreSQL WHERE fragment from an Elasticsearch-style filter.
 
-    This uses _parse_elasticsearch_filter to build SQLAlchemy expressions,
-    then compiles them to PostgreSQL SQL strings with named parameters.
+    The fragment is spliced into the raw `text()` queries in search_pgvector
+    and search_fulltext, so it must use SQLAlchemy's `:name` bind style - not
+    the `%(name)s` pyformat that the psycopg2 dialect emits by default. We
+    therefore compile with paramstyle="named" and hand back the bind values
+    for the caller to merge into its own parameter dict.
+
+    Bind names are rewritten to `filter_<n>` so they cannot collide with the
+    outer query's parameters (:max_results, :source_id, ...). `param_counter`
+    lets a caller combine several fragments without name clashes.
 
     Args:
         doc_alias: SQLAlchemy aliased Document model
@@ -362,55 +398,31 @@ def get_filters_pgvector(
     if filter_expr is None:
         return "", {}
 
-    # Compile to SQL string with named parameters
-    # Compile the expression
+    # paramstyle="named" makes SQLAlchemy render ":meta_1" instead of
+    # "%(meta_1)s"; text() only recognises the former, and an unrecognised
+    # placeholder reaches PostgreSQL verbatim as `syntax error at or near "%"`.
     compiled = filter_expr.compile(
-        dialect=postgresql.dialect(),
-        compile_kwargs={"literal_binds": False}
+        dialect=postgresql.dialect(paramstyle="named"),
+        compile_kwargs={"literal_binds": False},
     )
 
-    # Get SQL string (SQLAlchemy uses %s for positional parameters)
     sql = str(compiled)
 
-    # Extract parameters and convert to named parameters
-    params = {}
-    counter = param_counter
-
-    # SQLAlchemy stores parameters in compiled.params
-    # The order matches the %s placeholders in the SQL
-    if hasattr(compiled, 'params'):
-        param_dict = compiled.params if isinstance(compiled.params, dict) else {}
-        # Get parameter values - SQLAlchemy may use different structures
-        # Try to get them in order
-        if isinstance(compiled.params, dict):
-            # For dict, we need to match keys to positions
-            # This is tricky - let's use a simpler approach
-            # Count %s and replace them
-            param_count = sql.count('%s')
-            param_values = list(compiled.params.values())[:param_count] if param_count > 0 else []
-        else:
-            param_values = list(compiled.params) if compiled.params else []
-
-        # Replace each %s with a named parameter in PostgreSQL format
-        for value in param_values:
-            param_name = f"filter_{counter}"
-            params[param_name] = str(value) if value is not None else None
-            # Replace first occurrence of %s with PostgreSQL-style named parameter
-            sql = sql.replace('%s', f'%({param_name})s', 1)
-            counter += 1
-
-    # Also convert any :param style parameters (from direct columns) to %(param)s style
-    import re
-    # Find all :param_name patterns and convert to %(param_name)s
-    def convert_param(match):
-        param_name = match.group(1)
-        # If this param is in compiled.params, add it to our params dict
-        if hasattr(compiled, 'params') and isinstance(compiled.params, dict):
-            if param_name in compiled.params:
-                params[param_name] = compiled.params[param_name]
-        return f'%({param_name})s'
-
-    sql = re.sub(r':([a-zA-Z_][a-zA-Z0-9_]*)', convert_param, sql)
+    # Rename every bind to filter_<n> in a single pass, so a renamed parameter
+    # can never be picked up and renamed again by a later substitution.
+    renames = {
+        name: f"filter_{param_counter + i}"
+        for i, name in enumerate(compiled.params)
+    }
+    sql = re.sub(
+        r":([a-zA-Z_][a-zA-Z0-9_]*)",
+        lambda m: ":" + renames.get(m.group(1), m.group(1)),
+        sql,
+    )
+    # Values are passed through unconverted: _build_metadata_filter has already
+    # cast JSON comparisons to text, while direct columns (insert_time and
+    # friends) need their real types to compare correctly.
+    params = {renames[name]: value for name, value in compiled.params.items()}
 
     return sql, params
 
