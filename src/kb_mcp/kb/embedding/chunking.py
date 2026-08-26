@@ -17,6 +17,70 @@ _PAGE_FURNITURE_LABELS = frozenset({"page_header", "page_footer"})
 _MIN_ANCHOR_LEN = 24
 _MAX_SHORT_JUMP = 400
 
+# Characters Docling's Markdown export backslash-escapes. The body tree
+# stores the *raw* text, so a node containing any of these never matches
+# the export literally — on a maths-heavy document that is 40% of all
+# elements, every one of which used to be unlocatable. See `_find_loose`.
+_MD_ESCAPABLE = set(r"\`*_{}[]()#+-.!|<>~")
+
+
+def _find_loose(haystack: str, needle: str, start: int):
+    """Find `needle` in `haystack` at/after `start`, tolerating escaping.
+
+    Exact search first — that is the common case and stays O(n). Only if
+    it fails do we retry character by character, letting a backslash in
+    the haystack stand in for nothing in the needle (`lh\_d0` matching
+    `lh_d0`), since Docling's Markdown export escapes characters the body
+    tree stores raw.
+
+    Returns `(start, end)` of the match, or None. The end is returned
+    rather than recomputed by the caller because escaping makes the
+    matched span longer than the needle.
+    """
+    pos = haystack.find(needle, start)
+    if pos != -1:
+        return (pos, pos + len(needle))
+    if not any(c in _MD_ESCAPABLE for c in needle):
+        # Nothing the export would have escaped — a genuine absence.
+        return None
+
+    n = len(haystack)
+    first = needle[0]
+    i = start
+    while i < n:
+        # Cheap gate: a candidate must start with the needle's first
+        # character, or with a backslash escaping it.
+        if haystack[i] != first and not (
+            haystack[i] == "\\" and i + 1 < n and haystack[i + 1] == first
+        ):
+            i += 1
+            continue
+        end = _match_loose_at(haystack, needle, i)
+        if end != -1:
+            return (i, end)
+        i += 1
+    return None
+
+
+def _match_loose_at(haystack: str, needle: str, start: int) -> int:
+    """Try to match `needle` at exactly `start`. Returns end offset or -1."""
+    h, k = start, 0
+    n, m = len(haystack), len(needle)
+    while k < m:
+        if h >= n:
+            return -1
+        hc, nc = haystack[h], needle[k]
+        if hc == nc:
+            h += 1
+            k += 1
+        elif hc == "\\" and h + 1 < n and haystack[h + 1] == nc:
+            # Escaped in the export, bare in the tree.
+            h += 2
+            k += 1
+        else:
+            return -1
+    return h
+
 
 def _load_parser_output(document: Document, session=None) -> Optional[Dict[str, Any]]:
     """Return `document`'s structured parser output, or None.
@@ -373,6 +437,13 @@ def chunk_from_docling_json(
         accumulator alive (don't reset) so the fragment merges with
         whatever comes next, and return False. ``force=True`` overrides
         this — used at end-of-doc, where there is no "next".
+
+        A body-less slice (a heading whose section holds only a figure or
+        a formula, or a run of consecutive headings) is held back the same
+        way, so it merges into the next chunk instead of emitting 3 tokens
+        of title on its own. ``force`` still overrides that at end-of-doc
+        — otherwise a document whose only anchorable elements are headings
+        would emit nothing at all.
         """
         nonlocal acc_tokens, acc_body_tokens, emitted_upto
         if acc_end <= emitted_upto:
@@ -407,12 +478,13 @@ def chunk_from_docling_json(
         nonlocal cursor, located_any
         if not node_text:
             return None
-        pos = doc_text.find(node_text, cursor)
-        if pos == -1:
+        span = _find_loose(doc_text, node_text, cursor)
+        if span is None:
             return None
+        pos, end = span
         if len(node_text) < _MIN_ANCHOR_LEN and (pos - cursor) > _MAX_SHORT_JUMP:
             return None
-        cursor = pos + len(node_text)
+        cursor = end
         located_any = True
         return (pos, cursor)
 

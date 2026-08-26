@@ -483,3 +483,49 @@ def test_target_tokens_cannot_exceed_the_model_window():
     _assert_partitions(chunks, doc_text)
     for c in chunks:
         assert c["token_length"] <= budget.content_budget(c["section_path"])
+
+
+def test_escaped_markdown_text_is_still_located():
+    """Docling's Markdown export backslash-escapes characters that the
+    body tree stores raw, so a node reading `lh_d0_max` appears in
+    doc_text as `lh\\_d0\\_max`. A literal search misses it — on a
+    maths-heavy document that was 40% of all elements, whose text then
+    counted as no body at all, leaving their headings to emit as
+    3-token heading-only chunks."""
+    texts = [
+        _text(0, "Observations", label="section_header", level=2),
+        _text(1, "Strong downward trend with increasing lh_d0_max and "
+                 "TF_FOM across the scanned interval.", page=3),
+    ]
+    children = [_cref("#/texts/0"), _cref("#/texts/1")]
+    doc_text = (
+        "## Observations\n\n"
+        "- Strong downward trend with increasing lh\\_d0\\_max and "
+        "TF\\_FOM across the scanned interval.\n"
+    )
+    doc = _doc(texts, children, text=doc_text)
+    chunks = chunk_from_docling_json(doc, min_chunk_tokens=5)
+
+    assert len(chunks) == 1
+    chunk = chunks[0]
+    # The escaped body was found, so it counts as body text and the
+    # heading did not emit alone.
+    assert "lh\\_d0\\_max" in chunk["text"]
+    assert chunk["text"].startswith("## Observations")
+    assert chunk["page_start"] == 3
+    _assert_partitions(chunks, doc_text)
+
+
+def test_a_heading_only_run_still_emits_at_end_of_document():
+    """Body-less slices merge forward rather than emitting alone — but
+    `force` must still override that at end-of-doc, or a document whose
+    only anchorable elements are headings would emit nothing at all."""
+    texts = [_text(0, "GitHubWorkflow", label="title", level=1)]
+    children = [_cref("#/texts/0")]
+    doc_text = "# GitHubWorkflow\n\nSome body text the walker cannot anchor.\n"
+    doc = _doc(texts, children, text=doc_text)
+    chunks = chunk_from_docling_json(doc, min_chunk_tokens=30)
+
+    assert len(chunks) >= 1
+    _assert_partitions(chunks, doc_text)
+    assert "GitHubWorkflow" in chunks[0]["text"]
