@@ -2,6 +2,10 @@
 
 This KB is built around a SQL database schema. It is intended for `postgresql` but `sqlite` can be used for development work.
 
+This page documents the schema through the SQLAlchemy models, so it stays
+current with the code. For the literal `CREATE TABLE` DDL as it exists in a
+live database (a point-in-time snapshot), see [Raw Schema (SQL)](../reference/schema.md).
+
 ## Document Pipeline
 
 The document processing pipeline follows this flow:

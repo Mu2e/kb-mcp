@@ -45,6 +45,7 @@ nav:
       - Authentication: guides/authentication.md
   - API Reference:
     - Configuration: reference/config.md
+    - Raw Schema (SQL): reference/schema.md
     - KB/Knowledge Base:
       - Overview: reference/kb.md
       - Knowledge Graph: reference/kb/graph.md
