@@ -454,6 +454,12 @@ def _reparse_from_raw(args):
                 doc_id=t["doc_id"],
                 uri=t["uri"],
                 meta=t["meta"],
+                # Passed straight into add_document() so they land on whichever
+                # row ends up holding the new parse — including a freshly
+                # INSERTed row when identity misses (e.g. a parser change), which
+                # patching doc_id_existing after the fact would miss entirely.
+                creating_time=t["creating_time"],
+                update_time=t["update_time"],
                 force_reparse=True,
                 parser_name=args.parser_name,
                 # Already under data/sources/{source_id}/ — copying it onto
@@ -470,12 +476,6 @@ def _reparse_from_raw(args):
 
         if t["doc_id_existing"]:
             with get_db_session() as session:
-                doc = session.query(Document).filter(
-                    Document.id == t["doc_id_existing"]
-                ).first()
-                if doc is not None and t["creating_time"] is not None:
-                    doc.creating_time = t["creating_time"]
-                    doc.update_time = t["update_time"]
                 removed = _delete_chunks(stale, session)
                 if removed:
                     print(f"  dropped {removed} stale chunk(s) from the previous text")
@@ -608,6 +608,12 @@ def cmd_reparse(args):
                 doc_id=t["doc_id"],
                 uri=t["uri"],
                 meta=t["meta"],
+                # Passed straight into add_document() so they land on whichever
+                # row ends up holding the new parse — including a freshly
+                # INSERTed row when identity misses (e.g. a parser change), which
+                # patching t["id"] after the fact would miss entirely.
+                creating_time=t["creating_time"],
+                update_time=t["update_time"],
                 force_reparse=True,
                 parser_name=args.parser_name,
                 # The file already lives under data/sources/{source_id}/ — copying
@@ -622,13 +628,7 @@ def cmd_reparse(args):
             print(f"  Error: {type(e).__name__}: {e}")
             continue
 
-        # ingest() has no creating_time/update_time parameters, so restore the
-        # values the original importer recorded.
         with get_db_session() as session:
-            doc = session.query(Document).filter(Document.id == t["id"]).first()
-            if doc is not None:
-                doc.creating_time = t["creating_time"]
-                doc.update_time = t["update_time"]
             # Only now that the re-parse succeeded: chunks captured before it
             # ran and not replaced by it belong to the old text.
             removed = _delete_chunks(stale, session)

@@ -3,6 +3,7 @@
 import json
 import logging
 import shutil
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Union
 
@@ -31,6 +32,8 @@ def ingest(
     copy_to_kb: bool = False,
     uri: Optional[str] = None,
     meta: Optional[Dict] = None,
+    creating_time: Optional[datetime] = None,
+    update_time: Optional[datetime] = None,
     generate_summary: bool = True,
     summary_include_metadata: bool = False,
     chunk_and_embed: bool = True,
@@ -63,6 +66,8 @@ def ingest(
         copy_to_kb: If True, copy file to data/sources/{source_id}/ directory
         uri: Optional URI for the document
         meta: Optional metadata dictionary
+        creating_time: When the document was created in the source system
+        update_time: When the document was last updated in the source system
         generate_summary: If True, generate title, gist, and summary for documents (default: True)
         chunk_and_embed: If True, chunk and embed the documents (default: True)
         create_summary_chunks: If True, create summary chunks when summary is generated (default: True)
@@ -139,6 +144,8 @@ def ingest(
             copy_to_kb=copy_to_kb,
             uri=uri,
             meta=meta,
+            creating_time=creating_time,
+            update_time=update_time,
             session=session,
         )
 
