@@ -1,104 +1,15 @@
 """Chunking utilities for embedding module."""
 
 import logging
-from typing import Any, Callable, Dict, List, Optional, Set
+from typing import Any, Callable, Dict, List, Optional
 
 from ...chunking import base_strategy
 from .db_models import Chunk, Document
+from .section_chunker import chunk_from_docling_json
 
 logger = logging.getLogger(__name__)
 
-# Body labels that are page furniture rather than document content.
-# Docling's Markdown export omits them, so they have no position to
-# anchor to — and they're typically short, repeated strings ("3 / 41",
-# a running title) that would match spuriously if searched for.
-_PAGE_FURNITURE_LABELS = frozenset({"page_header", "page_footer"})
-
-# A string shorter than this is a weak anchor; don't let one match more
-# than `_MAX_SHORT_JUMP` characters ahead of the cursor. See `locate()`.
-_MIN_ANCHOR_LEN = 24
-_MAX_SHORT_JUMP = 400
-
-# A heading is a *candidate* cut point, not a mandatory one. Cutting on
-# every heading gives a chunk per heading regardless of how little sits
-# under it, which on finely-sectioned documents means a corpus of 30-token
-# fragments: a bare finding with the figure it describes and the
-# implication drawn from it split across three chunks, each too partial to
-# answer anything on its own.
-#
-# So a heading closes the current chunk only once that chunk carries at
-# least this fraction of the embedding budget. Below it, the heading joins
-# the chunk in progress and accumulation continues.
-#
-# Not 1.0: packing to the window makes a chunk whose embedding is the
-# average of several topics and sharply matches none of them. Retrieval
-# wants a coherent passage somewhat under the window, so this leaves room
-# to finish a section rather than stopping mid-thought.
-_SECTION_CUT_FRACTION = 0.6
-
-# Characters Docling's Markdown export backslash-escapes. The body tree
-# stores the *raw* text, so a node containing any of these never matches
-# the export literally — on a maths-heavy document that is 40% of all
-# elements, every one of which used to be unlocatable. See `_find_loose`.
-_MD_ESCAPABLE = set(r"\`*_{}[]()#+-.!|<>~")
-
-
-def _find_loose(haystack: str, needle: str, start: int):
-    r"""Find `needle` in `haystack` at/after `start`, tolerating escaping.
-
-    Exact search first — that is the common case and stays O(n). Only if
-    it fails do we retry character by character, letting a backslash in
-    the haystack stand in for nothing in the needle (`lh\_d0` matching
-    `lh_d0`), since Docling's Markdown export escapes characters the body
-    tree stores raw.
-
-    Returns `(start, end)` of the match, or None. The end is returned
-    rather than recomputed by the caller because escaping makes the
-    matched span longer than the needle.
-    """
-    pos = haystack.find(needle, start)
-    if pos != -1:
-        return (pos, pos + len(needle))
-    if not any(c in _MD_ESCAPABLE for c in needle):
-        # Nothing the export would have escaped — a genuine absence.
-        return None
-
-    n = len(haystack)
-    first = needle[0]
-    i = start
-    while i < n:
-        # Cheap gate: a candidate must start with the needle's first
-        # character, or with a backslash escaping it.
-        if haystack[i] != first and not (
-            haystack[i] == "\\" and i + 1 < n and haystack[i + 1] == first
-        ):
-            i += 1
-            continue
-        end = _match_loose_at(haystack, needle, i)
-        if end != -1:
-            return (i, end)
-        i += 1
-    return None
-
-
-def _match_loose_at(haystack: str, needle: str, start: int) -> int:
-    """Try to match `needle` at exactly `start`. Returns end offset or -1."""
-    h, k = start, 0
-    n, m = len(haystack), len(needle)
-    while k < m:
-        if h >= n:
-            return -1
-        hc, nc = haystack[h], needle[k]
-        if hc == nc:
-            h += 1
-            k += 1
-        elif hc == "\\" and h + 1 < n and haystack[h + 1] == nc:
-            # Escaped in the export, bare in the tree.
-            h += 2
-            k += 1
-        else:
-            return -1
-    return h
+__all__ = ["chunk_from_docling_json"]  # re-exported for existing callers/tests
 
 
 def _load_parser_output(document: Document, session=None) -> Optional[Dict[str, Any]]:
@@ -273,77 +184,113 @@ def resolve_strategy_name(
     return get_strategy_name(requested, apply_env_chunk_defaults(config))
 
 
+# Cut levels, coarsest first. A dense Markdown list (references, bullet
+# points) has no blank lines between items — paragraph-level ("\n\n") sees
+# the whole list as one oversized "paragraph" — but each item is its own
+# line and comfortably under any real cap, so a line-level cut resolves it
+# without ever falling through to sentence-splitting. That matters because
+# sentence-splitting on bare ". " is not real sentence detection — it also
+# fires on "Nucl. Instr. Meth. ", severing a citation between its
+# abbreviations — so anything line-structured should never reach it.
+_CUT_LEVELS: tuple[str, ...] = ("\n\n", "\n", ". ")
+
+
 def _split_to_budget(text: str, start: int, end: int, cap: int,
                      count: Callable[[str], int]) -> List[tuple[int, int, int]]:
     """Split `text[start:end]` into (start, end, tokens) pieces of at most `cap`.
 
-    Cuts on paragraph (`\\n\\n`) then sentence-ish (`. `) boundaries,
-    with a character cut as the last resort. Offsets stay absolute
-    into `text` throughout, so every piece remains an exact slice.
+    Cuts on paragraph, then line, then sentence-ish boundaries — see
+    `_CUT_LEVELS` — falling back to a measured character cut for a single
+    unit that is still over cap at the finest level (a markdown table row
+    with no ". " is the usual trigger). Pieces that fit are packed together
+    up to `cap` at whichever level resolved them, so a small piece (a lone
+    heading, a short paragraph, a short list item) merges into its
+    neighbour instead of emitting alone. Offsets stay absolute into `text`
+    throughout, so every piece remains an exact slice.
     """
     tokens = count(text[start:end])
     if tokens <= cap:
         return [(start, end, tokens)]
+    return _pack_split(text, start, end, cap, count, 0)
 
-    def cut(sub_start: int, sub_end: int, sep: str) -> List[tuple[int, int]]:
-        """Split [sub_start, sub_end) on `sep`, keeping absolute offsets."""
-        pieces: List[tuple[int, int]] = []
-        pos = sub_start
+
+def _cut(text: str, sub_start: int, sub_end: int, sep: str) -> List[tuple[int, int]]:
+    """Split text[sub_start:sub_end) on `sep`, keeping absolute offsets.
+
+    The separator is kept with the preceding piece for "\\n" and ". " (so
+    a line still ends with its own newline / period), dropped for "\\n\\n"
+    (a blank line is not content worth keeping on either side).
+    """
+    pieces: List[tuple[int, int]] = []
+    pos = sub_start
+    while True:
+        nxt = text.find(sep, pos, sub_end)
+        if nxt == -1:
+            if pos < sub_end:
+                pieces.append((pos, sub_end))
+            break
+        piece_end = nxt + (len(sep) if sep != "\n\n" else 0)
+        if piece_end > pos:
+            pieces.append((pos, piece_end))
+        pos = nxt + len(sep)
+    return pieces
+
+
+def _char_cut(text: str, c_start: int, c_end: int, c_tokens: int, cap: int,
+              count: Callable[[str], int]) -> List[tuple[int, int, int]]:
+    """Last resort: cut by characters, measuring as it goes.
+
+    A fixed chars-per-token constant is wrong by a wide margin on the
+    content that reaches here (markdown tables, long formulas, CJK), and
+    overshooting means silent truncation. Calibrating on the span average
+    isn't enough either: a table's `---|---` separator row tokenizes
+    several times denser than its prose rows, so an average-derived step
+    still overshoots locally. Measure every piece and shrink the step
+    until it fits.
+    """
+    pieces: List[tuple[int, int, int]] = []
+    pos = c_start
+    # Seed from the span average, with 10% of headroom.
+    per_token = max(1.0, (c_end - c_start) / max(1, c_tokens))
+    step = max(1, int(cap * per_token * 0.9))
+    while pos < c_end:
+        take = step
         while True:
-            nxt = text.find(sep, pos, sub_end)
-            if nxt == -1:
-                if pos < sub_end:
-                    pieces.append((pos, sub_end))
+            ce = min(pos + take, c_end)
+            t = count(text[pos:ce])
+            if t <= cap or take <= 1:
                 break
-            # Keep the separator with the preceding piece for ". ",
-            # drop it for paragraph breaks.
-            piece_end = nxt + (len(sep) if sep == ". " else 0)
-            if piece_end > pos:
-                pieces.append((pos, piece_end))
-            pos = nxt + len(sep)
-        return pieces
+            # Overshot: rescale on what this stretch actually measured
+            # rather than halving blindly.
+            take = max(1, min(take - 1, int(take * cap / t * 0.9)))
+        pieces.append((pos, ce, t))
+        pos = ce
+        # Carry the corrected step forward — the density that tripped us
+        # up usually continues for a while.
+        step = max(1, take)
+    return pieces
 
-    def char_cut(c_start: int, c_end: int, c_tokens: int
+
+def _pack_split(text: str, start: int, end: int, cap: int,
+                 count: Callable[[str], int], level: int
                  ) -> List[tuple[int, int, int]]:
-        """Last resort: cut by characters, measuring as it goes.
+    """Cut text[start:end) on `_CUT_LEVELS[level]`, packing fitting pieces
+    together and recursing into any piece still over cap at the next level.
 
-        A fixed chars-per-token constant is wrong by a wide margin on
-        the content that reaches here (markdown tables, long formulas,
-        CJK), and overshooting means silent truncation. Calibrating on
-        the span average isn't enough either: a table's `---|---`
-        separator row tokenizes several times denser than its prose
-        rows, so an average-derived step still overshoots locally.
-        Measure every piece and shrink the step until it fits.
-        """
-        pieces: List[tuple[int, int, int]] = []
-        pos = c_start
-        # Seed from the span average, with 10% of headroom.
-        per_token = max(1.0, (c_end - c_start) / max(1, c_tokens))
-        step = max(1, int(cap * per_token * 0.9))
-        while pos < c_end:
-            take = step
-            while True:
-                ce = min(pos + take, c_end)
-                t = count(text[pos:ce])
-                if t <= cap or take <= 1:
-                    break
-                # Overshot: rescale on what this stretch actually
-                # measured rather than halving blindly.
-                take = max(1, min(take - 1, int(take * cap / t * 0.9)))
-            pieces.append((pos, ce, t))
-            pos = ce
-            # Carry the corrected step forward — the density that
-            # tripped us up usually continues for a while.
-            step = max(1, take)
-        return pieces
+    Uniform at every level: a unit that fits joins the pending pack if the
+    merge still fits under `cap`, otherwise the pack flushes as its own
+    piece and this unit starts a new one. A unit that doesn't fit on its
+    own — even alone — is split at the next finer level (or character-cut,
+    past the last level), and *that* result's first/last pieces are what
+    the pack test runs against, so a merge never skips the level in
+    between: a heading immediately before an oversized paragraph, say,
+    still gets a chance to merge into that paragraph's first sub-piece.
+    """
+    if level >= len(_CUT_LEVELS):
+        tokens = count(text[start:end])
+        return _char_cut(text, start, end, tokens, cap, count)
 
     result: List[tuple[int, int, int]] = []
-
-    # Paragraphs that fit are packed together up to `cap`, not emitted one per
-    # piece. Emitting each separately turns a document whose paragraphs are all
-    # small into one chunk per paragraph — 24 scraps averaging 167 characters
-    # against a 501-token budget, each dominated by its own prepended prefix.
-    # The sentence branch below already packs this way; paragraphs did not.
     pack_start: Optional[int] = None
     pack_end = 0
 
@@ -353,567 +300,41 @@ def _split_to_budget(text: str, start: int, end: int, cap: int,
             result.append((pack_start, pack_end, count(text[pack_start:pack_end])))
             pack_start, pack_end = None, 0
 
-    for p_start, p_end in cut(start, end, "\n\n"):
-        p_tokens = count(text[p_start:p_end])
-        if p_tokens <= cap:
-            if not p_tokens:
+    for u_start, u_end in _cut(text, start, end, _CUT_LEVELS[level]):
+        u_tokens = count(text[u_start:u_end])
+        if u_tokens <= cap:
+            if not u_tokens:
                 continue
-            # Measure the merged slice rather than summing pieces: merging
-            # re-includes the "\n\n" separators `cut` dropped, so a sum would
-            # drift under the real cost and overflow the window.
-            if pack_start is not None and count(text[pack_start:p_end]) > cap:
+            # Measure the merged slice rather than summing: merging
+            # re-includes whatever the separator's un-kept characters were
+            # (blank lines at paragraph level), so a sum would drift under
+            # the real cost and overflow the window.
+            if pack_start is not None and count(text[pack_start:u_end]) > cap:
                 flush_pack()
             if pack_start is None:
-                pack_start = p_start
-            pack_end = p_end
+                pack_start = u_start
+            pack_end = u_end
             continue
-        # Paragraph still too big — flush what's packed, then sentence-ish.
-        flush_pack()
-        buf_start: Optional[int] = None
-        buf_end = p_start
-        buf_tokens = 0
-        for s_start, s_end in cut(p_start, p_end, ". "):
-            s_tokens = count(text[s_start:s_end])
-            if s_tokens > cap:
-                # A single sentence over the cap (markdown tables with
-                # no ". " are the usual trigger). Checked before the
-                # buffer test so it can't be appended to a buffer and
-                # emitted whole: flush, then cut by characters.
-                if buf_start is not None:
-                    result.append((buf_start, buf_end, buf_tokens))
-                    buf_start, buf_tokens = None, 0
-                result.extend(char_cut(s_start, s_end, s_tokens))
-            elif buf_start is not None and buf_tokens + s_tokens > cap:
-                result.append((buf_start, buf_end, buf_tokens))
-                buf_start, buf_end, buf_tokens = s_start, s_end, s_tokens
-            else:
-                if buf_start is None:
-                    buf_start = s_start
-                buf_end = s_end
-                buf_tokens += s_tokens
-        if buf_start is not None:
-            result.append((buf_start, buf_end, buf_tokens))
+        # This unit alone is still over cap — split it at the next finer
+        # level. Its first sub-piece gets the same pack-merge chance any
+        # other fitting unit would: a pending pack from before this unit
+        # (e.g. a lone heading) can still land inside the same chunk as
+        # the start of what follows, rather than being forced out alone
+        # just because the *next* unit as a whole didn't fit.
+        sub_pieces = _pack_split(text, u_start, u_end, cap, count, level + 1)
+        if not sub_pieces:
+            continue
+        first_start, first_end, first_tokens = sub_pieces[0]
+        if (pack_start is not None
+                and count(text[pack_start:first_end]) <= cap):
+            pack_end = first_end
+            flush_pack()
+        else:
+            flush_pack()
+            result.append((first_start, first_end, first_tokens))
+        result.extend(sub_pieces[1:])
     flush_pack()
     return result
-
-
-def chunk_from_docling_json(
-    document: Document,
-    target_tokens: Optional[int] = None,
-    min_chunk_tokens: int = 30,
-    parser_output: Optional[Dict[str, Any]] = None,
-    prepend_section_path: bool = True,
-    prepend_gist: bool = True,
-) -> List[Dict[str, Any]]:
-    """Chunk `document.text` at section boundaries found in the persisted
-    DoclingDocument (`document.parser_output["body"]["children"]`).
-
-    The DoclingDocument tree decides *where* to cut; the text itself is
-    always a slice of `document.text`. That is the key property: chunk
-    text is never reconstructed from the body tree, so it can't drift from
-    the canonical text the way a reconstruction does (the tree's raw node
-    text differs from the Markdown export in list spacing, escaping, and
-    `html.unescape()` handling). Slicing also makes
-    `char_start_index` / `char_end_index` exact by construction rather
-    than something to recover by fuzzy matching afterwards.
-
-    The emitted chunks **partition** `document.text`: chunk N+1 starts
-    exactly where chunk N ended. Anything the walker doesn't itself track —
-    tables, images, formula placeholders, headings it declined to open a
-    chunk on — is therefore carried inside a neighbouring chunk rather than
-    dropped. Coverage is 100% by construction, which is what a reader
-    highlighting a chunk expects and what keeps retrieval from having blind
-    spots the walk happened to step over.
-
-    Behaviour:
-      * Each body text element is located in `document.text` once, with a
-        forward-only cursor so repeated boilerplate can't match backwards.
-        Located elements decide *where* to cut; they never decide what the
-        text is, which is always `doc_text[start:end]`.
-      * Section headers (`section_header` / `title`) update an in-memory
-        header stack — used to populate `section_path` on every chunk that
-        follows. Header text is not part of the chunk *body* for the
-        tiny-fragment floor, but it does sit inside the emitted slice; the
-        contextual prefix is built separately at embed time by
-        `Chunk.embed_text()`.
-      * Group bodies (lists, key-value pairs, …) are walked inline.
-      * Each emitted chunk records `page_start` (min `prov.page_no` of the
-        contributing texts), `page_end` (max), and `body_self_refs` (list
-        of crefs that contributed). `bbox` is left None until per-chunk
-        bbox-merging is needed — page-level alone is enough for citations.
-      * **Sizing is done in the embedding model's own tokenizer** (see
-        :mod:`kb_mcp.kb.embedding.budget`), not tiktoken, and the budget is
-        the model's window minus `[CLS]`/`[SEP]` minus the
-        `Section:` / `Context:` prefix `embed_text()` will prepend. Past
-        that window the encoder silently truncates, so an over-budget chunk
-        is embedded as its opening fragment and nothing else. The budget
-        moves on its own when the model or the gist changes.
-      * **Tiny-fragment merging**: a flush whose accumulated body is below
-        ``min_chunk_tokens`` does NOT emit — it keeps the accumulator alive
-        so the fragment merges with the next chunk. Stops the corpus from
-        getting polluted with single-token chunks like '2' / 'by' / '17'
-        that escape between section boundaries.
-      * **Oversized-slice splitting**: the cap is enforced on the slice
-        that is actually emitted, so untracked interstitial content counts
-        toward it. An over-cap slice is split on paragraph (`\\n\\n`) then
-        sentence-ish (`. `) boundaries, with a self-calibrating character
-        cut as the last resort; offsets stay absolute throughout, so every
-        piece is still an exact slice and the partition still holds.
-      * Returns chunk dicts ready for the existing chunk-save path.
-        chunk_strategy = `"section"`. `token_length` is in the embedding
-        model's units.
-
-    Falls back to `[]` (the dispatch then uses the Markdown token chunker)
-    when there's no DoclingDocument payload or no `document.text` to slice.
-
-    Args:
-        document: Source document whose `parser_output` holds a
-            DoclingDocument payload and whose `text` is the Markdown the
-            chunks are sliced from.
-        target_tokens: Soft per-chunk budget, in embedding-model tokens.
-            Clamped to the content budget — it can only ask for *smaller*
-            chunks, never for ones the embedder would truncate. Default
-            None = use the whole content budget.
-        min_chunk_tokens: Floor — chunks below this token count merge
-            with the next instead of emitting. Default 30.
-        parser_output: Pre-loaded DoclingDocument payload. Pass this when
-            the caller already resolved it (see `_load_parser_output`) —
-            reading `document.parser_output` here would lazy-load, which
-            raises on a Document detached from its session.
-        prepend_section_path: Whether `embed_text()` will prepend
-            `Section: …`. Mirrored here so its token cost is reserved.
-        prepend_gist: Likewise for `Context: {document.gist}`.
-    """
-    from ..db_models import is_docling_document
-
-    if parser_output is None:
-        parser_output = _load_parser_output(document)
-    if not is_docling_document(parser_output):
-        # `parser_output` is parser-agnostic; this walker only understands
-        # DoclingDocument payloads (self-identified via `schema_name`).
-        # Anything else falls back through the dispatch's 0-chunks path.
-        return []
-
-    doc_text = getattr(document, "text", None)
-    if not doc_text:
-        # Nothing to slice. The dispatch falls back to the token chunker.
-        return []
-
-    from .budget import get_embed_budget
-
-    embed_budget = get_embed_budget(
-        gist=getattr(document, "gist", None),
-        prepend_section_path=prepend_section_path,
-        prepend_gist=prepend_gist,
-    )
-    tok = embed_budget.count
-
-    body = (parser_output.get("body") or {})
-    children = body.get("children") or []
-    texts_by_ref = {
-        t.get("self_ref") or f"#/texts/{i}": t
-        for i, t in enumerate(parser_output.get("texts") or [])
-    }
-    groups_by_ref = {
-        g.get("self_ref") or f"#/groups/{i}": g
-        for i, g in enumerate(parser_output.get("groups") or [])
-    }
-
-    out: List[Dict[str, Any]] = []
-    header_stack: List[tuple[int, str]] = []
-    # Accumulator: (start, end, self_ref, page) per located element. Spans
-    # are character offsets into doc_text, never text fragments.
-    acc_items: List[tuple[int, int, str, Optional[int]]] = []
-    acc_pages: Set[int] = set()
-    # Partition cursor: the next chunk starts here, wherever the walk's
-    # tracked elements happen to begin. Everything between `emitted_upto`
-    # and `acc_end` rides inside the emitted slice, so untracked content
-    # (tables, figures, formula placeholders) is carried, not dropped.
-    emitted_upto = 0
-    # Furthest character the accumulator reaches.
-    acc_end = 0
-    # Tokens of doc_text[emitted_upto:acc_end], accumulated as deltas so
-    # each character is tokenized exactly once — and so interstitial
-    # content counts toward the budget, because it counts at embed time.
-    acc_tokens = 0
-    # Body tokens only — excludes the section heading that opens the chunk.
-    # The tiny-fragment guard measures this, so a heading with no body of
-    # its own (a parent heading, or one whose text the export dropped)
-    # can't satisfy the floor on its own and emit as a junk chunk.
-    acc_body_tokens = 0
-    # Forward-only search cursor into doc_text.
-    cursor = 0
-    # Whether any element was located at all. If none was, this walker has
-    # no opinion on where the cuts belong and the caller should fall back
-    # to the Markdown token chunker rather than take a blind split.
-    located_any = False
-
-    # The header stack as it stood when the current chunk opened. A chunk
-    # that merged across sibling headings must not be labelled with just
-    # the last one — see `section_path`.
-    open_stack: List[tuple[int, str]] = []
-
-    def section_path() -> Optional[str]:
-        """Section path describing everything in the current chunk.
-
-        For a chunk that lies inside one section this is just that
-        section's path. For a chunk that merged across sibling headings,
-        it is the deepest path common to where the chunk opened and where
-        it now ends — the shared ancestor that honestly covers all of it.
-        Labelling such a chunk with only its *last* heading would attribute
-        content to a sibling section it isn't part of, which retrieves
-        confidently and wrongly.
-
-        Descending into a subsection is not merging across a boundary:
-        if the chunk opened at `Detector` and the walk is now inside
-        `Detector > Calorimeter`, the opening path is a prefix of the
-        current one and the deeper path describes the chunk's content
-        better, so it wins. Only when the two paths actually diverge —
-        sibling sections — does the shared ancestor apply.
-
-        When divergent headings share no ancestor at all — the common
-        case on flat documents, where everything sits at one level — fall
-        back to the section the chunk opened in rather than to nothing.
-        An empty path would drop the `Section:` prefix at embed time and
-        leave the reranker without context, which is a worse trade than a
-        label naming the first of the sections the chunk covers.
-        """
-        if not open_stack:
-            return " > ".join(t for _, t in header_stack) or None
-        common: List[str] = []
-        for (lvl_a, txt_a), (lvl_b, txt_b) in zip(open_stack, header_stack):
-            if lvl_a != lvl_b or txt_a != txt_b:
-                break
-            common.append(txt_a)
-        if len(common) == len(open_stack):
-            # The chunk only ever descended — current path covers it all.
-            return " > ".join(t for _, t in header_stack) or None
-        if common:
-            return " > ".join(common)
-        return " > ".join(t for _, t in open_stack) or None
-
-    def note_open() -> None:
-        """Snapshot the header stack at the start of a chunk.
-
-        Taken when the first content lands after a flush, not at flush
-        time: at flush time `header_stack` has already advanced to the
-        heading that triggered the cut, and the chunk that actually opens
-        next may sit under a different one again.
-
-        `flush` clears the snapshot, so an empty `open_stack` is exactly
-        the signal that the next chunk has not opened yet — whichever of
-        the heading or the body text arrives first takes it.
-        """
-        if not open_stack:
-            open_stack[:] = header_stack
-
-    def budget_cap() -> int:
-        """Max body tokens for a chunk in the current section.
-
-        The embedding window, minus `[CLS]`/`[SEP]`, minus the prefix
-        `embed_text()` will prepend — optionally tightened by the caller's
-        `target_tokens`, which can only ask for *smaller* chunks, never for
-        ones the embedder would truncate.
-        """
-        cap = embed_budget.content_budget(section_path())
-        if target_tokens is not None:
-            cap = min(cap, target_tokens)
-        return max(1, cap)
-
-    def emit(start: int, end: int) -> None:
-        """Emit doc_text[start:end], split so no piece exceeds the cap."""
-        for p_start, p_end, p_tokens in _split_span(start, end, budget_cap()):
-            if p_end <= p_start:
-                continue
-            refs: List[str] = []
-            pages: Set[int] = set()
-            for s, e, ref, page in acc_items:
-                if s >= p_end or e <= p_start:
-                    continue
-                if ref not in refs:
-                    refs.append(ref)
-                if page is not None:
-                    pages.add(page)
-            if not pages:
-                # Interstitial-only piece — a table or figure with no
-                # tracked text of its own. Attribute it to the nearest
-                # neighbour that does have a page, so citations still land
-                # somewhere rather than on None.
-                before = [p for s, e, _r, p in acc_items
-                          if p is not None and e <= p_start]
-                after = [p for s, e, _r, p in acc_items
-                         if p is not None and s >= p_end]
-                if before:
-                    pages = {before[-1]}
-                elif after:
-                    pages = {after[0]}
-            page_list = sorted(pages)
-            out.append({
-                "text": doc_text[p_start:p_end],
-                "chunk_index": len(out),
-                "char_start_index": p_start,
-                "char_end_index": p_end,
-                "token_length": p_tokens,
-                "section_path": section_path(),
-                "page_start": page_list[0] if page_list else None,
-                "page_end": page_list[-1] if page_list else None,
-                "bbox": None,
-                "body_self_refs": refs,
-                # Window-encoded (section_512), so a re-chunk under a
-                # different encoder stands beside the old set instead of
-                # silently replacing it. See resolve_strategy_name.
-                "chunk_strategy": resolve_strategy_name("section"),
-                "meta": {"source": "docling_body_walk"},
-            })
-
-    def _split_span(start: int, end: int, cap: int) -> List[tuple[int, int, int]]:
-        """Split a span of `doc_text` into pieces of at most `cap` tokens."""
-        return _split_to_budget(doc_text, start, end, cap, tok)
-
-    def flush(*, force: bool = False) -> bool:
-        """Emit everything pending as one chunk. Returns True if flushed.
-
-        The emitted slice runs from `emitted_upto` — where the previous
-        chunk stopped — to the end of the accumulator, so the chunks
-        partition doc_text and nothing between two tracked elements is
-        lost. Leading and trailing whitespace is trimmed off the slice
-        itself, but `emitted_upto` still advances past it, so the trim
-        can't reintroduce a gap.
-
-        If the accumulated *body* is below ``min_chunk_tokens``, keep the
-        accumulator alive (don't reset) so the fragment merges with
-        whatever comes next, and return False. ``force=True`` overrides
-        this — used at end-of-doc, where there is no "next".
-
-        A body-less slice (a heading whose section holds only a figure or
-        a formula, or a run of consecutive headings) is held back the same
-        way, so it merges into the next chunk instead of emitting 3 tokens
-        of title on its own. ``force`` still overrides that at end-of-doc
-        — otherwise a document whose only anchorable elements are headings
-        would emit nothing at all.
-        """
-        nonlocal acc_tokens, acc_body_tokens, emitted_upto
-        if acc_end <= emitted_upto:
-            return True
-        if not force and acc_body_tokens < min_chunk_tokens:
-            return False
-        start, end = emitted_upto, acc_end
-        while start < end and doc_text[start].isspace():
-            start += 1
-        while end > start and doc_text[end - 1].isspace():
-            end -= 1
-        if start < end:
-            emit(start, end)
-        emitted_upto = acc_end
-        acc_items.clear()
-        acc_pages.clear()
-        acc_tokens = 0
-        acc_body_tokens = 0
-        # The next chunk hasn't opened yet, and `header_stack` may still
-        # move before it does. Clear the snapshot; whatever opens the next
-        # chunk takes it (see `note_open`).
-        open_stack.clear()
-        return True
-
-    def locate(node_text: str) -> Optional[tuple[int, int]]:
-        """Find `node_text` in doc_text at or after the cursor.
-
-        Refuses to match a short string far ahead of the cursor. Docling's
-        Markdown export drops page furniture, so a stray element like a
-        `'1 / 41'` page number has no legitimate position — but it *will*
-        match some digits deep inside a later figure description, dragging
-        the cursor thousands of characters forward and making every
-        subsequent element unfindable. Requiring a long string for a long
-        jump keeps a spurious match from destroying the rest of the walk.
-        """
-        nonlocal cursor, located_any
-        if not node_text:
-            return None
-        span = _find_loose(doc_text, node_text, cursor)
-        if span is None:
-            return None
-        pos, end = span
-        if len(node_text) < _MIN_ANCHOR_LEN and (pos - cursor) > _MAX_SHORT_JUMP:
-            return None
-        cursor = end
-        located_any = True
-        return (pos, cursor)
-
-    def add_text(self_ref: str, text_node: Dict[str, Any]) -> None:
-        nonlocal acc_tokens, acc_body_tokens, acc_end
-        body_text = (text_node.get("text") or "").strip()
-        if not body_text:
-            return
-        span = locate(body_text)
-        if span is None:
-            # Element not present in the Markdown export at/after the
-            # cursor (escaping differences, or content the export omits).
-            # Skip it rather than guessing a position — the surrounding
-            # elements still bound the chunk, so its text is not lost: the
-            # partition carries it inside a neighbouring chunk anyway.
-            return
-
-        prov = text_node.get("prov") or []
-        page: Optional[int] = None
-        if prov and isinstance(prov[0], dict):
-            page = prov[0].get("page_no")
-
-        p_start, p_end = span
-        note_open()
-        # Cost of extending the emitted slice out to this element — which
-        # includes any untracked content sitting between the two, because
-        # that content is in the slice and reaches the embedder too.
-        delta = tok(doc_text[acc_end:p_end]) if p_end > acc_end else 0
-        if delta and acc_end > emitted_upto and acc_tokens + delta > budget_cap():
-            # Appending would overflow the embedding window: close the
-            # chunk here instead. A non-forcing flush, so an under-floor
-            # fragment merges forward rather than emitting as a scrap —
-            # and `flush` leaves acc_end untouched, so `delta` still holds.
-            flush()
-        acc_items.append((p_start, p_end, self_ref, page))
-        if page is not None:
-            acc_pages.add(page)
-        if p_end > acc_end:
-            acc_tokens += delta
-            acc_body_tokens += delta
-            acc_end = p_end
-
-    for child in children:
-        cref = child.get("cref") if isinstance(child, dict) else None
-        if not cref:
-            continue
-        if cref.startswith("#/tables/") or cref.startswith("#/pictures/"):
-            # Not tracked as contributing elements, but they still fall
-            # inside a chunk's slice when they sit between two tracked
-            # elements — which is what we want.
-            continue
-        if cref.startswith("#/texts/"):
-            t = texts_by_ref.get(cref) or {}
-            label = t.get("label")
-            txt = (t.get("text") or "").strip()
-            if not txt:
-                continue
-            if label in _PAGE_FURNITURE_LABELS:
-                # Running headers/footers and page numbers: dropped by the
-                # Markdown export, so there's nothing to anchor to, and
-                # they're not content worth retrieving.
-                continue
-            if label in ("section_header", "title"):
-                # Section boundary — a *candidate* cut point. Cutting here
-                # unconditionally yields one chunk per heading no matter
-                # how little sits under it; instead the chunk in progress
-                # has to be substantial enough to stand on its own first.
-                # Below that it keeps accumulating and this heading joins
-                # it, with `section_path` falling back to the ancestor
-                # common to both (see `section_path`).
-                #
-                # Closing happens while `header_stack` still describes the
-                # section that's ending — section_path is read at flush
-                # time, so the stack must not be touched first.
-                level = t.get("level") or 1
-                cut_floor = int(budget_cap() * _SECTION_CUT_FRACTION)
-                # Merging across a heading is only safe while the chunk
-                # keeps a real ancestor to be labelled with. Siblings under
-                # a shared parent merge happily (that parent still
-                # describes them); a heading that would leave the merged
-                # span with no common ancestor at all — i.e. it starts a
-                # new top-level section — always cuts, because there is
-                # then no honest section_path for the combined content.
-                would_orphan = level <= 1 and bool(open_stack)
-                if acc_body_tokens >= cut_floor or would_orphan:
-                    emitted = flush()
-                else:
-                    emitted = True  # deliberately holding; not a failed flush
-                if not emitted:
-                    # The flush was declined: the section that's closing is
-                    # below the tiny-fragment floor, or holds nothing but
-                    # its own heading. Either way the span stays pending
-                    # and merges into the chunk being built.
-                    #
-                    # This used to force-flush after popping the header, to
-                    # stop the held text inheriting the *next* heading's
-                    # section_path and being mislabelled as a sibling's.
-                    # Merging makes that unnecessary and the force harmful:
-                    # `section_path` now resolves to the ancestor common to
-                    # where the chunk opened and where it ends, which
-                    # describes the combined span honestly, and forcing
-                    # here re-fragmented exactly the sections the candidate
-                    # cut is trying to join.
-                    pass
-
-                # Now retarget the stack at the new heading's depth.
-                while header_stack and header_stack[-1][0] >= level:
-                    header_stack.pop()
-                header_stack.append((level, txt))
-                if acc_end <= emitted_upto:
-                    # Nothing is pending, so this heading opens the next
-                    # chunk and defines its label. Overwrite rather than
-                    # fill: the snapshot left over from before the flush
-                    # describes the section that just closed.
-                    open_stack[:] = header_stack
-                elif acc_body_tokens <= 0:
-                    # Pending, but only headings so far — no body has
-                    # landed yet. This heading is still where the chunk's
-                    # *content* begins, so it defines the label; leaving
-                    # the snapshot on an ancestor would let a later
-                    # subsection claim content that precedes it.
-                    open_stack[:] = header_stack
-
-                # The heading opens the next chunk: seed the accumulator
-                # with its span so the section title is part of
-                # `chunk.text`. That matters beyond display — the reranker
-                # scores (query, chunk.text) pairs and would otherwise
-                # never see the heading. The span is widened back over the
-                # Markdown `#` markers so the slice is the whole heading
-                # line. Heading tokens count toward `acc_tokens` (the embed
-                # budget) but deliberately NOT toward `acc_body_tokens`, so
-                # a heading with no body of its own can't satisfy the
-                # tiny-fragment floor and emit as a junk chunk.
-                header_span = locate(txt)
-                if header_span is not None:
-                    h_start, h_end = header_span
-                    line_start = doc_text.rfind("\n", 0, h_start) + 1
-                    if doc_text[line_start:h_start].strip("# ") == "":
-                        h_start = line_start
-                    h_page: Optional[int] = None
-                    prov = t.get("prov") or []
-                    if prov and isinstance(prov[0], dict):
-                        h_page = prov[0].get("page_no")
-                    acc_items.append((h_start, h_end, cref, h_page))
-                    if h_page is not None:
-                        acc_pages.add(h_page)
-                    if h_end > acc_end:
-                        acc_tokens += tok(doc_text[acc_end:h_end])
-                        acc_end = h_end
-            else:
-                add_text(cref, t)
-        elif cref.startswith("#/groups/"):
-            g = groups_by_ref.get(cref) or {}
-            for sub in g.get("children") or []:
-                sub_cref = sub.get("cref") if isinstance(sub, dict) else None
-                if not sub_cref or not sub_cref.startswith("#/texts/"):
-                    continue
-                sub_t = texts_by_ref.get(sub_cref) or {}
-                if not (sub_t.get("text") or "").strip():
-                    continue
-                if sub_t.get("label") in _PAGE_FURNITURE_LABELS:
-                    continue
-                add_text(sub_cref, sub_t)
-
-    if not located_any:
-        # Not a single element could be anchored in the Markdown export.
-        # The walk has no idea where the section boundaries are, so return
-        # nothing and let the dispatch fall back to the token chunker
-        # rather than emit one blind character-split of the whole document.
-        return []
-
-    # End-of-doc: extend to the last character so the tail isn't dropped,
-    # then force-emit whatever's left (there's no "next" to merge into).
-    if len(doc_text) > acc_end:
-        acc_tokens += tok(doc_text[acc_end:])
-        acc_end = len(doc_text)
-    flush(force=True)
-    return out
 
 
 def chunk_document(
