@@ -14,6 +14,7 @@ from zoneinfo import ZoneInfo
 
 import requests
 from bs4 import BeautifulSoup
+from sqlalchemy import or_
 
 from .base import Source
 from ..kb import add_document
@@ -44,6 +45,30 @@ def parse_docdb_datetime(value: Optional[str]) -> Optional[datetime]:
         logger.warning(f"Could not parse DocDB timestamp {value!r}")
         return None
     return naive.replace(tzinfo=_DOCDB_TZ).astimezone(timezone.utc)
+
+
+def _latest_stored_revision(
+    rows: List[Any],
+    keys: tuple = ("revised_content", "created"),
+) -> Optional[datetime]:
+    """Newest revision timestamp already stored for a document.
+
+    `keys` is a preference order, first hit per row wins: callers comparing
+    against the listing pass the metadata stamp first, since that is what the
+    listing date tracks, while callers deciding whether to re-download care
+    about the contents stamp. Falls back to the creation stamp for rows that
+    predate either being captured. Returns None when nothing is stored, which
+    callers read as "unknown, go ask DocDB".
+    """
+    stamps = []
+    for row in rows:
+        meta = row.meta or {}
+        for key in keys:
+            stamp = parse_docdb_datetime(meta.get(key))
+            if stamp is not None:
+                stamps.append(stamp)
+                break
+    return max(stamps) if stamps else None
 
 
 class DocDBSource(Source):
@@ -468,20 +493,43 @@ class DocDBSource(Source):
         """
         doc_id_str = str(item["id"])
 
-        # Check for existing document before fetching — match any file from this doc
-        if self.skip_existing:
+        # Rows already held for this document, across every doc_id convention
+        # the table has carried: bare "<id>" and "<id>/<stem>" from the original
+        # importer, "<id>-<stem>" from this one. Matching on the number alone
+        # would let a lookup for 575 collide with 57505, so each alternative
+        # pins what follows the number.
+        existing_rows: List[Any] = []
+        if self.skip_existing and not self.force_reparse:
             from ..kb.db_models import RawDocument
-            existing = session.query(RawDocument).filter(
+            existing_rows = session.query(RawDocument).filter(
                 RawDocument.source_id == self.source_id,
-                RawDocument.doc_id.like(f"{doc_id_str}-%"),
-            ).first()
-            if existing:
-                logger.info(f"Skipping doc {doc_id_str} — already in database")
+                or_(
+                    RawDocument.doc_id == doc_id_str,
+                    RawDocument.doc_id.like(f"{doc_id_str}-%"),
+                    RawDocument.doc_id.like(f"{doc_id_str}/%"),
+                ),
+            ).all()
+
+        stored_revision = _latest_stored_revision(existing_rows)
+        stored_listing_stamp = _latest_stored_revision(
+            existing_rows, ("revised_meta", "revised_content", "created")
+        )
+
+        # First pass, free: the listing already carries a last-updated date, so
+        # a document that has not moved since we stored it costs no requests at
+        # all. Rows with no stored revision fall through to ask DocDB directly.
+        if existing_rows and stored_listing_stamp is not None:
+            listed = item.get("last_updated")
+            if isinstance(listed, datetime) and listed.date() <= stored_listing_stamp.date():
+                logger.info(
+                    f"Skipping doc {doc_id_str} — unchanged since "
+                    f"{stored_listing_stamp:%Y-%m-%d}"
+                )
                 return {
                     "document_ids": [],
                     "num_documents": 0,
                     "parsed": False,
-                    "raw_document_id": existing.id,
+                    "raw_document_id": existing_rows[0].id,
                     "skipped": True,
                     "error": None,
                 }
@@ -515,6 +563,7 @@ class DocDBSource(Source):
             "version": meta.get("version"),
             "created": meta.get("created"),
             "revised_content": meta.get("revised_content"),
+            "revised_meta": meta.get("revised_meta"),
         }
         if meta.get("events"):
             kb_meta["events"] = meta["events"]
@@ -526,6 +575,26 @@ class DocDBSource(Source):
         # topic or author, which does not change anything we parsed.
         creating_time = parse_docdb_datetime(meta.get("created"))
         update_time = parse_docdb_datetime(meta.get("revised_content"))
+
+        # Second pass, now against DocDB's own content-revision stamp. The
+        # listing date moves for metadata edits too — retagging a topic is
+        # enough — so a document can look newer there while its files are
+        # untouched. One metadata request has already been spent; stopping
+        # here still saves every file download.
+        if existing_rows and stored_revision is not None and update_time is not None:
+            if update_time <= stored_revision:
+                logger.info(
+                    f"Skipping doc {doc_id_str} — contents unrevised since "
+                    f"{stored_revision:%Y-%m-%d}"
+                )
+                return {
+                    "document_ids": [],
+                    "num_documents": 0,
+                    "parsed": False,
+                    "raw_document_id": existing_rows[0].id,
+                    "skipped": True,
+                    "error": None,
+                }
 
         document_ids: List[str] = []
         raw_document_ids: List[str] = []
