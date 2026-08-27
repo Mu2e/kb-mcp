@@ -96,6 +96,15 @@ def create_engine_with_config() -> Engine:
 # Create engine and session factory
 _engine = None
 _SessionLocal = None
+# Whether init_db() has already run its schema setup (extension, create_all,
+# column patches, trigger, graph seed) this process. Every one of those is a
+# DB round trip and each is individually idempotent, but init_db() is called
+# once per embedding batch (embedder_base.py) as well as once per process
+# (cmd_ingest, _ensure_db_initialized) — unguarded, a single 599-document
+# reparse measured ~753 redundant schema-verification cycles. Only ever set
+# True after a create_tables=True run, so a hypothetical create_tables=False
+# call can't poison it for the real initialization that follows.
+_schema_ready = False
 
 
 def get_engine() -> Engine:
@@ -412,19 +421,20 @@ def init_db(create_tables: bool = True) -> None:
     engine = get_engine()
     database_url = get_database_url()
 
-    logger.info(f"Initializing database: {database_url.split('@')[-1] if '@' in database_url else database_url}")
+    global _schema_ready
+    if create_tables and not _schema_ready:
+        logger.info(f"Initializing database: {database_url.split('@')[-1] if '@' in database_url else database_url}")
 
-    # Enable pgvector extension for PostgreSQL (required for vector columns)
-    if database_url.startswith('postgresql'):
-        try:
-            with engine.connect() as conn:
-                conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
-                conn.commit()
-            logger.info("PostgreSQL vector extension enabled")
-        except Exception as e:
-            logger.warning(f"Could not enable vector extension (may not have permissions): {e}")
+        # Enable pgvector extension for PostgreSQL (required for vector columns)
+        if database_url.startswith('postgresql'):
+            try:
+                with engine.connect() as conn:
+                    conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+                    conn.commit()
+                logger.info("PostgreSQL vector extension enabled")
+            except Exception as e:
+                logger.warning(f"Could not enable vector extension (may not have permissions): {e}")
 
-    if create_tables:
         # Create all tables (including SearchLog from search module and eval models)
         Base.metadata.create_all(bind=engine)
         logger.info("Database tables created/verified")
@@ -457,9 +467,14 @@ def init_db(create_tables: bool = True) -> None:
         except Exception as e:
             logger.warning(f"Could not seed graph defaults: {e}")
 
-    # Test connection
+        _schema_ready = True
+
+    # Test connection. Cheap (one round trip) and worth doing on every call —
+    # it's what catches a dropped connection before an insert fails on it —
+    # but not worth announcing at INFO every time; that's what turned a
+    # 599-document reparse's log into 15,000+ near-duplicate lines.
     with engine.connect() as conn:
         result = conn.execute(text("SELECT 1"))
         result.fetchone()
-        logger.info("Database connection successful")
+        logger.debug("Database connection successful")
 
