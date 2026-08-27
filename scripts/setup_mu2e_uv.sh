@@ -1,5 +1,8 @@
 #!/bin/bash
-set -e
+# Deliberately no `set -e`: this script is sourced, so a non-zero status from
+# any command would exit the *caller's* interactive shell. The steps whose
+# failure actually matters are checked explicitly below and reported with
+# `kb_setup_fail`, which returns rather than exits for the same reason.
 
 # This script keeps three concerns in three separate places:
 #   - code:        wherever this repo is checked out (detected below)
@@ -13,10 +16,31 @@ set -e
 # KB_DATA_DIR in the environment before running this script.
 
 # Dynamically set the project directory based on where this script is located
-# (this script lives in scripts/, so the project root is one level up)
-SCRIPT_DIR="$(dirname "$(realpath "$0")")"
+# (this script lives in scripts/, so the project root is one level up).
+#
+# BASH_SOURCE, not $0: this script is meant to be *sourced*, and when sourced
+# $0 is the calling shell ("bash", or "-bash" under a login shell) rather than
+# this file — which resolved the project to /usr and made `uv pip install`
+# fail with "does not appear to be a Python project".
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 SOURCE_CODE_DIR="$(dirname "$SCRIPT_DIR")"
 PYTHON_VERSION="3.11"
+
+# Report a fatal setup problem without killing the caller's shell (see the
+# note on `set -e` above). Sourced: returns. Executed: exits non-zero.
+kb_setup_fail() {
+    echo "ERROR: $*" >&2
+    if [ "${BASH_SOURCE[0]}" != "$0" ]; then
+        return 1
+    fi
+    exit 1
+}
+
+if [ ! -f "$SOURCE_CODE_DIR/pyproject.toml" ]; then
+    kb_setup_fail "no pyproject.toml under $SOURCE_CODE_DIR — this script must
+  live in <repo>/scripts/. Source it as: source scripts/setup_mu2e_uv.sh"
+    return 1 2>/dev/null || exit 1
+fi
 
 # Where to put the venv. Override with: KB_ENV_DIR=/some/path ./setup_mu2e_uv.sh
 LOCAL_ENV_DIR="${KB_ENV_DIR:-/tmp/$USER/kb-env-uv}"
@@ -55,7 +79,12 @@ source "$LOCAL_ENV_DIR/bin/activate"
 # docling is the default parser for PDF/PPTX/DOCX/HTML, so it is not optional
 # in practice; test carries pytest so the suite runs without a second install.
 echo "Installing project requirements from $SOURCE_CODE_DIR..."
-uv pip install -e "$SOURCE_CODE_DIR[docling,test]"
+if ! uv pip install -e "$SOURCE_CODE_DIR[docling,test]"; then
+    kb_setup_fail "uv pip install failed — the venv at $LOCAL_ENV_DIR may be
+  missing docling, and a missing parser backend fails silently at run time
+  (parse returns empty text). Fix the install before parsing anything."
+    return 1 2>/dev/null || exit 1
+fi
 
 # 3. Configure environment
 mkdir -p "$DATA_DIR/huggingface_cache"
