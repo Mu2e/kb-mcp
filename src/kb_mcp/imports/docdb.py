@@ -102,7 +102,7 @@ class DocDBSource(Source):
                 rows — no Docling/parsing, no chunking, no embedding. Lets a
                 large backfill be staged (network- and rate-limit-bound)
                 separately from parsing it (CPU-bound); parse the staged
-                rows later with `kb reparse --from-raw`.
+                rows later with `kb tools parse-all`.
             login: If True, authenticate on construction using env vars.
         """
         super().__init__(

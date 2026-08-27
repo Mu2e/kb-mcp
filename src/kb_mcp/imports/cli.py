@@ -138,7 +138,7 @@ def cmd_docdb(args):
             ).count()
         print(f"\n  {raw_count} raw document(s) newly staged for {args.source_id}")
         print(f"  Parse them with:")
-        print(f"    kb reparse --from-raw --source-id {args.source_id}")
+        print(f"    kb tools parse-all {args.source_id}")
         return
 
     print(f"\n  Successfully processed {len(documents)} document(s)")
@@ -439,7 +439,7 @@ def main():
         help=(
             "Only download files and register them as RawDocument rows — no "
             "parsing, chunking, or embedding. Parse the staged rows later with "
-            "'kb reparse --from-raw'. Useful for staging a large backfill "
+            "'kb tools parse-all'. Useful for staging a large backfill "
             "(network-bound) separately from parsing it (CPU-bound)."
         ),
     )
