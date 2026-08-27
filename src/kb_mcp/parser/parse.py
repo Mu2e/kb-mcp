@@ -51,6 +51,44 @@ def resolve_parser_name(mime_type: Optional[str], parser_name: Optional[str]) ->
     return parser_name
 
 
+def _deref_cref(structured_output: Dict[str, Any], cref: str) -> Optional[dict]:
+    """Resolve a DoclingDocument cref like `#/groups/3` to its node dict."""
+    try:
+        _, category, idx = cref.split("/")
+        return structured_output[category][int(idx)]
+    except (KeyError, IndexError, ValueError, AttributeError, TypeError):
+        return None
+
+
+def _iter_picture_crefs(structured_output: Dict[str, Any],
+                         children: List[dict]):
+    """Yield `#/pictures/N` crefs reachable from `children`, recursing into
+    any container node that itself carries a `children` list.
+
+    PDFs put pictures directly under `body`, but PPTX/DOCX files wrap each
+    slide/section in its own group (`body -> groups[slide] -> pictures,
+    texts, ...`), and a picture pasted into a table cell nests even deeper
+    (`body -> tables/N -> groups/M -> pictures/K`) — Docling's `parent`
+    chain shows both shapes in real documents. A scan of only
+    `body["children"]` finds none of these, which is exactly what left
+    picture markers unsubstituted despite their descriptions already
+    existing on the child records. Recursing generically on "does this
+    node have children" rather than hardcoding container types (groups vs.
+    tables) means a container type added later doesn't reopen this bug.
+    """
+    for child in children:
+        if not isinstance(child, dict):
+            continue
+        cref = child.get("cref") or ""
+        if cref.startswith("#/pictures/"):
+            yield cref
+            continue
+        node = _deref_cref(structured_output, cref)
+        nested = (node or {}).get("children") or []
+        if nested:
+            yield from _iter_picture_crefs(structured_output, nested)
+
+
 def inline_docling_image_descriptions(
     text: str,
     image_dicts: List[dict],
@@ -76,11 +114,14 @@ def inline_docling_image_descriptions(
     record carries no doc_id.
 
     Markers are consumed in body order and matched against the picture
-    crefs in `structured_output["body"]["children"]`. Keying on the cref —
-    rather than counting markers positionally against `image_dicts` — keeps
-    the mapping correct when a picture was skipped during extraction (e.g.
-    `picture.get_image()` returned None), which would otherwise shift every
-    later description onto the wrong image.
+    crefs reachable from `structured_output["body"]["children"]`, recursing
+    into `#/groups/N` (see `_iter_picture_crefs`) — PDFs put pictures
+    directly under body, but PPTX/DOCX wrap each slide/section in its own
+    group. Keying on the cref — rather than counting markers positionally
+    against `image_dicts` — keeps the mapping correct when a picture was
+    skipped during extraction (e.g. `picture.get_image()` returned None),
+    which would otherwise shift every later description onto the wrong
+    image.
 
     Args:
         text: Markdown text from `export_to_markdown()`.
@@ -107,11 +148,7 @@ def inline_docling_image_descriptions(
         return text
 
     body_children = (structured_output.get("body") or {}).get("children") or []
-    picture_crefs = [
-        child.get("cref") for child in body_children
-        if isinstance(child, dict)
-        and (child.get("cref") or "").startswith("#/pictures/")
-    ]
+    picture_crefs = list(_iter_picture_crefs(structured_output, body_children))
     marker_iter = iter(picture_crefs)
 
     def _replace(match):
