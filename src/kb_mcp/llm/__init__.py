@@ -1,6 +1,7 @@
 """LLM client utilities."""
 
 from .llm import get_openai_client
+from .retry import RateLimited, call_with_backoff, is_throttling
 from .usage import (
     STAGE_DOCUMENT_SUMMARY,
     STAGE_EMBEDDING,
@@ -16,6 +17,9 @@ from .usage import (
 
 __all__ = [
     'get_openai_client',
+    'RateLimited',
+    'call_with_backoff',
+    'is_throttling',
     'record_llm_usage',
     'usage_snapshot',
     'UsageAccumulator',

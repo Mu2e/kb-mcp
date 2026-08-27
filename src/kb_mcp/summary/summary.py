@@ -7,6 +7,7 @@ import time
 from typing import Dict, Optional
 
 from ..llm import get_openai_client
+from ..llm.retry import call_with_backoff
 from ..llm.usage import STAGE_DOCUMENT_SUMMARY, record_llm_usage
 from ..config import get_llm_config
 
@@ -128,7 +129,11 @@ Return ONLY a valid JSON object in this format:
 
     try:
         start_time = time.time()
-        response = client.chat.completions.create(
+        # Wrapped in backoff: one summary call per document means a bulk
+        # reparse hammers this endpoint 595 times in a row, and a transient
+        # 429 here would otherwise abort the whole document.
+        response = call_with_backoff(
+            client.chat.completions.create,
             model=model,
             messages=[
                 {

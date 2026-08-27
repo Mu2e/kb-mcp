@@ -7,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from .image_utils import detect_image_format
 from ..config import get_llm_config, get_parser_config
+from ..llm.retry import RateLimited, call_with_backoff
 from ..llm.usage import STAGE_IMAGE_DESCRIPTION, UsageAccumulator
 
 logger = logging.getLogger(__name__)
@@ -282,14 +283,16 @@ def generate_image_descriptions(
         # Generate descriptions in parallel
         descriptions = [None] * len(images_for_llm)
         failures: List[str] = []
+        throttled: List[str] = []
         usage = UsageAccumulator()
-        
+
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             # Submit all tasks. Pass each image's parser-extracted meta
             # (caption, nearby_text, page) so the prompt builder doesn't
             # have to re-derive context by string-search.
             future_to_index = {
                 executor.submit(
+                    call_with_backoff,
                     _get_single_image_description,
                     client,
                     document_text,
@@ -310,6 +313,12 @@ def generate_image_descriptions(
                     usage.add(call_usage, stage=STAGE_IMAGE_DESCRIPTION, model=model)
                     img_id = images_for_llm[index][2]
                     logger.debug(f"Image '{img_id}' description generated")
+                except RateLimited as e:
+                    logger.error(
+                        f"Rate limited describing image '{images_for_llm[index][2]}': {e}"
+                    )
+                    descriptions[index] = "Image description unavailable"
+                    throttled.append(str(e))
                 except Exception as e:
                     logger.error(f"Error getting description for image '{images_for_llm[index][2]}': {e}")
                     descriptions[index] = "Image description unavailable"
@@ -323,6 +332,22 @@ def generate_image_descriptions(
             level(
                 "%d/%d image descriptions failed (model=%s, base_url=%s). First error: %s",
                 len(failures), len(images_for_llm), model, base_url or "<default>", failures[0],
+            )
+
+        # Throttling is reported separately and always at error level: unlike a
+        # per-image failure it says nothing about the image, only that the
+        # endpoint could not keep up even after backoff. During a bulk reparse
+        # that means every remaining document is about to be degraded the same
+        # way, so it needs to be visible in the log without grepping for
+        # placeholder text afterwards.
+        if throttled:
+            logger.error(
+                "%d/%d image descriptions gave up after retries — the endpoint "
+                "is throttling or unreachable (model=%s, base_url=%s). Reduce "
+                "PARSE_IMAGE_DESCRIPTION_NUMWORKERS (currently %d) or run fewer "
+                "parallel jobs. First error: %s",
+                len(throttled), len(images_for_llm), model,
+                base_url or "<default>", max_workers, throttled[0],
             )
 
         # Update image dicts with descriptions (modifies original dicts in image_dicts).
@@ -349,6 +374,13 @@ def generate_image_descriptions(
         logger.info(f"Image description tokens — {usage.format_summary()}")
         if usage_out is not None:
             usage_out.update(usage.summary())
+            # Report degradation alongside the token counts so a bulk caller can
+            # stop or throttle on it, rather than only finding out by grepping
+            # the log or noticing placeholder text in the corpus later.
+            if throttled:
+                usage_out["images_throttled"] = len(throttled)
+            if failures:
+                usage_out["images_failed"] = len(failures)
 
         return image_dicts
         
