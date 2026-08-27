@@ -245,9 +245,92 @@ def ingest(
                 except Exception as e:
                     logger.error(f"Error chunking/embedding image document {doc.id}: {e}", exc_info=True)
 
-        session.commit()
+        # Only commit here if we opened this session ourselves. A caller that
+        # passed one in (e.g. parse_all()'s force-reparse path, which holds a
+        # FOR UPDATE SKIP LOCKED transaction across a whole batch) must stay
+        # in control of when it commits — committing here would release that
+        # batch's row locks after the first document instead of the whole
+        # batch, defeating the point of the lock.
+        if session.is_local:
+            session.commit()
 
     return result
+
+
+def _rebuild_text_from_parser_output(doc, session):
+    """Re-render `doc.text` from its stored DoclingDocument, or return None.
+
+    Exactly what the parser does — Docling's own markdown export, unescaped,
+    with undecoded formulas and image markers filled in the same order
+    `DoclingParser.parse()` does. No re-parse, no GPU, no LLM calls.
+    """
+    import html as html_module
+
+    from docling_core.types.doc import DoclingDocument
+
+    from ..parser.parse import (
+        DOCLING_PAGE_BREAK_PLACEHOLDER,
+        inline_docling_image_descriptions,
+        number_docling_page_breaks,
+    )
+    from ..parser.parser_docling import _fill_undecoded_formulas
+
+    parser_output = doc.parser_output
+    if not parser_output or parser_output.get("schema_name") != "DoclingDocument":
+        return None
+
+    dl_doc = DoclingDocument.model_validate(parser_output)
+    text = html_module.unescape(dl_doc.export_to_markdown(
+        page_break_placeholder=DOCLING_PAGE_BREAK_PLACEHOLDER
+    ))
+    # Same order as DoclingParser.parse(): formulas filled before page
+    # breaks are numbered. Missing this step left `--from-stored` rebuilds
+    # silently dropping the raw-formula fallback that the original parse
+    # applied, so a document rebuilt this way kept its
+    # <!-- formula-not-decoded --> markers forever.
+    text = _fill_undecoded_formulas(text, parser_output)
+    text = number_docling_page_breaks(text, parser_output)
+
+    image_children = session.query(Document).filter(
+        Document.parent_id == doc.id,
+        Document.doc_type == "image",
+    ).all()
+    image_dicts = [
+        {"doc_id": c.doc_id, "text": c.text, "meta": c.meta or {}}
+        for c in image_children
+    ]
+    return inline_docling_image_descriptions(text, image_dicts, parser_output)
+
+
+def _chunk_ids_for(document_id, session):
+    """Ids of every chunk belonging to `document_id` and its children.
+
+    Re-generating a document invalidates all of its chunks, but
+    `chunk_and_embed()` only deletes chunks whose strategy it is about to
+    re-emit (chunking.py). A document moving from `tokens_1000_200` to
+    `section` would otherwise keep both sets and return each passage twice in
+    search. Snapshot the ids first, delete them only once the rebuild has
+    succeeded, so a failure leaves the old chunks in place.
+    """
+    doc_ids = [document_id] + [
+        row[0] for row in session.query(Document.id).filter(
+            Document.parent_id == document_id
+        ).all()
+    ]
+    return [
+        row[0] for row in session.query(Chunk.id).filter(
+            Chunk.document_id.in_(doc_ids)
+        ).all()
+    ]
+
+
+def _delete_chunks(chunk_ids, session):
+    """Drop chunks captured before a rebuild. Returns the number removed."""
+    if not chunk_ids:
+        return 0
+    return session.query(Chunk).filter(
+        Chunk.id.in_(chunk_ids)
+    ).delete(synchronize_session=False)
 
 
 def parse_all(
@@ -258,11 +341,31 @@ def parse_all(
     force_reparse: bool = False,
     batch_size: Optional[int] = None,
     limit: Optional[int] = None,
+    *,
+    from_stored: bool = False,
+    doc_ids: Optional[List[str]] = None,
+    empty_only: bool = False,
+    dry_run: bool = False,
+    generate_summary: bool = True,
+    chunk_and_embed: bool = True,
 ) -> Dict[str, Any]:
-    """Parse all raw documents that don't have corresponding processed documents yet.
+    """Parse raw documents in parallel-safe batches (FOR UPDATE SKIP LOCKED).
 
-    Uses a LEFT JOIN to efficiently find RawDocuments without corresponding Documents
-    for the specified parser.
+    Three things this now covers, replacing what used to be the separate
+    `kb reparse` command (default / --from-raw / --from-stored modes), all of
+    which ran as an unlocked sequential loop and couldn't be run in parallel:
+
+    - New raw documents with no Document yet (the original, default behavior).
+    - force_reparse=True also reprocesses RawDocuments that already have a
+      Document: it resolves the existing Document by (source_id, doc_id) —
+      not by raw_document_id, since one (source_id, doc_id) can own several
+      raw rows (re-fetched versions), with the parent document linked to a
+      different raw row than its image children — and runs the full
+      parse+summary+chunk/embed pipeline (via ingest()) so timestamps and
+      chunks carry over correctly, instead of just add_document()'s bare parse.
+    - from_stored=True rebuilds document.text from the already-stored
+      DoclingDocument parser output instead of re-running the parser (no GPU,
+      no re-fetch) — see _parse_all_from_stored().
 
     Args:
         source_id: Optional source identifier to filter by. If None, processes all sources.
@@ -271,20 +374,53 @@ def parse_all(
                        If None, reads from PARSE_IMAGE_ADDITIONAL_DOC env var.
         describe_images: If True, generate LLM descriptions for images using vision model.
                         If None, reads from PARSE_IMAGE_LLM_DESCRIPTION env var.
-        force_reparse: If True, re-parse even if documents already exist for this parser.
+        force_reparse: If True, also reprocess RawDocuments that already have a Document
+                      (see above) instead of only ones missing one.
         batch_size: If provided, process in batches with LOCK/SKIP LOCKED for parallel processing.
                    If None, uses default from get_batch_config()['parse_batch_size'].
                    Set to a large value (e.g., 999999) to disable batching and process all at once.
         limit: If provided, stop after parsing this many documents (useful for testing).
+        from_stored: If True, rebuild from stored parser output instead of re-parsing;
+                    dispatches to _parse_all_from_stored() (see its docstring for details).
+        doc_ids: Restrict to specific doc_id(s).
+        empty_only: Only process rows whose existing Document has empty text. Requires
+                   force_reparse or from_stored (there's nothing to check against otherwise).
+        dry_run: List what would be processed and return without taking any locks or
+                changes.
+        generate_summary: Whether to (re)generate the summary. Only takes effect when
+                         force_reparse or from_stored triggers the full pipeline —
+                         a plain new-document parse never summarizes (that's
+                         summarize_all()'s job).
+        chunk_and_embed: Whether to (re)chunk and embed. Same scope caveat as
+                        generate_summary.
 
     Returns:
         Dictionary with:
         - total_raw: Total number of RawDocuments found
         - parsed: Number of documents successfully parsed
-        - skipped: Number of documents skipped (file not found)
+        - skipped: Number of documents skipped (file not found, or empty_only excluded)
         - errors: Number of errors encountered
-        - document_ids: List of created Document IDs
+        - document_ids: List of created/updated Document IDs
+        (dry_run=True instead returns {"dry_run": True, "targets": [...], "total": N})
     """
+    if empty_only and not (force_reparse or from_stored):
+        raise ValueError(
+            "empty_only filters on an existing Document's text, which only makes "
+            "sense when reprocessing existing documents — pass force_reparse or from_stored"
+        )
+
+    if from_stored:
+        return _parse_all_from_stored(
+            source_id=source_id,
+            doc_ids=doc_ids,
+            empty_only=empty_only,
+            dry_run=dry_run,
+            generate_summary=generate_summary,
+            chunk_and_embed=chunk_and_embed,
+            batch_size=batch_size,
+            limit=limit,
+        )
+
     from pathlib import Path
     from sqlalchemy import and_
     from .db_models import RawDocument
@@ -294,49 +430,89 @@ def parse_all(
 
     batch_size = batch_size or get_batch_config()['parse_batch_size']
 
+    def _build_query(session):
+        # Query for RawDocuments that don't have Documents with the specified parser
+        # Use NOT EXISTS instead of LEFT JOIN to avoid FOR UPDATE on outer join
+        subquery = session.query(Document.id).filter(
+            and_(
+                Document.raw_document_id == RawDocument.id,
+                Document.parser_id == parser_name
+            )
+        ).exists()
+
+        query = session.query(RawDocument)
+        # force_reparse widens selection to raw rows that already have a
+        # Document too — without it, keep the original "only unparsed" filter.
+        if not force_reparse:
+            query = query.filter(~subquery)
+
+        if source_id:
+            query = query.filter(RawDocument.source_id == source_id)
+        if doc_ids:
+            query = query.filter(RawDocument.doc_id.in_(doc_ids))
+        return query
+
+    if dry_run:
+        with get_db_session() as session:
+            query = _build_query(session)
+            if limit is not None:
+                query = query.limit(limit)
+            targets = [
+                {
+                    "raw_id": r.id,
+                    "source_id": r.source_id,
+                    "doc_id": r.doc_id,
+                    "file_path": r.file_path,
+                }
+                for r in query.all()
+            ]
+        return {"dry_run": True, "targets": targets, "total": len(targets)}
+
     parsed = 0
     skipped = 0
     errors = 0
     document_ids = []
     total_processed = 0
 
+    # Snapshot the target ids once, up front. force_reparse's query has no
+    # "already done" predicate to exclude a row once it's reprocessed (unlike
+    # the default query, where a freshly-created Document naturally drops the
+    # row out via ~subquery) — re-running the same open-ended query every
+    # batch iteration would never terminate. Snapshotting a fixed id list and
+    # walking it once is correct either way, so do it uniformly.
+    with get_db_session() as session:
+        id_query = _build_query(session).with_entities(RawDocument.id)
+        if limit is not None:
+            id_query = id_query.limit(limit)
+        target_ids = [row[0] for row in id_query.all()]
+
+    if target_ids:
+        logger.info(f"Processing {len(target_ids)} document(s) in batches of {batch_size}")
+
     # Process in batches with lock/commit cycle
-    while True:
+    for batch_start in range(0, len(target_ids), batch_size):
+        batch_ids = target_ids[batch_start:batch_start + batch_size]
         with get_db_session(auto_expunge=False) as session:
-            # Query for RawDocuments that don't have Documents with the specified parser
-            # Use NOT EXISTS instead of LEFT JOIN to avoid FOR UPDATE on outer join
-            subquery = session.query(Document.id).filter(
-                and_(
-                    Document.raw_document_id == RawDocument.id,
-                    Document.parser_id == parser_name
-                )
-            ).exists()
-
-            query = session.query(RawDocument).filter(~subquery)
-
-            if source_id:
-                query = query.filter(RawDocument.source_id == source_id)
-
-            # For parallel processing: lock a batch of rows
-            # SKIP LOCKED allows other workers to grab different rows
-            effective_batch = batch_size
-            if limit is not None:
-                effective_batch = min(batch_size, limit - total_processed)
-            raw_docs = query.limit(effective_batch).with_for_update(skip_locked=True).all()
+            # For parallel processing: lock this batch of rows. SKIP LOCKED
+            # means a row another worker already grabbed just isn't returned
+            # here — it's simply not reprocessed this run.
+            raw_docs = (
+                session.query(RawDocument)
+                .filter(RawDocument.id.in_(batch_ids))
+                .with_for_update(skip_locked=True)
+                .all()
+            )
 
             if not raw_docs:
-                # No more documents to process
-                break
-
-            if total_processed == 0:
-                logger.info(f"Processing documents in batches of {batch_size}")
+                continue
 
             # Parse inside the same session so the FOR UPDATE row locks are held
-            # across the whole batch. We commit after each document so results are
-            # saved incrementally — if the process dies mid-batch, already-parsed
-            # documents are preserved. The locks on the remaining rows are released
-            # when the connection drops, freeing them for other workers.
-            batch_num = total_processed // batch_size + 1
+            # across the whole batch, committed once when this `with` block exits
+            # below. Anything called from here that might commit on its own
+            # (ingest()) must only do so when it created its own session, or it
+            # would release these locks early — see ingest()'s session.is_local
+            # check.
+            batch_num = batch_start // batch_size + 1
             for raw_doc in tqdm(raw_docs, desc=f"Parsing documents (batch {batch_num})", unit="doc"):
                 try:
                     if not raw_doc.file_path:
@@ -365,22 +541,76 @@ def parse_all(
                         # For marker-preloaded, log the expected output directory instead
                         logger.debug(f"Parsing raw document {raw_doc.id} from stem: {file_path.stem}")
 
-                    result = add_document(
-                        file_path,
-                        source_id=raw_doc.source_id,
-                        doc_id=raw_doc.doc_id,
-                        meta=raw_doc.meta,
-                        parser_name=parser_name,
-                        extract_images=extract_images,
-                        describe_images=describe_images,
-                        force_reparse=force_reparse,
-                        copy_to_kb=False,
-                        session=session,
-                    )
+                    # doc_id is nullable in the schema; fall back to the filename.
+                    resolved_doc_id = raw_doc.doc_id or file_path.stem
 
-                    document_ids.extend(result["document_ids"])
+                    existing = None
+                    if force_reparse:
+                        # Which document does ingest() actually update? It dedups
+                        # on (source_id, doc_id) — NOT on raw_document_id (see the
+                        # docstring above for why those differ in practice).
+                        existing = session.query(Document).filter(
+                            Document.source_id == raw_doc.source_id,
+                            Document.doc_id == resolved_doc_id,
+                            Document.parent_id.is_(None),
+                        ).first()
+
+                        if empty_only and (existing is None or (existing.text or "") != ""):
+                            skipped += 1
+                            continue
+
+                    if existing is not None:
+                        stale_chunk_ids = (
+                            _chunk_ids_for(existing.id, session) if chunk_and_embed else []
+                        )
+                        result = ingest(
+                            file_path,
+                            source_id=raw_doc.source_id,
+                            doc_id=resolved_doc_id,
+                            uri=raw_doc.uri,
+                            meta=dict(raw_doc.meta or {}),
+                            # Passed straight into add_document() so they land on
+                            # whichever row ends up holding the new parse —
+                            # including a freshly INSERTed row when identity
+                            # misses (e.g. a parser change), which patching
+                            # existing.id after the fact would miss entirely.
+                            creating_time=existing.creating_time,
+                            update_time=existing.update_time,
+                            force_reparse=True,
+                            parser_name=parser_name,
+                            extract_images=extract_images,
+                            describe_images=describe_images,
+                            # Already under data/sources/{source_id}/ — copying
+                            # it onto itself would rewrite documents_raw.file_path.
+                            copy_to_kb=False,
+                            generate_summary=generate_summary,
+                            chunk_and_embed=chunk_and_embed,
+                            create_summary_chunks=generate_summary,
+                            session=session,
+                        )
+                        # Only now that the re-parse succeeded: chunks captured
+                        # before it ran and not replaced by it belong to the old
+                        # text.
+                        if chunk_and_embed:
+                            _delete_chunks(stale_chunk_ids, session)
+                        document_ids.extend(result.get("document_ids", []))
+                    else:
+                        result = add_document(
+                            file_path,
+                            source_id=raw_doc.source_id,
+                            doc_id=resolved_doc_id,
+                            meta=raw_doc.meta,
+                            parser_name=parser_name,
+                            extract_images=extract_images,
+                            describe_images=describe_images,
+                            force_reparse=force_reparse,
+                            copy_to_kb=False,
+                            session=session,
+                        )
+                        document_ids.extend(result["document_ids"])
+
                     parsed += 1
-                    logger.debug(f"Successfully parsed {result['num_documents']} document(s) from {raw_doc.file_path}")
+                    logger.debug(f"Successfully parsed raw document {raw_doc.id}")
 
                 except FileNotFoundError as e:
                     # For marker-preloaded, this means Marker output doesn't exist
@@ -392,14 +622,11 @@ def parse_all(
                     errors += 1
                     logger.error(f"Error parsing raw document {raw_doc.id}: {e}", exc_info=True)
                     continue
+            # Commit here (via the `with` block exiting) — releases the FOR
+            # UPDATE locks only after this whole batch is parsed and all
+            # Document rows are visible to other workers.
 
-            total_processed += len(raw_docs)
-            # Commit here — releases all FOR UPDATE locks only after the full batch
-            # is parsed and all Document rows are visible to other workers.
-            if limit is not None and total_processed >= limit:
-                break
-
-    if total_processed == 0:
+    if not target_ids:
         logger.info(f"No unparsed raw documents found{' for source_id: ' + source_id if source_id else ''}")
 
     logger.info(
@@ -407,7 +634,157 @@ def parse_all(
     )
 
     return {
-        "total_raw": total_processed,
+        "total_raw": len(target_ids),
+        "parsed": parsed,
+        "skipped": skipped,
+        "errors": errors,
+        "document_ids": document_ids,
+    }
+
+
+def _parse_all_from_stored(
+    source_id: Optional[str] = None,
+    doc_ids: Optional[List[str]] = None,
+    empty_only: bool = False,
+    dry_run: bool = False,
+    generate_summary: bool = True,
+    chunk_and_embed: bool = True,
+    batch_size: Optional[int] = None,
+    limit: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Rebuild documents from their stored parser output, in parallel-safe batches.
+
+    Unlike the rest of parse_all(), this is rooted at Document, not RawDocument
+    — OUTER JOINed to RawDocument only for the file path, since a document
+    whose raw file is gone (or was never linked) is still reachable here. That
+    outer join is also why the lock below is scoped explicitly to `of=Document`:
+    Postgres refuses FOR UPDATE on the nullable side of an outer join, and
+    RawDocument is exactly that side.
+
+    Reuses parser_output, so it cannot change what the parser saw, only how
+    the text is rendered from it. No re-parse, no GPU, no LLM calls for the
+    text itself — summary and chunks are still regenerated so they can't drift
+    from the rebuilt text.
+    """
+    from .db_models import RawDocument
+    from ..config import get_batch_config
+
+    batch_size = batch_size or get_batch_config()['parse_batch_size']
+
+    def _build_query(session):
+        query = (
+            session.query(Document, RawDocument.file_path)
+            .outerjoin(RawDocument, Document.raw_document_id == RawDocument.id)
+            .filter(Document.doc_type == "text")
+        )
+        if source_id:
+            query = query.filter(Document.source_id == source_id)
+        if doc_ids:
+            query = query.filter(Document.doc_id.in_(doc_ids))
+        if empty_only:
+            from sqlalchemy import func
+            query = query.filter(func.coalesce(Document.text, "") == "")
+        return query
+
+    if dry_run:
+        with get_db_session() as session:
+            query = _build_query(session)
+            if limit is not None:
+                query = query.limit(limit)
+            targets = [
+                {
+                    "id": doc.id,
+                    "source_id": doc.source_id,
+                    "doc_id": doc.doc_id,
+                    "text_len": len(doc.text or ""),
+                    "file_path": file_path,
+                }
+                for doc, file_path in query.all()
+            ]
+        return {"dry_run": True, "targets": targets, "total": len(targets)}
+
+    parsed = 0
+    skipped = 0
+    errors = 0
+    document_ids = []
+
+    # Snapshot the target ids once, up front — rebuilding a document's text
+    # doesn't remove it from this query (doc_type stays "text"; empty_only is
+    # the only predicate a rebuild could flip, and only when set), so
+    # re-running the same open-ended query every batch iteration could loop
+    # forever. A fixed id list walked once is correct regardless.
+    with get_db_session() as session:
+        id_query = _build_query(session).with_entities(Document.id)
+        if limit is not None:
+            id_query = id_query.limit(limit)
+        target_ids = [row[0] for row in id_query.all()]
+
+    if target_ids:
+        logger.info(f"Rebuilding {len(target_ids)} document(s) in batches of {batch_size}")
+
+    for batch_start in range(0, len(target_ids), batch_size):
+        batch_ids = target_ids[batch_start:batch_start + batch_size]
+        with get_db_session(auto_expunge=False) as session:
+            # `of=Document` is required: Postgres refuses FOR UPDATE on the
+            # nullable side of an outer join (RawDocument here), so the lock
+            # must be scoped explicitly to Document.
+            rows = (
+                session.query(Document, RawDocument.file_path)
+                .outerjoin(RawDocument, Document.raw_document_id == RawDocument.id)
+                .filter(Document.id.in_(batch_ids))
+                .with_for_update(skip_locked=True, of=Document)
+                .all()
+            )
+
+            if not rows:
+                continue
+
+            batch_num = batch_start // batch_size + 1
+            for doc, _file_path in tqdm(rows, desc=f"Rebuilding documents (batch {batch_num})", unit="doc"):
+                try:
+                    text = _rebuild_text_from_parser_output(doc, session)
+                    if text is None:
+                        errors += 1
+                        logger.error(
+                            f"No DoclingDocument parser_output to rebuild {doc.id} from "
+                            "— re-parse from the raw file instead (drop from_stored)"
+                        )
+                        continue
+
+                    stale_chunk_ids = _chunk_ids_for(doc.id, session) if chunk_and_embed else []
+                    doc.text = text
+                    session.flush()
+
+                    if generate_summary:
+                        doc.generate_summary(
+                            include_title=True, include_gist=True, include_summary=True,
+                        )
+
+                    if chunk_and_embed:
+                        _delete_chunks(stale_chunk_ids, session)
+                        doc.chunk_and_embed()
+                        if generate_summary and doc.summary:
+                            doc.chunk_and_embed(chunk_strategy="summary")
+
+                    document_ids.append(doc.id)
+                    parsed += 1
+
+                except Exception as e:
+                    errors += 1
+                    logger.error(f"Error rebuilding document {doc.id}: {e}", exc_info=True)
+                    continue
+            # Commit here (via the `with` block exiting) — releases the lock
+            # on this batch once it's fully rebuilt.
+
+    if not target_ids:
+        logger.info(f"No matching documents found{' for source_id: ' + source_id if source_id else ''}")
+
+    logger.info(
+        f"Rebuild complete: {parsed} rebuilt, {skipped} skipped, {errors} errors"
+    )
+
+    return {
+        "total_raw": len(target_ids),
         "parsed": parsed,
         "skipped": skipped,
         "errors": errors,

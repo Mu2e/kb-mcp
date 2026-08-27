@@ -239,19 +239,31 @@ def cmd_logs_tokens(args):
 
 
 def cmd_parse_all(args):
-    """Parse all raw documents for a source_id that don't have processed documents yet."""
+    """Parse (or reprocess/rebuild) raw documents for a source_id, in parallel-safe batches."""
     try:
         from ..tools import parse_all
 
-        print(f"Parsing all raw documents for source_id: {args.source_id}")
-        if args.parser_name:
-            print(f"Using parser: {args.parser_name}")
-        if args.extract_images:
-            print("Extracting images as separate documents")
-        if args.describe_images:
-            print("Generating LLM descriptions for images")
+        doc_ids = getattr(args, 'doc_ids', None)
+        from_stored = getattr(args, 'from_stored', False)
+        empty_only = getattr(args, 'empty_only', False)
+        dry_run = getattr(args, 'dry_run', False)
+
+        if from_stored:
+            print(f"Rebuilding documents from stored parser output for source_id: {args.source_id}")
+        else:
+            print(f"Parsing raw documents for source_id: {args.source_id}")
+            if args.parser_name:
+                print(f"Using parser: {args.parser_name}")
+            if args.extract_images:
+                print("Extracting images as separate documents")
+            if args.describe_images:
+                print("Generating LLM descriptions for images")
         if args.force_reparse:
-            print("Force re-parsing enabled")
+            print("Force re-parsing enabled (also reprocesses documents that already exist)")
+        if doc_ids:
+            print(f"Restricted to doc_id(s): {', '.join(doc_ids)}")
+        if empty_only:
+            print("Restricted to documents with empty text")
 
         result = parse_all(
             source_id=args.source_id,
@@ -261,7 +273,20 @@ def cmd_parse_all(args):
             force_reparse=args.force_reparse,
             batch_size=getattr(args, 'batch_size', None),
             limit=getattr(args, 'limit', None),
+            from_stored=from_stored,
+            doc_ids=doc_ids,
+            empty_only=empty_only,
+            dry_run=dry_run,
+            generate_summary=not getattr(args, 'no_summary', False),
+            chunk_and_embed=not getattr(args, 'no_embed', False),
         )
+
+        if result.get("dry_run"):
+            print(f"\n  {result['total']} document(s) to process:")
+            for t in result["targets"]:
+                print(f"  {t.get('source_id')}/{t.get('doc_id')}  <- {t.get('file_path')}")
+            print("  (dry run — nothing changed)")
+            return
 
         print(f"\n  Completed:")
         print(f"  Total raw documents: {result['total_raw']}")
@@ -1296,7 +1321,7 @@ def setup_commands(subparsers):
 
     parse_all_parser = tools_subparsers.add_parser(
         "parse-all",
-        help="Parse all raw documents for a source_id that don't have processed documents yet"
+        help="Parse, reprocess, or rebuild raw documents for a source_id, in parallel-safe batches"
     )
     parse_all_parser.add_argument("source_id", help="Source identifier to process raw documents for")
     parse_all_parser.add_argument(
@@ -1316,7 +1341,45 @@ def setup_commands(subparsers):
     parse_all_parser.add_argument(
         "--force-reparse",
         action="store_true",
-        help="Re-parse even if documents already exist for this parser"
+        help="Also reprocess raw documents that already have a Document, running the "
+             "full parse+summary+chunk/embed pipeline (not just parse) and resolving "
+             "the existing Document by (source_id, doc_id) so timestamps and chunks "
+             "carry over correctly. Without this, only raw documents missing a "
+             "Document are processed."
+    )
+    parse_all_parser.add_argument(
+        "--from-stored",
+        action="store_true",
+        help="Rebuild document text from stored DoclingDocument parser output instead "
+             "of re-running the parser (no GPU, no re-fetch), then regenerate summary "
+             "and chunks. Reaches documents whose raw file is gone, unlike every other mode."
+    )
+    parse_all_parser.add_argument(
+        "--doc-id",
+        action="append",
+        dest="doc_ids",
+        help="Restrict to specific doc_id(s); repeatable"
+    )
+    parse_all_parser.add_argument(
+        "--empty-only",
+        action="store_true",
+        help="Only process documents whose existing text is empty. Requires "
+             "--force-reparse or --from-stored."
+    )
+    parse_all_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="List what would be processed and exit — no locks taken, no changes made"
+    )
+    parse_all_parser.add_argument(
+        "--no-summary",
+        action="store_true",
+        help="Skip summary generation (only affects --force-reparse / --from-stored)"
+    )
+    parse_all_parser.add_argument(
+        "--no-embed",
+        action="store_true",
+        help="Skip chunking and embedding (only affects --force-reparse / --from-stored)"
     )
     parse_all_parser.add_argument(
         "--batch-size",
@@ -1327,7 +1390,7 @@ def setup_commands(subparsers):
         "--limit", "-N",
         type=int,
         metavar="N",
-        help="Stop after parsing N documents (useful for testing)"
+        help="Stop after processing N documents (useful for testing)"
     )
     parse_all_parser.set_defaults(func=cmd_parse_all)
 

@@ -57,7 +57,7 @@ class GroupedHelpFormatter(argparse.RawDescriptionHelpFormatter):
 
             # Define groups with their commands in order (only primary names, aliases shown separately)
             command_groups = [
-                ("Document Operations", ["ingest", "reparse", "get", "embed", "drop", "search", "similar"]),
+                ("Document Operations", ["ingest", "get", "embed", "drop", "search", "similar"]),
                 ("Chunks, Embeddings & Sources", ["source", "chunks", "embedding"]),  # "emb" is an alias, will be shown
                 ("Knowledge Graph", ["graph"]),
                 ("Evaluation & Benchmarking", ["eval"]),
