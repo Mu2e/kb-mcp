@@ -145,6 +145,113 @@ def inline_docling_image_descriptions(
     return re.sub(r'<!-- image -->', _replace, text)
 
 
+#: Passed as `page_break_placeholder` to `DoclingDocument.export_to_markdown()`.
+#: Docling emits this identical literal at every page transition — it carries
+#: no page number of its own (that's a private detail of its serializer) — so
+#: `number_docling_page_breaks` replaces each occurrence with the real number
+#: read from the body tree.
+DOCLING_PAGE_BREAK_PLACEHOLDER = "<!-- page-break -->"
+
+
+def number_docling_page_breaks(text: str, structured_output: Optional[Dict[str, Any]]) -> str:
+    """Replace bare page-break markers with `<!-- page:N -->`, and prefix the
+    document with one for its first page.
+
+    `export_to_markdown(page_break_placeholder=...)` marks where pages change
+    but not which page it changed *to* — every marker is the same literal
+    string — and it marks transitions only, so the first page has no marker
+    at all. The body tree knows both: each text element carries
+    `prov[0].page_no`, and Docling's serializer visits the tree in the same
+    reading order it exports, so the page number at each marker is recovered
+    by walking the body once and zipping the page-number sequence against
+    the markers in order — the same "consume markers in body order" idiom as
+    `inline_docling_image_descriptions` and `_fill_undecoded_formulas`, not a
+    text search. Prepending a marker for the first page means a reader of
+    `text` never needs a separate "what page did it start on" query: every
+    page, including the first, is announced by exactly one `<!-- page:N -->`.
+
+    Recurses into groups and into a text item's own children (nested HTML
+    documents put a whole section under its `section_header`), because a
+    page transition can happen anywhere in that subtree, not just among
+    `body.children` directly — the flat PDF shape has no such children, so
+    the recursion is a no-op there and this walks exactly the top level.
+
+    Args:
+        text: Markdown text from `export_to_markdown(page_break_placeholder=
+            DOCLING_PAGE_BREAK_PLACEHOLDER)`.
+        structured_output: The DoclingDocument payload the export came from.
+
+    Returns:
+        `text` with a leading `<!-- page:N -->` and every placeholder
+        replaced by its numbered form. Unchanged if there are no page
+        numbers to attribute at all.
+    """
+    if not structured_output:
+        return text
+
+    texts_by_ref = {
+        t.get("self_ref") or f"#/texts/{i}": t
+        for i, t in enumerate(structured_output.get("texts") or [])
+    }
+    groups_by_ref = {
+        g.get("self_ref") or f"#/groups/{i}": g
+        for i, g in enumerate(structured_output.get("groups") or [])
+    }
+
+    # The page number as of each marker crossed, in reading order — one
+    # entry per *change*, so this lines up 1:1 with the markers Docling
+    # inserted (one per transition, not one per element).
+    pages_at_breaks: List[int] = []
+    first_page: Optional[int] = None
+    current_page: Optional[int] = None
+    visited: set = set()
+
+    def visit(cref: Optional[str]) -> None:
+        nonlocal current_page, first_page
+        if not cref or cref in visited:
+            return
+        visited.add(cref)
+        if cref.startswith("#/groups/"):
+            for c in (groups_by_ref.get(cref) or {}).get("children") or []:
+                visit(c.get("cref") if isinstance(c, dict) else None)
+            return
+        if not cref.startswith("#/texts/"):
+            return
+        t = texts_by_ref.get(cref) or {}
+        prov = t.get("prov") or []
+        if prov and isinstance(prov[0], dict):
+            page_no = prov[0].get("page_no")
+            if page_no is not None and page_no != current_page:
+                if current_page is None:
+                    first_page = page_no
+                else:
+                    pages_at_breaks.append(page_no)
+                current_page = page_no
+        for c in t.get("children") or []:
+            visit(c.get("cref") if isinstance(c, dict) else None)
+
+    for child in (structured_output.get("body") or {}).get("children") or []:
+        visit(child.get("cref") if isinstance(child, dict) else None)
+
+    if first_page is None:
+        # No element carries a page number at all (not a PDF, or a reader
+        # that doesn't set prov) — nothing to attribute, markers or not.
+        return text
+
+    if pages_at_breaks:
+        marker_iter = iter(pages_at_breaks)
+
+        def _replace(match):
+            page_no = next(marker_iter, None)
+            if page_no is None:
+                return match.group(0)
+            return f"<!-- page:{page_no} -->"
+
+        text = re.sub(re.escape(DOCLING_PAGE_BREAK_PLACEHOLDER), _replace, text)
+
+    return f"<!-- page:{first_page} -->\n\n{text}"
+
+
 def parse(
     file_path: Optional[str | Path] = None,
     data: Optional[dict] = None,

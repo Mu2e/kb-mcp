@@ -256,14 +256,21 @@ def _rebuild_text_from_parser_output(doc, session):
 
     from docling_core.types.doc import DoclingDocument
 
-    from ...parser.parse import inline_docling_image_descriptions
+    from ...parser.parse import (
+        DOCLING_PAGE_BREAK_PLACEHOLDER,
+        inline_docling_image_descriptions,
+        number_docling_page_breaks,
+    )
 
     parser_output = doc.parser_output
     if not parser_output or parser_output.get("schema_name") != "DoclingDocument":
         return None
 
     dl_doc = DoclingDocument.model_validate(parser_output)
-    text = html_module.unescape(dl_doc.export_to_markdown())
+    text = html_module.unescape(dl_doc.export_to_markdown(
+        page_break_placeholder=DOCLING_PAGE_BREAK_PLACEHOLDER
+    ))
+    text = number_docling_page_breaks(text, parser_output)
 
     image_children = session.query(Document).filter(
         Document.parent_id == doc.id,

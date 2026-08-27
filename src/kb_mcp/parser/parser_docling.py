@@ -13,6 +13,7 @@ import re
 from pathlib import Path
 from typing import Any, List, Optional, Tuple
 
+from .parse import DOCLING_PAGE_BREAK_PLACEHOLDER, number_docling_page_breaks
 from .parser_base import BaseParser
 
 logger = logging.getLogger(__name__)
@@ -313,8 +314,11 @@ class DoclingParser(BaseParser):
             # Docling escapes inequalities and a few other characters in its
             # Markdown output (e.g. `Rate &lt; 20 kcps`). Unescape so chunks
             # carry the original text.
-            text = html.unescape(doc.export_to_markdown())
+            text = html.unescape(doc.export_to_markdown(
+                page_break_placeholder=DOCLING_PAGE_BREAK_PLACEHOLDER
+            ))
             text = _fill_undecoded_formulas(text, self.structured_output)
+            text = number_docling_page_breaks(text, self.structured_output)
 
             # Tables-as-records. Walk doc.tables, render each
             # as a Markdown table (caption + grid), and emit a Document-shaped
