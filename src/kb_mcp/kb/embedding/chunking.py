@@ -171,6 +171,15 @@ def resolve_strategy_name(
     the same table under one label, and re-chunking silently replaced the old
     set instead of standing beside it.
 
+    `tokens` is named the same way — window, not the literal chunk_size — even
+    though its own resolver (`get_strategy_name`) would otherwise report the
+    *derived* tiktoken size (`tokens_331_33`), not the window it targets
+    (`tokens_512_51`). The derived number moves with `budget.token_chunk_size`
+    (SPECIAL_TOKENS/GIST_ALLOWANCE/FALLBACK_RATIO tuning) while the window it
+    fits does not, so the window is what belongs in a name meant to answer
+    "which embeddings can read this chunk set" — the real chunk_size actually
+    used to slice stays on each chunk's `meta` instead.
+
     Everything else delegates to the pure-tiktoken resolver in
     `kb_mcp.chunking`, which already encodes its own parameters
     (`tokens_1000_200`). That one cannot resolve a window — it deliberately
@@ -181,6 +190,15 @@ def resolve_strategy_name(
     if requested in ("summary", "section"):
         from .budget import get_embed_budget
         return f"{requested}_{get_embed_budget().window}"
+    if requested == "tokens":
+        from .budget import get_embed_budget
+        cfg = apply_env_chunk_defaults(config)
+        window = get_embed_budget().window
+        return get_strategy_name("tokens", {
+            "chunk_size": window,
+            "prepend_gist": cfg.get("prepend_gist", True),
+            "prepend_section_path": cfg.get("prepend_section_path", True),
+        })
     return get_strategy_name(requested, apply_env_chunk_defaults(config))
 
 
@@ -706,6 +724,14 @@ def chunk_document(
             chunk_dicts = enforce_embed_budget(
                 chunk_dicts, document, prepend_section_path, prepend_gist
             )
+            # The chunker itself names its output after the derived tiktoken
+            # size (`tokens_331_33`); relabel to the window-based name so the
+            # stored strategy matches what resolve_strategy_name predicts
+            # (chunk_and_embed_all queries by that prediction to decide
+            # whether a document already has current chunks).
+            windowed_name = resolve_strategy_name("tokens", config)
+            for cd in chunk_dicts:
+                cd["chunk_strategy"] = windowed_name
 
 
     # Determine if we need to create a session
