@@ -62,6 +62,7 @@ class DocDBSource(Source):
         timeout: float = 30.0,
         skip_existing: bool = False,
         force_reparse: bool = False,
+        skip_parse: bool = False,
         login: bool = True,
     ):
         """Initialize the DocDB source.
@@ -72,6 +73,11 @@ class DocDBSource(Source):
             delay: Delay between requests in seconds.
             timeout: Request timeout in seconds.
             skip_existing: If True, skip documents already in the database.
+            skip_parse: If True, only download files and register RawDocument
+                rows — no Docling/parsing, no chunking, no embedding. Lets a
+                large backfill be staged (network- and rate-limit-bound)
+                separately from parsing it (CPU-bound); parse the staged
+                rows later with `kb reparse --from-raw`.
             login: If True, authenticate on construction using env vars.
         """
         super().__init__(
@@ -86,6 +92,7 @@ class DocDBSource(Source):
         self.base_url = base_url.rstrip("/") + "/"
         self.skip_existing = skip_existing
         self.force_reparse = force_reparse
+        self.skip_parse = skip_parse
         self.session: Optional[requests.Session] = None
 
         if login:
@@ -521,6 +528,7 @@ class DocDBSource(Source):
         update_time = parse_docdb_datetime(meta.get("revised_content"))
 
         document_ids: List[str] = []
+        raw_document_ids: List[str] = []
 
         for file_info in meta["files"]:
             filename = file_info.get("filename") or file_info.get("text", "unknown")
@@ -570,16 +578,23 @@ class DocDBSource(Source):
                 update_time=update_time,
                 copy_to_kb=True,
                 force_reparse=self.force_reparse,
+                skip_parse=self.skip_parse,
                 session=session,
             )
             if result.get("document_ids"):
                 document_ids.extend(result["document_ids"])
+            if result.get("raw_document_id"):
+                raw_document_ids.append(result["raw_document_id"])
 
             time.sleep(self.delay)
 
+        # skip_parse leaves document_ids empty by design (only RawDocument
+        # rows exist yet) — raw_document_ids is the success signal there.
+        success_ids = raw_document_ids if self.skip_parse else document_ids
         return {
             "document_ids": document_ids,
+            "raw_document_ids": raw_document_ids,
             "num_documents": len(document_ids),
             "parsed": len(document_ids) > 0,
-            "error": None if document_ids else f"No files successfully ingested for doc {doc_id_str}",
+            "error": None if success_ids else f"No files successfully ingested for doc {doc_id_str}",
         }
