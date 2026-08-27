@@ -235,6 +235,11 @@ class Source(ABC):
                 item_id = item.get("id", f"item-{i}")
                 logger.info(f"Processing item {i+1}/{len(items)}: {item_id}")
 
+                # An item skipped by skip_existing never reaches the server, so
+                # it does not owe it a politeness delay. On a backfill those are
+                # the majority of the list, and sleeping through them turns a
+                # re-run over an already-imported window into hours of nothing.
+                contacted_server = True
                 try:
                     result = self.process_item(item, output_dir, session)
 
@@ -248,6 +253,7 @@ class Source(ABC):
                     # Check if item was skipped (already exists)
                     if result.get("skipped"):
                         skipped += 1
+                        contacted_server = False
                         logger.debug(f"Item {item_id} was skipped (already processed)")
                     else:
                         # Success - add document IDs
@@ -265,9 +271,10 @@ class Source(ABC):
                     session.rollback()
                     continue
 
-                # Be polite - delay between requests
-                if self.delay > 0:
-                    time.sleep(self.delay)
+                finally:
+                    # Be polite - delay between requests
+                    if contacted_server and self.delay > 0:
+                        time.sleep(self.delay)
 
         if errors > 0:
             logger.warning(f"Encountered {errors} error(s) during processing")
