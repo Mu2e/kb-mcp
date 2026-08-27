@@ -249,8 +249,8 @@ def _rebuild_text_from_parser_output(doc, session):
     """Re-render `doc.text` from its stored DoclingDocument, or return None.
 
     Exactly what the parser does — Docling's own markdown export, unescaped,
-    with image markers replaced by the descriptions already on the child
-    image records. No re-parse, no GPU, no LLM calls.
+    with undecoded formulas and image markers filled in the same order
+    `DoclingParser.parse()` does. No re-parse, no GPU, no LLM calls.
     """
     import html as html_module
 
@@ -261,6 +261,7 @@ def _rebuild_text_from_parser_output(doc, session):
         inline_docling_image_descriptions,
         number_docling_page_breaks,
     )
+    from ...parser.parser_docling import _fill_undecoded_formulas
 
     parser_output = doc.parser_output
     if not parser_output or parser_output.get("schema_name") != "DoclingDocument":
@@ -270,6 +271,12 @@ def _rebuild_text_from_parser_output(doc, session):
     text = html_module.unescape(dl_doc.export_to_markdown(
         page_break_placeholder=DOCLING_PAGE_BREAK_PLACEHOLDER
     ))
+    # Same order as DoclingParser.parse(): formulas filled before page
+    # breaks are numbered. Missing this step left `--from-stored` rebuilds
+    # silently dropping the raw-formula fallback that the original parse
+    # applied, so a document rebuilt this way kept its
+    # <!-- formula-not-decoded --> markers forever.
+    text = _fill_undecoded_formulas(text, parser_output)
     text = number_docling_page_breaks(text, parser_output)
 
     image_children = session.query(Document).filter(
