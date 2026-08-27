@@ -68,13 +68,28 @@ def create_engine_with_config() -> Engine:
 
     # PostgreSQL configuration
     db_config = get_database_config() # for schema setting
+
+    # The pgvector extension (the `vector` type/operators) lives in whichever
+    # schema it was installed into — public, on every deployment so far — and
+    # isn't reinstallable per-schema. A search_path of just the configured
+    # schema breaks any vector column/operator with "type vector does not
+    # exist" the moment that schema differs from public (e.g. DB_SCHEMA=v0
+    # for a per-source snapshot). Always fall back to public so custom
+    # schemas keep working without every caller needing to know to type
+    # "myschema,public" themselves.
+    configured_schema = db_config['schema']
+    schema_parts = [s.strip() for s in configured_schema.split(",") if s.strip()]
+    if "public" not in schema_parts:
+        schema_parts.append("public")
+    search_path = ",".join(schema_parts)
+
     engine = create_engine(
         database_url,
         connect_args={
             # Kill sessions idle in transaction for more than 30 minutes.
             # Must be longer than the slowest single document parse (marker on large scanned PDFs).
             # Prevents stuck locks when a worker process is killed externally.
-            "options": f"-c idle_in_transaction_session_timeout=7200000 -c search_path={db_config['schema']}",
+            "options": f"-c idle_in_transaction_session_timeout=7200000 -c search_path={search_path}",
             # TCP keepalives so PostgreSQL detects dead worker connections quickly.
             "keepalives": 1,
             "keepalives_idle": 60,
@@ -87,9 +102,9 @@ def create_engine_with_config() -> Engine:
     def set_search_path(dbapi_conn, connection_record):
         """Set schema search_path for PostgreSQL."""
         cursor = dbapi_conn.cursor()
-        cursor.execute(f"SET search_path TO {db_config['schema']}")
+        cursor.execute(f"SET search_path TO {search_path}")
         cursor.close()
-    
+
     return engine
 
 
