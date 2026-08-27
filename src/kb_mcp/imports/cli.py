@@ -378,12 +378,14 @@ def main():
     docdb_parser.add_argument(
         "--before",
         metavar="YYYY-MM-DD",
-        help="Upper date bound for search (only with --query)",
+        help="Upper date bound. Usable with --query or on its own, in which "
+             "case the date range alone selects the documents",
     )
     docdb_parser.add_argument(
         "--after",
         metavar="YYYY-MM-DD",
-        help="Lower date bound for search (only with --query)",
+        help="Lower date bound. Usable with --query or on its own, in which "
+             "case the date range alone selects the documents",
     )
     docdb_parser.add_argument(
         "--max-results",
