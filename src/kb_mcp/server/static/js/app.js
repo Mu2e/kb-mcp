@@ -695,7 +695,8 @@ function createDocumentElement(doc, isSearchResult = false, showSimilarity = tru
         }
     });
     
-    const insertTime = formatLocalTime(doc.insert_time);
+    const displayTimeLabel = doc.creating_time ? 'Created' : 'Inserted';
+    const displayTime = formatLocalTime(doc.creating_time || doc.insert_time);
     // Show summary if available, otherwise show text preview
     let contentPreview = '';
     if (doc.summary) {
@@ -793,7 +794,7 @@ function createDocumentElement(doc, isSearchResult = false, showSimilarity = tru
                 <div class="document-meta">
                     <strong>Source:</strong> ${escapeHtml(doc.source_id)} |
                     <strong>Type:</strong> ${escapeHtml(doc.doc_type)} |
-                    <strong>Inserted:</strong> ${insertTime}
+                    <strong>${displayTimeLabel}:</strong> ${displayTime}
                 </div>
             </div>
         </div>
