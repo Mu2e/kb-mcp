@@ -22,6 +22,29 @@ from ..kb import add_document
 logger = logging.getLogger(__name__)
 
 
+def _strip_edit_section_links(html_fragment: str) -> str:
+    """Remove MediaWiki's `[edit]` section-edit links from parsed page HTML.
+
+    `action=parse` renders every heading with a trailing
+    `<span class="mw-editsection">[edit]</span>` — a UI affordance for
+    editing that section in the wiki, not part of the page's actual
+    content. Left in, it survives Docling's HTML→Markdown conversion as
+    `[Section Title [ edit ]](/w/index.php?...&action=edit&section=N)`,
+    polluting every section heading (and therefore every `section_path`
+    derived from it) with wiki chrome and a raw edit URL.
+
+    Stripped here, at the HTML stage, rather than pattern-matched back out
+    of the Markdown later — Docling never sees it, so nothing downstream
+    needs to know this was ever there.
+    """
+    from bs4 import BeautifulSoup
+
+    soup = BeautifulSoup(html_fragment, "html.parser")
+    for span in soup.find_all("span", class_="mw-editsection"):
+        span.decompose()
+    return str(soup)
+
+
 def parse_wiki_timestamp(value: Optional[str]) -> Optional[datetime]:
     """Convert a MediaWiki API timestamp to an aware UTC datetime.
 
@@ -449,12 +472,13 @@ class MediaWikiSource(Source):
             }
 
         # Wrap in a minimal HTML document for the parser
+        body_html = _strip_edit_section_links(content["html"])
         html = f"""<!DOCTYPE html>
 <html>
 <head><title>{content['title']}</title></head>
 <body>
 <h1>{content['title']}</h1>
-{content['html']}
+{body_html}
 </body>
 </html>"""
 
