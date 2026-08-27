@@ -520,6 +520,56 @@ def cmd_deduplicate(args):
     print(f"  Deleted: {result['deleted']} duplicate document(s)")
 
 
+def cmd_check(args):
+    """Scan documents for known consistency issues (see kb_mcp.kb.checks)."""
+    from ..checks import CHECKS, run_checks
+
+    if args.list_checks:
+        for name, fn in sorted(CHECKS.items()):
+            summary = (fn.__doc__ or "").strip().splitlines()[0] if fn.__doc__ else ""
+            print(f"  {name:<16} {summary}")
+        return
+
+    try:
+        issues = run_checks(
+            checks=args.check or None,
+            doc_type=args.doc_type,
+            doc_id=args.doc_id,
+            source_id=args.source_id,
+            document_id=args.document_id,
+        )
+    except ValueError as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+
+    if args.json:
+        print(json.dumps([vars(i) for i in issues], indent=2))
+        return
+
+    if not issues:
+        print("No issues found.")
+        return
+
+    print(f"Found {len(issues)} issue(s):")
+    by_check = {}
+    for issue in issues:
+        by_check.setdefault(issue.check, []).append(issue)
+    for check, group in sorted(by_check.items()):
+        by_doc_type = {}
+        for issue in group:
+            by_doc_type.setdefault(issue.doc_type, []).append(issue)
+        type_counts = ", ".join(
+            f"{dt}: {len(g)}" for dt, g in sorted(by_doc_type.items())
+        )
+        print(f"\n  {check} ({len(group)}) [{type_counts}]:")
+        for doc_type, dt_group in sorted(by_doc_type.items()):
+            print(f"    {doc_type} ({len(dt_group)}):")
+            for issue in dt_group[:20]:
+                print(f"      {issue.source_id}/{issue.doc_id}  ({issue.document_id[:8]}...)  {issue.detail}")
+            if len(dt_group) > 20:
+                print(f"      ... and {len(dt_group) - 20} more")
+
+
 def cmd_drop_parser(args):
     """Bulk-delete all documents for a given parser (and optionally source)."""
     from ..database import get_db_session
@@ -1221,6 +1271,28 @@ def setup_commands(subparsers):
         help="Apply deduplication (required to make changes)"
     )
     dedup_parser.set_defaults(func=cmd_deduplicate)
+
+    check_parser = tools_subparsers.add_parser(
+        "check",
+        help="Scan documents for known consistency issues (leaked parser placeholders, etc.)"
+    )
+    check_parser.add_argument(
+        "--check",
+        action="append",
+        metavar="NAME",
+        help="Run only this check (repeatable). Default: run all. See --list-checks."
+    )
+    check_parser.add_argument(
+        "--list-checks",
+        action="store_true",
+        help="List available check names and exit"
+    )
+    check_parser.add_argument("--doc-type", help="Restrict to one doc_type (e.g. text, image)")
+    check_parser.add_argument("--doc-id", help="Restrict to one doc_id")
+    check_parser.add_argument("--source-id", help="Restrict to one source_id")
+    check_parser.add_argument("--document-id", help="Restrict to one Document UUID")
+    check_parser.add_argument("--json", action="store_true", help="Output issues as JSON")
+    check_parser.set_defaults(func=cmd_check)
 
     parse_all_parser = tools_subparsers.add_parser(
         "parse-all",
