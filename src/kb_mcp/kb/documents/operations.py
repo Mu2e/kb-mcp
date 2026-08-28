@@ -221,9 +221,25 @@ def _sanitize_text(text: Optional[str]) -> Optional[str]:
     return text.replace('\x00', '')
 
 
+def _sanitize_json(value: Any) -> Any:
+    """Recursively strip NULL bytes from strings in a JSON-like structure.
+
+    PostgreSQL's JSONB type rejects \\u0000 outright, and parser_output is a
+    full DoclingDocument dump — a NUL byte can turn up in any nested string
+    (page text, captions, table cells), not just the top-level text field.
+    """
+    if isinstance(value, str):
+        return _sanitize_text(value)
+    if isinstance(value, dict):
+        return {k: _sanitize_json(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_sanitize_json(v) for v in value]
+    return value
+
+
 def _sanitize_document(document: Document) -> None:
     """Sanitize document fields to remove NULL bytes and other problematic characters.
-    
+
     Args:
         document: Document object to sanitize
     """
@@ -231,6 +247,8 @@ def _sanitize_document(document: Document) -> None:
         document.text = _sanitize_text(document.text)
     if document.title:
         document.title = _sanitize_text(document.title)
+    if document.parser_output_ref is not None and document.parser_output_ref.output is not None:
+        document.parser_output_ref.output = _sanitize_json(document.parser_output_ref.output)
 
 
 def _compute_hash(document: Document) -> None:
