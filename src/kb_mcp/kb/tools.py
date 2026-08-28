@@ -7,6 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Union
 
+from sqlalchemy import exc as sa_exc
 from sqlalchemy import inspect as sqlalchemy_inspect
 from tqdm import tqdm
 
@@ -348,6 +349,7 @@ def parse_all(
     dry_run: bool = False,
     generate_summary: bool = True,
     chunk_and_embed: bool = True,
+    full_pipeline: bool = False,
 ) -> Dict[str, Any]:
     """Parse raw documents in parallel-safe batches (FOR UPDATE SKIP LOCKED).
 
@@ -388,11 +390,20 @@ def parse_all(
         dry_run: List what would be processed and return without taking any locks or
                 changes.
         generate_summary: Whether to (re)generate the summary. Only takes effect when
-                         force_reparse or from_stored triggers the full pipeline —
-                         a plain new-document parse never summarizes (that's
-                         summarize_all()'s job).
+                         force_reparse, from_stored, or full_pipeline triggers the
+                         full pipeline — a plain new-document parse never summarizes
+                         otherwise (that's summarize_all()'s job).
         chunk_and_embed: Whether to (re)chunk and embed. Same scope caveat as
                         generate_summary.
+        full_pipeline: If True, brand-new raw documents (the ones that would
+                      otherwise get add_document()'s bare parse) also run
+                      through ingest() for summary/chunk/embed in the same
+                      call, honoring generate_summary/chunk_and_embed. Useful
+                      when summarize-all/chunk-and-embed-all would otherwise
+                      have to run as separate concurrent processes against
+                      the same rows — each parse_all() worker instead does
+                      one document's whole pipeline itself, so there's no
+                      cross-tool contention on document_parser_outputs/chunks.
 
     Returns:
         Dictionary with:
@@ -514,32 +525,40 @@ def parse_all(
             # check.
             batch_num = batch_start // batch_size + 1
             for raw_doc in tqdm(raw_docs, desc=f"Parsing documents (batch {batch_num})", unit="doc"):
+                # Cache the id before anything else: once a DB-level error
+                # (e.g. the NUL-byte-in-JSONB DataError below) aborts the
+                # transaction, touching a lazy/expired ORM attribute like
+                # raw_doc.id triggers an implicit reload that itself raises
+                # (transaction aborted) — that second, uncaught exception is
+                # what actually crashed the whole worker, not the original
+                # error the `except` below is supposed to handle.
+                raw_doc_id = raw_doc.id
                 try:
                     if not raw_doc.file_path:
-                        logger.warning(f"Raw document {raw_doc.id} has no file_path, skipping")
+                        logger.warning(f"Raw document {raw_doc_id} has no file_path, skipping")
                         skipped += 1
                         continue
 
                     file_path = Path(raw_doc.file_path)
 
                     if not file_path.exists():
-                        logger.warning(f"Skipping raw_doc {raw_doc.id}: file not found at {raw_doc.file_path}")
+                        logger.warning(f"Skipping raw_doc {raw_doc_id}: file not found at {raw_doc.file_path}")
                         skipped += 1
                         continue
 
-                    logger.debug(f"Parsing raw document {raw_doc.id}: {raw_doc.file_path}")
+                    logger.debug(f"Parsing raw document {raw_doc_id}: {raw_doc.file_path}")
                     # For marker-preloaded parser, we don't need the original PDF file
                     # We only need the filename stem to find the Marker output directory
                     if parser_name != "marker-preloaded":
                         # Check if file exists (only for parsers that need the actual file)
                         if not file_path.exists():
-                            logger.warning(f"Skipping raw_doc {raw_doc.id}: file not found at {raw_doc.file_path}")
+                            logger.warning(f"Skipping raw_doc {raw_doc_id}: file not found at {raw_doc.file_path}")
                             skipped += 1
                             continue
-                        logger.debug(f"Parsing raw document {raw_doc.id}: {raw_doc.file_path}")
+                        logger.debug(f"Parsing raw document {raw_doc_id}: {raw_doc.file_path}")
                     else:
                         # For marker-preloaded, log the expected output directory instead
-                        logger.debug(f"Parsing raw document {raw_doc.id} from stem: {file_path.stem}")
+                        logger.debug(f"Parsing raw document {raw_doc_id} from stem: {file_path.stem}")
 
                     # doc_id is nullable in the schema; fall back to the filename.
                     resolved_doc_id = raw_doc.doc_id or file_path.stem
@@ -559,68 +578,124 @@ def parse_all(
                             skipped += 1
                             continue
 
-                    if existing is not None:
-                        stale_chunk_ids = (
-                            _chunk_ids_for(existing.id, session) if chunk_and_embed else []
-                        )
-                        result = ingest(
-                            file_path,
-                            source_id=raw_doc.source_id,
-                            doc_id=resolved_doc_id,
-                            uri=raw_doc.uri,
-                            meta=dict(raw_doc.meta or {}),
-                            # Passed straight into add_document() so they land on
-                            # whichever row ends up holding the new parse —
-                            # including a freshly INSERTed row when identity
-                            # misses (e.g. a parser change), which patching
-                            # existing.id after the fact would miss entirely.
-                            creating_time=existing.creating_time,
-                            update_time=existing.update_time,
-                            force_reparse=True,
-                            parser_name=parser_name,
-                            extract_images=extract_images,
-                            describe_images=describe_images,
-                            # Already under data/sources/{source_id}/ — copying
-                            # it onto itself would rewrite documents_raw.file_path.
-                            copy_to_kb=False,
-                            generate_summary=generate_summary,
-                            chunk_and_embed=chunk_and_embed,
-                            create_summary_chunks=generate_summary,
-                            session=session,
-                        )
-                        # Only now that the re-parse succeeded: chunks captured
-                        # before it ran and not replaced by it belong to the old
-                        # text.
-                        if chunk_and_embed:
-                            _delete_chunks(stale_chunk_ids, session)
-                        document_ids.extend(result.get("document_ids", []))
-                    else:
-                        result = add_document(
-                            file_path,
-                            source_id=raw_doc.source_id,
-                            doc_id=resolved_doc_id,
-                            meta=raw_doc.meta,
-                            parser_name=parser_name,
-                            extract_images=extract_images,
-                            describe_images=describe_images,
-                            force_reparse=force_reparse,
-                            copy_to_kb=False,
-                            session=session,
-                        )
-                        document_ids.extend(result["document_ids"])
+                    # A SAVEPOINT around the actual DB writes: a failure here
+                    # (e.g. Postgres rejecting a NUL byte in JSONB) aborts the
+                    # whole shared transaction otherwise, poisoning every
+                    # remaining document in this batch with "transaction is
+                    # aborted" errors. Rolling back to the savepoint instead
+                    # keeps earlier documents in this batch intact and leaves
+                    # the session usable for the rest of the loop.
+                    savepoint = session.begin_nested()
+                    try:
+                        if existing is not None:
+                            stale_chunk_ids = (
+                                _chunk_ids_for(existing.id, session) if chunk_and_embed else []
+                            )
+                            result = ingest(
+                                file_path,
+                                source_id=raw_doc.source_id,
+                                doc_id=resolved_doc_id,
+                                uri=raw_doc.uri,
+                                meta=dict(raw_doc.meta or {}),
+                                # Passed straight into add_document() so they land on
+                                # whichever row ends up holding the new parse —
+                                # including a freshly INSERTed row when identity
+                                # misses (e.g. a parser change), which patching
+                                # existing.id after the fact would miss entirely.
+                                creating_time=existing.creating_time,
+                                update_time=existing.update_time,
+                                force_reparse=True,
+                                parser_name=parser_name,
+                                extract_images=extract_images,
+                                describe_images=describe_images,
+                                # Already under data/sources/{source_id}/ — copying
+                                # it onto itself would rewrite documents_raw.file_path.
+                                copy_to_kb=False,
+                                generate_summary=generate_summary,
+                                chunk_and_embed=chunk_and_embed,
+                                create_summary_chunks=generate_summary,
+                                session=session,
+                            )
+                            # Only now that the re-parse succeeded: chunks captured
+                            # before it ran and not replaced by it belong to the old
+                            # text.
+                            if chunk_and_embed:
+                                _delete_chunks(stale_chunk_ids, session)
+                            document_ids.extend(result.get("document_ids", []))
+                        elif full_pipeline:
+                            # Brand-new document, but the caller wants
+                            # summary/chunk/embed done here rather than by a
+                            # separate summarize-all/chunk-and-embed-all pass.
+                            # No existing Document, so no stale chunks to clean up.
+                            result = ingest(
+                                file_path,
+                                source_id=raw_doc.source_id,
+                                doc_id=resolved_doc_id,
+                                uri=raw_doc.uri,
+                                meta=dict(raw_doc.meta or {}),
+                                parser_name=parser_name,
+                                extract_images=extract_images,
+                                describe_images=describe_images,
+                                copy_to_kb=False,
+                                generate_summary=generate_summary,
+                                chunk_and_embed=chunk_and_embed,
+                                create_summary_chunks=generate_summary,
+                                session=session,
+                            )
+                            document_ids.extend(result.get("document_ids", []))
+                        else:
+                            result = add_document(
+                                file_path,
+                                source_id=raw_doc.source_id,
+                                doc_id=resolved_doc_id,
+                                meta=raw_doc.meta,
+                                parser_name=parser_name,
+                                extract_images=extract_images,
+                                describe_images=describe_images,
+                                force_reparse=force_reparse,
+                                copy_to_kb=False,
+                                session=session,
+                            )
+                            document_ids.extend(result["document_ids"])
+                        try:
+                            savepoint.commit()
+                        except sa_exc.ResourceClosedError:
+                            # ingest()'s chunk/embed path calls session.commit()
+                            # internally regardless of whether it owns the
+                            # session (see e.g. embedding.py, chunking.py) —
+                            # that's a *full* commit, which ends our SAVEPOINT
+                            # as a side effect. We only reach this line after
+                            # the try body above returned normally (no
+                            # exception), so the work already succeeded and
+                            # was already committed; there's nothing left to
+                            # commit, and it isn't an error.
+                            pass
+                    except Exception:
+                        # If the failure already invalidated the session (e.g.
+                        # something inside add_document()/ingest() called a
+                        # plain session.rollback() of its own before this
+                        # propagated), the savepoint may already be closed —
+                        # rolling it back then raises its own "This
+                        # transaction is closed" error that would otherwise
+                        # replace and hide the real one below.
+                        try:
+                            savepoint.rollback()
+                        except Exception:
+                            pass
+                        raise
 
                     parsed += 1
-                    logger.debug(f"Successfully parsed raw document {raw_doc.id}")
+                    logger.debug(f"Successfully parsed raw document {raw_doc_id}")
 
                 except FileNotFoundError as e:
                     # For marker-preloaded, this means Marker output doesn't exist
                     # Skip this document and don't retry
                     skipped += 1
-                    logger.debug(f"Skipping raw document {raw_doc.id}: {e}")
+                    logger.debug(f"Skipping raw document {raw_doc_id}: {e}")
                     continue
                 except Exception as e:
                     errors += 1
-                    logger.error(f"Error parsing raw document {raw_doc.id}: {e}", exc_info=True)
+                    logger.error(f"Error parsing raw document {raw_doc_id}: {e}", exc_info=True)
                     continue
             # Commit here (via the `with` block exiting) — releases the FOR
             # UPDATE locks only after this whole batch is parsed and all

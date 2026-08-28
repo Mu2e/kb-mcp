@@ -264,6 +264,9 @@ def cmd_parse_all(args):
             print(f"Restricted to doc_id(s): {', '.join(doc_ids)}")
         if empty_only:
             print("Restricted to documents with empty text")
+        full_pipeline = getattr(args, 'full_pipeline', False)
+        if full_pipeline:
+            print("Full pipeline enabled (new documents also get summary/chunk/embed here)")
 
         result = parse_all(
             source_id=args.source_id,
@@ -279,6 +282,7 @@ def cmd_parse_all(args):
             dry_run=dry_run,
             generate_summary=not getattr(args, 'no_summary', False),
             chunk_and_embed=not getattr(args, 'no_embed', False),
+            full_pipeline=full_pipeline,
         )
 
         if result.get("dry_run"):
@@ -1374,12 +1378,21 @@ def setup_commands(subparsers):
     parse_all_parser.add_argument(
         "--no-summary",
         action="store_true",
-        help="Skip summary generation (only affects --force-reparse / --from-stored)"
+        help="Skip summary generation (only affects --force-reparse / --from-stored / --full-pipeline)"
     )
     parse_all_parser.add_argument(
         "--no-embed",
         action="store_true",
-        help="Skip chunking and embedding (only affects --force-reparse / --from-stored)"
+        help="Skip chunking and embedding (only affects --force-reparse / --from-stored / --full-pipeline)"
+    )
+    parse_all_parser.add_argument(
+        "--full-pipeline",
+        action="store_true",
+        help="Also run summary/chunk/embed on brand-new documents in this same pass (via ingest()), "
+             "instead of leaving that to separate summarize-all/chunk-and-embed-all runs. Useful when "
+             "running multiple parse-all workers already, and describe-images makes each document slow "
+             "enough that running summarize-all/chunk-and-embed-all as separate concurrent processes "
+             "would just contend with these workers over the same document/chunk rows."
     )
     parse_all_parser.add_argument(
         "--batch-size",
