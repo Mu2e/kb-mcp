@@ -5,6 +5,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from .text_utils import clean_text
 from .utils import detect_mime_type, get_parser
 
 
@@ -561,11 +562,17 @@ def parse(
             parser = get_parser(file_path, doc_type=mime_type)
             
             
-        # Extract text and images (if enabled)
-        if hasattr(parser, 'extract_text_and_images_dict') and (create_additional_docs or generate_llm_descriptions):
-            # Parser supports image extraction (e.g., PDF)
-            # Extract images if we need them for either additional docs or descriptions
+        # Extract text using the real doc_data whenever the richer hook is
+        # available, regardless of create_additional_docs/generate_llm_descriptions.
+        # Tables are always emitted below via parser.table_dicts (no
+        # extract_images gate), and DoclingParser builds them from this same
+        # parent_data argument — passing {} here (as the plain get_text()
+        # path used to) left every table with source_id="local", which isn't
+        # a registered Source and made add_document() fail outright for any
+        # document containing one.
+        if hasattr(parser, 'extract_text_and_images_dict'):
             text, image_dicts = parser.extract_text_and_images_dict(doc_data)
+            text = clean_text(text)
         else:
             # Simple text extraction
             text = parser.get_text()
