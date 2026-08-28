@@ -1,1 +1,0 @@
-scripts/setup_mu2e_v2.sh

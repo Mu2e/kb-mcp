@@ -17,6 +17,9 @@ dist/
 build/
 .venv
 
+# byproduct of a stray `uv sync` — setup installs with `uv pip install -e`
+uv.lock
+
 # IDE
 .vscode/
 .idea/
