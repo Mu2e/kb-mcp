@@ -91,7 +91,7 @@ def setup_eval_routes(app, session_manager: WebSessionManager, require_auth_html
     async def web_eval_overview(request: Request):
         """Eval overview page showing list of EvalGenerations and EvalRuns."""
         # Check authentication first
-        session_data, redirect = await require_auth_html(request, session_manager)
+        session_data, redirect = await require_auth_html(request, session_manager, require_admin=True)
         if redirect:
             return redirect
         
@@ -246,7 +246,7 @@ def setup_eval_routes(app, session_manager: WebSessionManager, require_auth_html
     async def web_eval_generation(request: Request):
         """Eval generation detail page showing questions list."""
         # Check authentication first
-        session_data, redirect = await require_auth_html(request, session_manager)
+        session_data, redirect = await require_auth_html(request, session_manager, require_admin=True)
         if redirect:
             return redirect
         
@@ -469,7 +469,7 @@ def setup_eval_routes(app, session_manager: WebSessionManager, require_auth_html
     async def web_eval_question(request: Request):
         """Eval question detail page showing question and audits."""
         # Check authentication first
-        session_data, redirect = await require_auth_html(request, session_manager)
+        session_data, redirect = await require_auth_html(request, session_manager, require_admin=True)
         if redirect:
             return redirect
         
@@ -763,7 +763,7 @@ def setup_eval_routes(app, session_manager: WebSessionManager, require_auth_html
     async def web_eval_run(request: Request):
         """Eval run detail page showing run details, summary stats, and results."""
         # Check authentication first
-        session_data, redirect = await require_auth_html(request, session_manager)
+        session_data, redirect = await require_auth_html(request, session_manager, require_admin=True)
         if redirect:
             return redirect
         
@@ -1097,7 +1097,7 @@ def setup_eval_routes(app, session_manager: WebSessionManager, require_auth_html
     async def web_eval_result(request: Request):
         """Eval result detail page showing result details, question link, and retrieved documents."""
         # Check authentication first
-        session_data, redirect = await require_auth_html(request, session_manager)
+        session_data, redirect = await require_auth_html(request, session_manager, require_admin=True)
         if redirect:
             return redirect
         

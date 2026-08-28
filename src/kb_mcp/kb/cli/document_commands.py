@@ -7,7 +7,7 @@ from pathlib import Path
 
 from .. import add_source, get
 from ..tools import ingest
-from ..db_models import Document, Source
+from ..db_models import Source
 from ..documents import delete_raw_document
 from ..database import get_db_session, init_db
 

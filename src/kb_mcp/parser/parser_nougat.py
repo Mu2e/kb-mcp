@@ -14,22 +14,30 @@ _PROCESSOR_CACHE: Optional[Any] = None
 
 
 def _get_model_and_processor() -> Tuple[Any, Any]:
-    """Initialize and return the Nougat model and processor (cached)."""
+    """Initialize and return the Nougat model and processor (cached).
+
+    Raises:
+        ImportError: transformers or torch is not installed.
+        RuntimeError: the model or processor could not be loaded.
+    """
     global _MODEL_CACHE, _PROCESSOR_CACHE
     if _MODEL_CACHE is not None and _PROCESSOR_CACHE is not None:
         return _MODEL_CACHE, _PROCESSOR_CACHE
 
     try:
         from transformers import AutoModelForImageTextToText, NougatProcessor
-    except ImportError:
-        logger.error("transformers not installed. Install with: pip install transformers")
-        return None, None
+    except ImportError as e:
+        # Raise rather than degrade: returning None here used to surface as an
+        # empty parse, which the ingest pipeline stored as a zero-length
+        # document and reported as a successful import.
+        raise ImportError(
+            "transformers is not installed. Install with: pip install transformers"
+        ) from e
 
     try:
         import torch
-    except ImportError:
-        logger.error("torch not installed.")
-        return None, None
+    except ImportError as e:
+        raise ImportError("torch is not installed.") from e
 
     model_id = "facebook/nougat-base"
     logger.info(f"Initializing Nougat model {model_id} (this may take a while)...")
@@ -49,8 +57,7 @@ def _get_model_and_processor() -> Tuple[Any, Any]:
         return _MODEL_CACHE, _PROCESSOR_CACHE
 
     except Exception as e:
-        logger.error(f"Failed to initialize Nougat model: {e}")
-        return None, None
+        raise RuntimeError(f"Failed to initialize Nougat model: {e}") from e
 
 
 class NougatParser(BaseParser):
@@ -79,17 +86,16 @@ class NougatParser(BaseParser):
             Tuple of (markdown_text, []) — Nougat does not extract images
         """
         model, processor = _get_model_and_processor()
-        if model is None or processor is None:
-            return "", []
 
         try:
             import fitz  # pymupdf
             import torch
             from PIL import Image
             import io
-        except ImportError:
-            logger.error("pymupdf not installed. Run: source scripts/nersc_setup_nougat.sh")
-            return "", []
+        except ImportError as e:
+            raise ImportError(
+                "pymupdf not installed. Run: source scripts/nersc_setup_nougat.sh"
+            ) from e
 
         try:
             doc = fitz.open(str(self.file_path))
@@ -101,12 +107,10 @@ class NougatParser(BaseParser):
                 images.append(img)
             doc.close()
         except Exception as e:
-            logger.error(f"Failed to rasterize PDF {self.file_path}: {e}")
-            return "", []
+            raise RuntimeError(f"Failed to rasterize PDF {self.file_path}: {e}") from e
 
         if not images:
-            logger.warning(f"No pages extracted from {self.file_path}")
-            return "", []
+            raise RuntimeError(f"No pages extracted from {self.file_path}")
 
         logger.info(f"Processing {len(images)} page(s) with Nougat: {self.file_path}")
 
@@ -144,7 +148,7 @@ class NougatParser(BaseParser):
             if page_texts:
                 logger.warning("Returning partial results from pages processed before error")
             else:
-                return "", []
+                raise
 
         text = "\n\n".join(page_texts)
         return text, []

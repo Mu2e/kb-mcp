@@ -38,6 +38,33 @@ class BaseEmbedder(ABC):
         """Get maximum input tokens for the model."""
         pass
 
+    @property
+    def query_prefix(self) -> str:
+        """Instruction to prepend to *queries* only, or "" for none.
+
+        Some retrieval models are trained asymmetrically: the query is
+        expected to carry a short instruction while the passage is
+        embedded bare. Prefixing both sides would cancel the benefit — a
+        constant prepended to every stored chunk carries no signal — so
+        this is applied at query time and never at indexing time.
+
+        Symmetric models (MiniLM, mpnet, the OpenAI embeddings) return ""
+        and are embedded identically on both sides, which is why this
+        lives on the embedder rather than at the search call site: the
+        right answer depends on which model is loaded, and both may be
+        in play at once while comparing embedding tables.
+        """
+        return ""
+
+    def embed_query(self, query: str, **kwargs) -> List[float]:
+        """Embed a search query, applying `query_prefix` if the model wants one.
+
+        Use this for anything being matched *against* the index; use the
+        embedder itself (`__call__` / `embed_chunks`) for the content
+        going *into* it.
+        """
+        return self.generate_embeddings([self.query_prefix + query], **kwargs)[0]
+
     @abstractmethod
     def generate_embeddings(
         self,

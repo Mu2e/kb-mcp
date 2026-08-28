@@ -31,12 +31,16 @@ Base = declarative_base()
 
 class JSONB(TypeDecorator):
     """JSONB type for PostgreSQL, JSON for SQLite.
-    
+
     This type uses PostgreSQL's JSONB type for better performance and indexing,
     but falls back to JSON for SQLite compatibility.
     """
     impl = JSON
     cache_ok = True
+    # Without this, indexing (meta[field]) returns TypeDecorator's default
+    # comparator, which lacks .astext/.has_key/etc. that postgresql.JSONB provides.
+    comparator_factory = postgresql.JSONB.Comparator
+    astext_type = Text()
 
     def load_dialect_impl(self, dialect):
         if dialect.name == 'postgresql':
@@ -105,7 +109,6 @@ class RawDocument(Base):
         String(36),
         primary_key=True,
         default=lambda: str(uuid.uuid4()),
-        index=True,
     )
     source_id = Column(
         String(256),
@@ -247,14 +250,14 @@ class Document(Base):
         summary (str): LLM-generated detailed summary for retrieval and display.
         gist (str): LLM-generated high-level concepts/themes for embedding context.
         content_hash (str): Hash of the document content for deduplication.
-        parser_output (dict): Raw structured output of whichever parser
-            produced this document (parser-agnostic). The Docling path stores
-            the DoclingDocument JSON — self-identifying via its embedded
-            `schema_name` field — with picture bytes stripped: the structural
-            information (texts, tables, pictures-without-bytes, pages, bboxes,
-            references) that lets us re-derive chunks/tables/figures without
-            re-parsing the source file. Null when a parser has no structured
-            output to persist.
+
+    Note:
+        The structured parser output (e.g. DoclingDocument JSON) that used to
+        live on this table as `parser_output` now lives in the separate
+        `document_parser_outputs` table, one row per document, to keep this
+        table lean — `Document` is queried bare (`session.query(Document)`)
+        in many places (statistics, dedup, listing) that never need the raw
+        parse tree. See `DocumentParserOutput` / `document.parser_output_ref`.
     """
 
     __tablename__ = "documents"
@@ -264,7 +267,6 @@ class Document(Base):
         String(36),
         primary_key=True,
         default=lambda: str(uuid.uuid4()),
-        index=True,
     )
 
     # Foreign key to source table
@@ -326,7 +328,9 @@ class Document(Base):
         nullable=False,
         default=func.now(),
         server_default=func.now(),
-        index=True,
+        # No index=True: idx_documents_insert_time in __table_args__ already
+        # covers this column. Declaring both created two identical indexes
+        # (ix_documents_insert_time was unused) and doubled write cost.
     )
     # Parent document reference (for hierarchical documents)
     parent_id = Column(
@@ -348,21 +352,34 @@ class Document(Base):
     # Content hash for deduplication
     # Stored here for convenience - can check duplicates quickly
     # Alternative would be separate deduplication table, but this is simpler for now
-    content_hash = Column(String(64), nullable=True, index=True)
-
-    # Raw structured output of the parser that produced this document.
-    # Parser-agnostic on purpose so alternative parsers can persist their
-    # native representation side by side; the Docling path stores the
-    # DoclingDocument JSON (self-identifying via `schema_name`) — the
-    # source-of-truth representation that lets us re-derive chunks / tables /
-    # figures without re-parsing the original file.
-    parser_output = Column(JSONB, nullable=True)
+    # No index=True: idx_documents_content_hash in __table_args__ already
+    # covers this column (see insert_time above for the same rationale).
+    content_hash = Column(String(64), nullable=True)
 
     # Relationships
     source_ref = relationship("Source", back_populates="documents")
     raw_document = relationship("RawDocument", back_populates="documents")
     parser = relationship("Parser", back_populates="documents")
     parent = relationship("Document", remote_side=[id], backref="children")
+    parser_output_ref = relationship(
+        "DocumentParserOutput",
+        back_populates="document",
+        uselist=False,
+        cascade="all, delete-orphan",
+    )
+
+    @property
+    def parser_output(self):
+        """Structured parser output (e.g. DoclingDocument JSON), or None.
+
+        Convenience accessor over the `document_parser_outputs` table so
+        existing call sites that read `document.parser_output` keep working.
+        Triggers a lazy-load / join if `parser_output_ref` isn't already
+        loaded — callers on a hot path that don't need the payload should
+        query `DocumentParserOutput` explicitly instead of touching this.
+        """
+        ref = self.parser_output_ref
+        return ref.output if ref is not None else None
 
     # Indexes for common queries
     # index=True on columns creates single-column indexes
@@ -591,6 +608,7 @@ class Document(Base):
                 include_summary=include_summary,
                 include_metadata=include_metadata,
                 model=model,
+                document_id=self.id,
             )
 
             # If not attached to session, merge this document
@@ -734,7 +752,7 @@ class Document(Base):
             title = meta.pop("title", None)  # Remove from meta to avoid duplication
 
         # Extract fields, using defaults where appropriate
-        return cls(
+        doc = cls(
             id=data.get("id"),  # Allow explicit ID, otherwise will be generated
             source_id=data["source_id"],
             doc_id=data.get("doc_id"),
@@ -745,11 +763,16 @@ class Document(Base):
             binary=data.get("binary"),
             title=title,  # Populate from data["title"] or meta["title"] (removed from meta)
             meta=meta,
-            parser_output=data.get("parser_output"),
             creating_time=data.get("creating_time"),
             update_time=data.get("update_time"),
             parent_id=data.get("parent_id")
         )
+
+        parser_output = data.get("parser_output")
+        if parser_output is not None:
+            doc.parser_output_ref = DocumentParserOutput(output=parser_output)
+
+        return doc
 
     def to_dict(self) -> dict:
         """Convert Document instance to dictionary.
@@ -816,7 +839,7 @@ class Document(Base):
             exists = Document.from_raw_exists(raw_doc.id)
 
             # Check if document parsed with specific parser exists
-            exists = Document.from_raw_exists(raw_doc.id, parser_id="kb-mcp")
+            exists = Document.from_raw_exists(raw_doc.id, parser_id="docling")
             ```
         """
         from .database import get_db_session
@@ -924,6 +947,49 @@ class Document(Base):
         return cls.from_dict(doc_data)
 
 
+class DocumentParserOutput(Base):
+    """Table 'document_parser_outputs' — structured parser output, one row per document.
+
+    Split out from `documents.parser_output` so the (large, per-document)
+    structured parse tree doesn't get pulled along on every plain
+    `session.query(Document)` — used widely for listing, stats, and dedup,
+    none of which need the raw payload. Which parser produced the output is
+    available via `document.parser_id` (FK to `parsers.name`); this table
+    doesn't duplicate it.
+
+    Attributes:
+        document_id (str): Primary key and FK to documents.id (one-to-one).
+        output (dict): Raw structured output of whichever parser produced
+            the document (parser-agnostic). The Docling path stores the
+            DoclingDocument JSON — self-identifying via its embedded
+            `schema_name` field — with picture bytes stripped: the
+            structural information (texts, tables, pictures-without-bytes,
+            pages, bboxes, references) that lets us re-derive chunks/tables/
+            figures without re-parsing the source file.
+        created_time (datetime): Timestamp when this row was inserted.
+    """
+
+    __tablename__ = "document_parser_outputs"
+
+    document_id = Column(
+        String(36),
+        ForeignKey("documents.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    output = Column(JSONB, nullable=False)
+    created_time = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=func.now(),
+        server_default=func.now(),
+    )
+
+    document = relationship("Document", back_populates="parser_output_ref")
+
+    def __repr__(self) -> str:
+        return f"<DocumentParserOutput(document_id={self.document_id})>"
+
+
 class PrivacyFilter(Base):
     """Table 'privacy_filters' storing LLM-based privacy classification results.
 
@@ -953,7 +1019,6 @@ class PrivacyFilter(Base):
         String(36),
         primary_key=True,
         default=lambda: str(uuid.uuid4()),
-        index=True,
     )
     raw_document_id = Column(
         String(36),
@@ -985,6 +1050,81 @@ class PrivacyFilter(Base):
         return f"<PrivacyFilter(id={self.id}, raw_document_id={self.raw_document_id}, label={self.label})>"
 
 
+class LLMUsage(Base):
+    """Table 'llm_usage' recording token consumption of every LLM call.
+
+    One row per API request made while building the knowledge base —
+    table summaries, image descriptions, document summaries, graph
+    extraction/matching, privacy classification, and embeddings. This is the
+    only record of what a build cost: the provider's `usage` object is
+    otherwise discarded once the response content is read.
+
+    Rows are written best-effort (see `kb_mcp.llm.usage.record_llm_usage`);
+    accounting never blocks an import. A stage that reports zero tokens is
+    therefore ambiguous between "never ran" and "endpoint omits usage" —
+    `warn_if_unreported` logs the latter case once per model.
+
+    Attributes:
+        id (str): Primary key (UUID).
+        stage (str): Pipeline step, e.g. "image_description" (see STAGE_* in
+            kb_mcp.llm.usage).
+        model (str): Model the call was routed to.
+        document_id (str): FK → documents.id, when the call is attributable.
+        raw_document_id (str): FK → documents_raw.id, when known.
+        prompt_tokens (int): Input tokens billed.
+        completion_tokens (int): Output tokens billed (0 for embeddings).
+        total_tokens (int): Provider total, or input+output when not reported.
+        main_context_tokens (int): Input tokens excluding prompt-cache hits.
+        cached_prompt_tokens (int): Input tokens served from the prompt cache.
+        created_time (datetime): When the call was recorded.
+        meta (dict): Extra context (chunk counts, image identifier, etc.).
+    """
+
+    __tablename__ = "llm_usage"
+
+    id = Column(
+        String(36),
+        primary_key=True,
+        default=lambda: str(uuid.uuid4()),
+    )
+    stage = Column(String(64), nullable=False, index=True)
+    model = Column(String(256), nullable=True, index=True)
+    document_id = Column(
+        String(36),
+        ForeignKey("documents.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    raw_document_id = Column(
+        String(36),
+        ForeignKey("documents_raw.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    prompt_tokens = Column(Integer, nullable=False, default=0)
+    completion_tokens = Column(Integer, nullable=False, default=0)
+    total_tokens = Column(Integer, nullable=False, default=0)
+    main_context_tokens = Column(Integer, nullable=False, default=0)
+    cached_prompt_tokens = Column(Integer, nullable=False, default=0)
+    created_time = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=func.now(),
+        server_default=func.now(),
+        index=True,
+    )
+    meta = Column(JSONB, nullable=True, default=dict)
+
+    document = relationship("Document")
+    raw_document = relationship("RawDocument")
+
+    def __repr__(self) -> str:
+        return (
+            f"<LLMUsage(stage={self.stage}, model={self.model}, "
+            f"in={self.prompt_tokens}, out={self.completion_tokens})>"
+        )
+
+
 class ParserComparison(Base):
     """Table 'parser_comparisons' storing LLM-generated comparisons of parser outputs.
 
@@ -1012,7 +1152,6 @@ class ParserComparison(Base):
         String(36),
         primary_key=True,
         default=lambda: str(uuid.uuid4()),
-        index=True,
     )
     raw_document_id = Column(
         String(36),
@@ -1066,7 +1205,6 @@ class ParserCategories(Base):
         String(36),
         primary_key=True,
         default=lambda: str(uuid.uuid4()),
-        index=True,
     )
     source_id = Column(
         String(256),

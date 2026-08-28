@@ -15,25 +15,31 @@ logger = logging.getLogger(__name__)
 
 
 def _get_client() -> Any:
-    """Create and return an Azure Document Intelligence client."""
+    """Create and return an Azure Document Intelligence client.
+
+    Raises:
+        ImportError: azure-ai-documentintelligence is not installed.
+        RuntimeError: AZURE_DI_ENDPOINT / AZURE_DI_KEY are not set.
+    """
     try:
         from azure.core.credentials import AzureKeyCredential
         from azure.ai.documentintelligence import DocumentIntelligenceClient
-    except ImportError:
-        logger.error(
-            "azure-ai-documentintelligence not installed. "
-            "Install with: pip install azure-ai-documentintelligence"
-        )
-        return None
+    except ImportError as e:
+        # Raise rather than degrade: returning None here used to surface as an
+        # empty parse, which the ingest pipeline stored as a zero-length
+        # document and reported as a successful import.
+        raise ImportError(
+            "azure-ai-documentintelligence is not installed. Install the extra: "
+            'pip install -e ".[azure]"'
+        ) from e
 
     endpoint = os.environ.get("AZURE_DI_ENDPOINT")
     key = os.environ.get("AZURE_DI_KEY")
 
     if not endpoint or not key:
-        logger.error(
+        raise RuntimeError(
             "AZURE_DI_ENDPOINT and AZURE_DI_KEY environment variables must be set."
         )
-        return None
 
     return DocumentIntelligenceClient(endpoint=endpoint, credential=AzureKeyCredential(key))
 
@@ -65,16 +71,13 @@ class AzureParser(BaseParser):
                 AnalyzeOutputOption,
                 DocumentContentFormat,
             )
-        except ImportError:
-            logger.error(
-                "azure-ai-documentintelligence not installed. "
-                "Install with: pip install azure-ai-documentintelligence"
-            )
-            return "", []
+        except ImportError as e:
+            raise ImportError(
+                "azure-ai-documentintelligence is not installed. Install the extra: "
+                'pip install -e ".[azure]"'
+            ) from e
 
         client = _get_client()
-        if client is None:
-            return "", []
 
         try:
             with open(self.file_path, "rb") as f:
@@ -134,6 +137,7 @@ class AzureParser(BaseParser):
                     "source_type": parent_data.get("source_type"),
                     "binary": img_bytes,
                     "parent_id": parent_data.get("id"),
+                    "uri": parent_data.get("uri"),
                     "meta": {
                         "image_name": image_name,
                         "image_number": image_number,
@@ -162,5 +166,7 @@ class AzureParser(BaseParser):
             return text, image_dicts
 
         except Exception as e:
+            # Same reasoning as the import failure above: returning empty text
+            # here would be recorded as a successfully parsed, empty document.
             logger.error(f"Error parsing with Azure Document Intelligence: {e}", exc_info=True)
-            return "", []
+            raise

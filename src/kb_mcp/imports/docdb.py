@@ -6,18 +6,69 @@ import logging
 import os
 import re
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 from urllib.parse import urljoin, quote
+from zoneinfo import ZoneInfo
 
 import requests
 from bs4 import BeautifulSoup
+from sqlalchemy import or_
 
 from .base import Source
 from ..kb import add_document
 
 logger = logging.getLogger(__name__)
+
+# DocDB renders its timestamps in Fermilab local time with no zone marker,
+# e.g. "10 Apr 2026, 16:28".
+_DOCDB_TZ = ZoneInfo("America/Chicago")
+_DOCDB_TIME_FORMAT = "%d %b %Y, %H:%M"
+
+
+def parse_docdb_datetime(value: Optional[str]) -> Optional[datetime]:
+    """Convert a DocDB timestamp string to an aware UTC datetime.
+
+    DocDB writes "Document Created" / "Contents Revised" as Fermilab local
+    time without a zone (e.g. "10 Apr 2026, 16:28"), so the string is
+    anchored to America/Chicago and converted to UTC for storage.
+
+    Returns None for missing or unparseable values — the timestamps are
+    nice-to-have metadata and must never fail an import.
+    """
+    if not value:
+        return None
+    try:
+        naive = datetime.strptime(value.strip(), _DOCDB_TIME_FORMAT)
+    except ValueError:
+        logger.warning(f"Could not parse DocDB timestamp {value!r}")
+        return None
+    return naive.replace(tzinfo=_DOCDB_TZ).astimezone(timezone.utc)
+
+
+def _latest_stored_revision(
+    rows: List[Any],
+    keys: tuple = ("revised_content", "created"),
+) -> Optional[datetime]:
+    """Newest revision timestamp already stored for a document.
+
+    `keys` is a preference order, first hit per row wins: callers comparing
+    against the listing pass the metadata stamp first, since that is what the
+    listing date tracks, while callers deciding whether to re-download care
+    about the contents stamp. Falls back to the creation stamp for rows that
+    predate either being captured. Returns None when nothing is stored, which
+    callers read as "unknown, go ask DocDB".
+    """
+    stamps = []
+    for row in rows:
+        meta = row.meta or {}
+        for key in keys:
+            stamp = parse_docdb_datetime(meta.get(key))
+            if stamp is not None:
+                stamps.append(stamp)
+                break
+    return max(stamps) if stamps else None
 
 
 class DocDBSource(Source):
@@ -36,6 +87,7 @@ class DocDBSource(Source):
         timeout: float = 30.0,
         skip_existing: bool = False,
         force_reparse: bool = False,
+        skip_parse: bool = False,
         login: bool = True,
     ):
         """Initialize the DocDB source.
@@ -46,6 +98,11 @@ class DocDBSource(Source):
             delay: Delay between requests in seconds.
             timeout: Request timeout in seconds.
             skip_existing: If True, skip documents already in the database.
+            skip_parse: If True, only download files and register RawDocument
+                rows — no Docling/parsing, no chunking, no embedding. Lets a
+                large backfill be staged (network- and rate-limit-bound)
+                separately from parsing it (CPU-bound); parse the staged
+                rows later with `kb tools parse-all`.
             login: If True, authenticate on construction using env vars.
         """
         super().__init__(
@@ -60,6 +117,7 @@ class DocDBSource(Source):
         self.base_url = base_url.rstrip("/") + "/"
         self.skip_existing = skip_existing
         self.force_reparse = force_reparse
+        self.skip_parse = skip_parse
         self.session: Optional[requests.Session] = None
 
         if login:
@@ -156,6 +214,19 @@ class DocDBSource(Source):
             raise RuntimeError(
                 f"Session expired or login required. "
                 f"Set MU2E_DOCDB_USERNAME / MU2E_DOCDB_PASSWORD and retry."
+            )
+        # Ping SSO's "speed bump" page for a concurrent sign-on under the
+        # same identity (e.g. an active browser tab or another script
+        # logging in at the same time). It 200s with an HTML page that has
+        # none of DocDB's expected content, so _parse_list()/get_meta()
+        # would otherwise silently see "no documents" / "no metadata"
+        # instead of a clear auth failure.
+        if title and title == "Multiple Sign-On Delay":
+            raise RuntimeError(
+                "DocDB SSO returned a 'Multiple Sign-On Delay' page — "
+                "another sign-on for this identity is in progress "
+                "(e.g. a browser tab or another concurrent session). "
+                "Close it and retry."
             )
 
     def _get_html(self, doc_id: int) -> str:
@@ -422,20 +493,43 @@ class DocDBSource(Source):
         """
         doc_id_str = str(item["id"])
 
-        # Check for existing document before fetching — match any file from this doc
-        if self.skip_existing:
+        # Rows already held for this document, across every doc_id convention
+        # the table has carried: bare "<id>" and "<id>/<stem>" from the original
+        # importer, "<id>-<stem>" from this one. Matching on the number alone
+        # would let a lookup for 575 collide with 57505, so each alternative
+        # pins what follows the number.
+        existing_rows: List[Any] = []
+        if self.skip_existing and not self.force_reparse:
             from ..kb.db_models import RawDocument
-            existing = session.query(RawDocument).filter(
+            existing_rows = session.query(RawDocument).filter(
                 RawDocument.source_id == self.source_id,
-                RawDocument.doc_id.like(f"{doc_id_str}-%"),
-            ).first()
-            if existing:
-                logger.info(f"Skipping doc {doc_id_str} — already in database")
+                or_(
+                    RawDocument.doc_id == doc_id_str,
+                    RawDocument.doc_id.like(f"{doc_id_str}-%"),
+                    RawDocument.doc_id.like(f"{doc_id_str}/%"),
+                ),
+            ).all()
+
+        stored_revision = _latest_stored_revision(existing_rows)
+        stored_listing_stamp = _latest_stored_revision(
+            existing_rows, ("revised_meta", "revised_content", "created")
+        )
+
+        # First pass, free: the listing already carries a last-updated date, so
+        # a document that has not moved since we stored it costs no requests at
+        # all. Rows with no stored revision fall through to ask DocDB directly.
+        if existing_rows and stored_listing_stamp is not None:
+            listed = item.get("last_updated")
+            if isinstance(listed, datetime) and listed.date() <= stored_listing_stamp.date():
+                logger.info(
+                    f"Skipping doc {doc_id_str} — unchanged since "
+                    f"{stored_listing_stamp:%Y-%m-%d}"
+                )
                 return {
                     "document_ids": [],
                     "num_documents": 0,
                     "parsed": False,
-                    "raw_document_id": existing.id,
+                    "raw_document_id": existing_rows[0].id,
                     "skipped": True,
                     "error": None,
                 }
@@ -469,11 +563,41 @@ class DocDBSource(Source):
             "version": meta.get("version"),
             "created": meta.get("created"),
             "revised_content": meta.get("revised_content"),
+            "revised_meta": meta.get("revised_meta"),
         }
         if meta.get("events"):
             kb_meta["events"] = meta["events"]
 
+        # DocDB's own timestamps, promoted to the Document columns so search
+        # and the web UI can filter on when the document was written rather
+        # than when we happened to ingest it. update_time tracks "Contents
+        # Revised" only: "Metadata Revised" moves when someone retags a
+        # topic or author, which does not change anything we parsed.
+        creating_time = parse_docdb_datetime(meta.get("created"))
+        update_time = parse_docdb_datetime(meta.get("revised_content"))
+
+        # Second pass, now against DocDB's own content-revision stamp. The
+        # listing date moves for metadata edits too — retagging a topic is
+        # enough — so a document can look newer there while its files are
+        # untouched. One metadata request has already been spent; stopping
+        # here still saves every file download.
+        if existing_rows and stored_revision is not None and update_time is not None:
+            if update_time <= stored_revision:
+                logger.info(
+                    f"Skipping doc {doc_id_str} — contents unrevised since "
+                    f"{stored_revision:%Y-%m-%d}"
+                )
+                return {
+                    "document_ids": [],
+                    "num_documents": 0,
+                    "parsed": False,
+                    "raw_document_id": existing_rows[0].id,
+                    "skipped": True,
+                    "error": None,
+                }
+
         document_ids: List[str] = []
+        raw_document_ids: List[str] = []
 
         for file_info in meta["files"]:
             filename = file_info.get("filename") or file_info.get("text", "unknown")
@@ -519,18 +643,27 @@ class DocDBSource(Source):
                 doc_id=file_doc_id,
                 uri=file_link,          # direct RetrieveFile URL
                 meta=kb_meta,
+                creating_time=creating_time,
+                update_time=update_time,
                 copy_to_kb=True,
                 force_reparse=self.force_reparse,
+                skip_parse=self.skip_parse,
                 session=session,
             )
             if result.get("document_ids"):
                 document_ids.extend(result["document_ids"])
+            if result.get("raw_document_id"):
+                raw_document_ids.append(result["raw_document_id"])
 
             time.sleep(self.delay)
 
+        # skip_parse leaves document_ids empty by design (only RawDocument
+        # rows exist yet) — raw_document_ids is the success signal there.
+        success_ids = raw_document_ids if self.skip_parse else document_ids
         return {
             "document_ids": document_ids,
+            "raw_document_ids": raw_document_ids,
             "num_documents": len(document_ids),
             "parsed": len(document_ids) > 0,
-            "error": None if document_ids else f"No files successfully ingested for doc {doc_id_str}",
+            "error": None if success_ids else f"No files successfully ingested for doc {doc_id_str}",
         }

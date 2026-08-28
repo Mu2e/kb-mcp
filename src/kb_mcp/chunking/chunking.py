@@ -6,12 +6,24 @@ https://github.com/corrodis/mu2eDocChat/blob/main/mu2e/chunking.py
 """
 
 import logging
+import re
 from abc import ABC, abstractmethod
 from typing import Dict, List, Optional, Any
 
 import tiktoken
 
 logger = logging.getLogger(__name__)
+
+# Token-chunker defaults. Overridable per call via `chunk_config`, and
+# process-wide via CHUNK_SIZE / CHUNK_OVERLAP (see `config.get_embedding_config`).
+DEFAULT_CHUNK_SIZE = 1000
+
+# Overlap exists so a passage straddling a boundary survives intact in at
+# least one chunk. As a fraction it keeps that property at any chunk size —
+# ~100 tokens at 1000, ~25 at a 256-token window — and it bounds index
+# inflation at 1/(1-f), so 10% costs ~1.11x rather than the 1.25x that 20%
+# was costing.
+DEFAULT_CHUNK_OVERLAP_FRACTION = 0.1
 
 
 def get_chunk_strategy_suffix(
@@ -175,6 +187,13 @@ class TokensStrategy(ChunkStrategy):
     def _ensure_defaults(config: Dict[str, Any]) -> Dict[str, Any]:
         """Ensure default values are set in config.
 
+        The overlap defaults to a *fraction* of the chunk size rather than a
+        fixed token count. The chunker strides `chunk_size - chunk_overlap`,
+        so an absolute default silently degrades as the size shrinks: pairing
+        a leftover 200 with a window-sized 254 gives a stride of 54 and
+        duplicates the corpus ~4.7x, and an overlap at or above the size
+        never advances at all. Hence the clamp as well as the fraction.
+
         Args:
             config: Configuration dictionary
 
@@ -182,8 +201,32 @@ class TokensStrategy(ChunkStrategy):
             New config dictionary with defaults applied
         """
         result = config.copy()
-        result.setdefault("chunk_size", 1000)
-        result.setdefault("chunk_overlap", 200)
+        result.setdefault("chunk_size", DEFAULT_CHUNK_SIZE)
+        chunk_size = max(1, int(result["chunk_size"]))
+        result["chunk_size"] = chunk_size
+
+        overlap = result.get("chunk_overlap")
+        if overlap is None:
+            overlap = round(chunk_size * DEFAULT_CHUNK_OVERLAP_FRACTION)
+        overlap = max(0, int(overlap))
+
+        # Half the chunk size is the hard ceiling: above it a token appears in
+        # three or more chunks, and at `overlap >= chunk_size` the stride is
+        # zero and the loop never terminates. Clamping to `chunk_size - 1`
+        # would avoid the hang but still allow a stride of 1 — a config that
+        # quietly multiplies the index by the chunk size.
+        max_overlap = chunk_size // 2
+        if overlap > max_overlap:
+            logger.warning(
+                "chunk_overlap=%d is more than half of chunk_size=%d; "
+                "clamping to %d (stride must stay meaningful)",
+                overlap, chunk_size, max_overlap,
+            )
+            overlap = max_overlap
+
+        # Resolved to a concrete integer here, not left as a fraction, so the
+        # strategy name stays a literal ("tokens_1000_100").
+        result["chunk_overlap"] = overlap
         return result
 
     @staticmethod
@@ -191,7 +234,10 @@ class TokensStrategy(ChunkStrategy):
         """Get the strategy name for token-based chunking.
 
         Format: tokens_{chunk_size}_{chunk_overlap}[suffix]
-        Example: "tokens_1000_200" or "tokens_1000_200_no_gist"
+        Example: "tokens_1000_100" (the defaults) or "tokens_1000_100_no_gist"
+
+        Both numbers are the *resolved* values, so the name reflects the 10%
+        default overlap and any clamping rather than what the caller passed.
         """
         config = TokensStrategy._ensure_defaults(config)
         chunk_size = config["chunk_size"]
@@ -282,8 +328,11 @@ class TokensStrategy(ChunkStrategy):
 class SlideStrategy(ChunkStrategy):
     """Sliding window chunking strategy.
 
-    TODO: Implement sliding window strategy if needed.
-    For now, this uses token-based chunking.
+    Not implemented. This previously fell back to token-based chunking while
+    still tagging the resulting chunks "slide", which put rows in the database
+    that claim a strategy they were not produced by - silently corrupting any
+    comparison between chunking strategies. It now raises instead; callers who
+    want token chunks should ask for "tokens".
     """
 
     @staticmethod
@@ -304,17 +353,11 @@ class SlideStrategy(ChunkStrategy):
 
     @staticmethod
     def chunk(text: str, config: Dict[str, Any], encoding: Any) -> List[Dict[str, Any]]:
-        """Chunk text using sliding window strategy."""
-        chunk_strategy = SlideStrategy.get_strategy_name(config)
-
-        # For now, use token-based chunking but with slide strategy string
-        logger.info("Slide strategy not yet implemented, using token-based chunking")
-        # Temporarily use token-based chunking with default params
-        chunks = TokensStrategy.chunk(text, config, encoding)
-        # Override chunk_strategy in all chunks
-        for chunk in chunks:
-            chunk["chunk_strategy"] = chunk_strategy
-        return chunks
+        """Not implemented - see the class docstring."""
+        raise NotImplementedError(
+            "The 'slide' chunking strategy is not implemented. "
+            "Use 'tokens' for token-based chunking with overlap."
+        )
 
 
 class SummaryStrategy(ChunkStrategy):
@@ -357,6 +400,34 @@ class ImageStrategy(ChunkStrategy):
         """Create a single chunk from the image text/metadata."""
         chunk_strategy = ImageStrategy.get_strategy_name(config)
         return ChunkStrategy._create_single_chunk(text, chunk_strategy, encoding)
+
+
+# Strategy families whose stored name carries the embedding window it was
+# chunked for — `summary_256`, `summary_512`. Chunks in these families are
+# sized to the encoder's window, so the same name under two different windows
+# would describe two incompatible chunkings of the same document. The window
+# goes in the name so both can co-exist and be told apart.
+#
+# The window, not the content cap (254): it is stable, and it states which
+# encoders can read the chunk without truncating it.
+_WINDOW_SUFFIXED = re.compile(r"^(summary)_\d+$")
+
+
+def base_strategy(name: str) -> str:
+    """Strip a window suffix: 'summary_256' -> 'summary'.
+
+    Read-side consumers that ask *what kind* of chunk this is should compare
+    `base_strategy(chunk.chunk_strategy)` rather than the raw name, so they
+    keep matching both legacy rows (plain `summary`) and window-tagged ones.
+
+    Deliberately anchored on an explicit family list rather than "strip any
+    trailing _<digits>": that generic rule would turn `tokens_1000_200` into
+    `tokens_1000`.
+    """
+    if not name:
+        return name
+    m = _WINDOW_SUFFIXED.match(name)
+    return m.group(1) if m else name
 
 
 # Strategy registry - store classes, not instances (all methods are static)

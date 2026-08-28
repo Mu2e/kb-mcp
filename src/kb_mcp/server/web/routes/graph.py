@@ -19,7 +19,10 @@ def setup_graph_routes(app, session_manager: WebSessionManager):
         # Check authentication first
         session_data = await session_manager.get_session_data(request)
         if not session_data:
-            return RedirectResponse(url="/login?redirect=/web/graph")
+            # Public in public mode; otherwise a session is still required.
+            if not session_manager.public_mode:
+                return RedirectResponse(url="/login?redirect=/web/graph")
+            session_data = {}
 
         # Get username from authenticated session
         username = session_data.get("username")
@@ -267,7 +270,10 @@ def setup_graph_routes(app, session_manager: WebSessionManager):
         # Check authentication first
         session_data = await session_manager.get_session_data(request)
         if not session_data:
-            return RedirectResponse(url="/login?redirect=/web/graph")
+            # Public in public mode; otherwise a session is still required.
+            if not session_manager.public_mode:
+                return RedirectResponse(url="/login?redirect=/web/graph")
+            session_data = {}
 
         # Get username from authenticated session
         username = session_data.get("username")
@@ -487,7 +493,10 @@ def setup_graph_routes(app, session_manager: WebSessionManager):
         # Check authentication first
         session_data = await session_manager.get_session_data(request)
         if not session_data:
-            return RedirectResponse(url="/login?redirect=/web/graph")
+            # Public in public mode; otherwise a session is still required.
+            if not session_manager.public_mode:
+                return RedirectResponse(url="/login?redirect=/web/graph")
+            session_data = {}
 
         # Get username from authenticated session
         username = session_data.get("username")

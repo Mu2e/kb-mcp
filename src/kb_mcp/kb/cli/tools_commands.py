@@ -153,20 +153,120 @@ def cmd_logs_parsing(args):
             print(f"    Text Length: {log['text_length'] or 0} characters")
 
 
+def cmd_logs_tokens(args):
+    """Report LLM token usage recorded while building the knowledge base."""
+    from sqlalchemy import func as sa_func
+
+    from ..database import get_db_session
+    from ..db_models import LLMUsage
+
+    with get_db_session() as session:
+        query = session.query(
+            LLMUsage.stage,
+            LLMUsage.model,
+            sa_func.count(LLMUsage.id).label("calls"),
+            sa_func.sum(LLMUsage.prompt_tokens).label("input"),
+            sa_func.sum(LLMUsage.completion_tokens).label("output"),
+            sa_func.sum(LLMUsage.total_tokens).label("total"),
+            sa_func.sum(LLMUsage.cached_prompt_tokens).label("cached"),
+        )
+        if args.document_id:
+            query = query.filter(LLMUsage.document_id == args.document_id)
+        if args.stage:
+            query = query.filter(LLMUsage.stage == args.stage)
+        rows = query.group_by(LLMUsage.stage, LLMUsage.model).order_by(
+            sa_func.sum(LLMUsage.total_tokens).desc()
+        ).all()
+
+    if not rows:
+        scope = f" for document {args.document_id}" if args.document_id else ""
+        print(f"No token usage recorded{scope}.")
+        print(
+            "Usage is recorded per LLM call during parsing, summarization, "
+            "graph extraction, and embedding."
+        )
+        return
+
+    records = [
+        {
+            "stage": r.stage,
+            "model": r.model,
+            "calls": int(r.calls or 0),
+            "input_tokens": int(r.input or 0),
+            "output_tokens": int(r.output or 0),
+            "total_tokens": int(r.total or 0),
+            "cached_tokens": int(r.cached or 0),
+        }
+        for r in rows
+    ]
+
+    if args.json:
+        print(json.dumps(records, indent=2))
+        return
+
+    scope = f" for document {args.document_id}" if args.document_id else ""
+    print(f"LLM token usage{scope}:")
+    print("=" * 88)
+    print(f"{'Stage':<22}{'Model':<26}{'Calls':>8}{'Input':>12}{'Output':>10}{'Total':>12}")
+    print("-" * 88)
+    for rec in records:
+        model = (rec["model"] or "-")[:24]
+        print(
+            f"{rec['stage']:<22}{model:<26}{rec['calls']:>8}"
+            f"{rec['input_tokens']:>12,}{rec['output_tokens']:>10,}{rec['total_tokens']:>12,}"
+        )
+    print("-" * 88)
+    totals = {
+        key: sum(r[key] for r in records)
+        for key in ("calls", "input_tokens", "output_tokens", "total_tokens", "cached_tokens")
+    }
+    print(
+        f"{'TOTAL':<48}{totals['calls']:>8}"
+        f"{totals['input_tokens']:>12,}{totals['output_tokens']:>10,}{totals['total_tokens']:>12,}"
+    )
+    if totals["cached_tokens"]:
+        print(f"\n  ({totals['cached_tokens']:,} input tokens served from the prompt cache)")
+
+    # A stage that reports zero is ambiguous — it may simply be an endpoint
+    # that omits `usage`. Say so rather than letting it read as free.
+    silent = [r for r in records if r["total_tokens"] == 0]
+    if silent:
+        names = ", ".join(sorted({r["stage"] for r in silent}))
+        print(
+            f"\n  Note: {names} recorded calls but no tokens — that endpoint "
+            f"likely omits the 'usage' field, so these are undercounted."
+        )
+
+
 def cmd_parse_all(args):
-    """Parse all raw documents for a source_id that don't have processed documents yet."""
+    """Parse (or reprocess/rebuild) raw documents for a source_id, in parallel-safe batches."""
     try:
         from ..tools import parse_all
 
-        print(f"Parsing all raw documents for source_id: {args.source_id}")
-        if args.parser_name:
-            print(f"Using parser: {args.parser_name}")
-        if args.extract_images:
-            print("Extracting images as separate documents")
-        if args.describe_images:
-            print("Generating LLM descriptions for images")
+        doc_ids = getattr(args, 'doc_ids', None)
+        from_stored = getattr(args, 'from_stored', False)
+        empty_only = getattr(args, 'empty_only', False)
+        dry_run = getattr(args, 'dry_run', False)
+
+        if from_stored:
+            print(f"Rebuilding documents from stored parser output for source_id: {args.source_id}")
+        else:
+            print(f"Parsing raw documents for source_id: {args.source_id}")
+            if args.parser_name:
+                print(f"Using parser: {args.parser_name}")
+            if args.extract_images:
+                print("Extracting images as separate documents")
+            if args.describe_images:
+                print("Generating LLM descriptions for images")
         if args.force_reparse:
-            print("Force re-parsing enabled")
+            print("Force re-parsing enabled (also reprocesses documents that already exist)")
+        if doc_ids:
+            print(f"Restricted to doc_id(s): {', '.join(doc_ids)}")
+        if empty_only:
+            print("Restricted to documents with empty text")
+        full_pipeline = getattr(args, 'full_pipeline', False)
+        if full_pipeline:
+            print("Full pipeline enabled (new documents also get summary/chunk/embed here)")
 
         result = parse_all(
             source_id=args.source_id,
@@ -176,7 +276,21 @@ def cmd_parse_all(args):
             force_reparse=args.force_reparse,
             batch_size=getattr(args, 'batch_size', None),
             limit=getattr(args, 'limit', None),
+            from_stored=from_stored,
+            doc_ids=doc_ids,
+            empty_only=empty_only,
+            dry_run=dry_run,
+            generate_summary=not getattr(args, 'no_summary', False),
+            chunk_and_embed=not getattr(args, 'no_embed', False),
+            full_pipeline=full_pipeline,
         )
+
+        if result.get("dry_run"):
+            print(f"\n  {result['total']} document(s) to process:")
+            for t in result["targets"]:
+                print(f"  {t.get('source_id')}/{t.get('doc_id')}  <- {t.get('file_path')}")
+            print("  (dry run — nothing changed)")
+            return
 
         print(f"\n  Completed:")
         print(f"  Total raw documents: {result['total_raw']}")
@@ -433,6 +547,56 @@ def cmd_deduplicate(args):
 
     print(f" Deduplication complete:")
     print(f"  Deleted: {result['deleted']} duplicate document(s)")
+
+
+def cmd_check(args):
+    """Scan documents for known consistency issues (see kb_mcp.kb.checks)."""
+    from ..checks import CHECKS, run_checks
+
+    if args.list_checks:
+        for name, fn in sorted(CHECKS.items()):
+            summary = (fn.__doc__ or "").strip().splitlines()[0] if fn.__doc__ else ""
+            print(f"  {name:<16} {summary}")
+        return
+
+    try:
+        issues = run_checks(
+            checks=args.check or None,
+            doc_type=args.doc_type,
+            doc_id=args.doc_id,
+            source_id=args.source_id,
+            document_id=args.document_id,
+        )
+    except ValueError as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+
+    if args.json:
+        print(json.dumps([vars(i) for i in issues], indent=2))
+        return
+
+    if not issues:
+        print("No issues found.")
+        return
+
+    print(f"Found {len(issues)} issue(s):")
+    by_check = {}
+    for issue in issues:
+        by_check.setdefault(issue.check, []).append(issue)
+    for check, group in sorted(by_check.items()):
+        by_doc_type = {}
+        for issue in group:
+            by_doc_type.setdefault(issue.doc_type, []).append(issue)
+        type_counts = ", ".join(
+            f"{dt}: {len(g)}" for dt, g in sorted(by_doc_type.items())
+        )
+        print(f"\n  {check} ({len(group)}) [{type_counts}]:")
+        for doc_type, dt_group in sorted(by_doc_type.items()):
+            print(f"    {doc_type} ({len(dt_group)}):")
+            for issue in dt_group[:20]:
+                print(f"      {issue.source_id}/{issue.doc_id}  ({issue.document_id[:8]}...)  {issue.detail}")
+            if len(dt_group) > 20:
+                print(f"      ... and {len(dt_group) - 20} more")
 
 
 def cmd_drop_parser(args):
@@ -1063,6 +1227,19 @@ def cmd_count_tokens(args):
         sys.exit(1)
 
 
+def cmd_check_connections(args):
+    """Check that every configured endpoint actually answers."""
+    from ...health import run_and_report
+
+    sys.exit(
+        run_and_report(
+            timeout=args.timeout,
+            include_sources=not args.no_sources,
+            include_vision=not args.no_vision,
+        )
+    )
+
+
 def setup_commands(subparsers):
     """Set up tools and utility commands."""
     # Drop command (top-level, for documents)
@@ -1100,6 +1277,13 @@ def setup_commands(subparsers):
     logs_parsing_parser.add_argument("--limit", type=int, help="Maximum number of logs to show (default: all)")
     logs_parsing_parser.set_defaults(func=cmd_logs_parsing)
 
+    # logs tokens
+    logs_tokens_parser = logs_subparsers.add_parser("tokens", help="Show LLM token usage for the knowledge base")
+    logs_tokens_parser.add_argument("--document-id", help="Restrict to one document")
+    logs_tokens_parser.add_argument("--stage", help="Restrict to one pipeline stage (e.g. image_description)")
+    logs_tokens_parser.add_argument("--json", action="store_true", help="Output as JSON")
+    logs_tokens_parser.set_defaults(func=cmd_logs_tokens)
+
     # Tools command (renamed from db-admin)
     tools_parser = subparsers.add_parser("tools", help="Utility tools and functions")
     tools_subparsers = tools_parser.add_subparsers(dest="tools_command", help="Tools commands")
@@ -1117,9 +1301,31 @@ def setup_commands(subparsers):
     )
     dedup_parser.set_defaults(func=cmd_deduplicate)
 
+    check_parser = tools_subparsers.add_parser(
+        "check",
+        help="Scan documents for known consistency issues (leaked parser placeholders, etc.)"
+    )
+    check_parser.add_argument(
+        "--check",
+        action="append",
+        metavar="NAME",
+        help="Run only this check (repeatable). Default: run all. See --list-checks."
+    )
+    check_parser.add_argument(
+        "--list-checks",
+        action="store_true",
+        help="List available check names and exit"
+    )
+    check_parser.add_argument("--doc-type", help="Restrict to one doc_type (e.g. text, image)")
+    check_parser.add_argument("--doc-id", help="Restrict to one doc_id")
+    check_parser.add_argument("--source-id", help="Restrict to one source_id")
+    check_parser.add_argument("--document-id", help="Restrict to one Document UUID")
+    check_parser.add_argument("--json", action="store_true", help="Output issues as JSON")
+    check_parser.set_defaults(func=cmd_check)
+
     parse_all_parser = tools_subparsers.add_parser(
         "parse-all",
-        help="Parse all raw documents for a source_id that don't have processed documents yet"
+        help="Parse, reprocess, or rebuild raw documents for a source_id, in parallel-safe batches"
     )
     parse_all_parser.add_argument("source_id", help="Source identifier to process raw documents for")
     parse_all_parser.add_argument(
@@ -1139,7 +1345,54 @@ def setup_commands(subparsers):
     parse_all_parser.add_argument(
         "--force-reparse",
         action="store_true",
-        help="Re-parse even if documents already exist for this parser"
+        help="Also reprocess raw documents that already have a Document, running the "
+             "full parse+summary+chunk/embed pipeline (not just parse) and resolving "
+             "the existing Document by (source_id, doc_id) so timestamps and chunks "
+             "carry over correctly. Without this, only raw documents missing a "
+             "Document are processed."
+    )
+    parse_all_parser.add_argument(
+        "--from-stored",
+        action="store_true",
+        help="Rebuild document text from stored DoclingDocument parser output instead "
+             "of re-running the parser (no GPU, no re-fetch), then regenerate summary "
+             "and chunks. Reaches documents whose raw file is gone, unlike every other mode."
+    )
+    parse_all_parser.add_argument(
+        "--doc-id",
+        action="append",
+        dest="doc_ids",
+        help="Restrict to specific doc_id(s); repeatable"
+    )
+    parse_all_parser.add_argument(
+        "--empty-only",
+        action="store_true",
+        help="Only process documents whose existing text is empty. Requires "
+             "--force-reparse or --from-stored."
+    )
+    parse_all_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="List what would be processed and exit — no locks taken, no changes made"
+    )
+    parse_all_parser.add_argument(
+        "--no-summary",
+        action="store_true",
+        help="Skip summary generation (only affects --force-reparse / --from-stored / --full-pipeline)"
+    )
+    parse_all_parser.add_argument(
+        "--no-embed",
+        action="store_true",
+        help="Skip chunking and embedding (only affects --force-reparse / --from-stored / --full-pipeline)"
+    )
+    parse_all_parser.add_argument(
+        "--full-pipeline",
+        action="store_true",
+        help="Also run summary/chunk/embed on brand-new documents in this same pass (via ingest()), "
+             "instead of leaving that to separate summarize-all/chunk-and-embed-all runs. Useful when "
+             "running multiple parse-all workers already, and describe-images makes each document slow "
+             "enough that running summarize-all/chunk-and-embed-all as separate concurrent processes "
+             "would just contend with these workers over the same document/chunk rows."
     )
     parse_all_parser.add_argument(
         "--batch-size",
@@ -1150,7 +1403,7 @@ def setup_commands(subparsers):
         "--limit", "-N",
         type=int,
         metavar="N",
-        help="Stop after parsing N documents (useful for testing)"
+        help="Stop after processing N documents (useful for testing)"
     )
     parse_all_parser.set_defaults(func=cmd_parse_all)
 
@@ -1359,6 +1612,24 @@ def setup_commands(subparsers):
         help="Filter by parser (e.g., 'marker', 'nougat', 'docling')"
     )
     count_tokens_parser.set_defaults(func=cmd_count_tokens)
+
+    check_conn_parser = tools_subparsers.add_parser(
+        "check-connections",
+        help="Check the database, embedding, LLM and source endpoints respond"
+    )
+    check_conn_parser.add_argument(
+        "--timeout", type=float, default=30.0,
+        help="Per-request timeout in seconds (default: 30)"
+    )
+    check_conn_parser.add_argument(
+        "--no-sources", action="store_true",
+        help="Skip reachability checks for DocDB and the wiki"
+    )
+    check_conn_parser.add_argument(
+        "--no-vision", action="store_true",
+        help="Skip the test-image probe of the image-description model"
+    )
+    check_conn_parser.set_defaults(func=cmd_check_connections)
 
     list_tables_parser = tools_subparsers.add_parser("list-tables", help="List all database tables")
     list_tables_parser.add_argument("--json", action="store_true", help="Output as JSON")

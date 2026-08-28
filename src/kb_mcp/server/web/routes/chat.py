@@ -31,35 +31,71 @@ class ChatSession:
         self.created_at = datetime.utcnow()
         self.document_context = document_context  # Optional doc_id and text
         self.message_history = []  # List of {role, content, timestamp}
-        self.agent = None  # Will hold NotebookAgent instance
+        self.agent = None  # Will hold agent instance
         self.mcp_session = None
-        self.mcp_client = None
-        self.stdio_context = None  # Store the stdio context manager for cleanup
-        self.mcp_session_ctx = None  # Store the MCP session context manager for cleanup
+        self._mcp_task = None       # long-lived asyncio.Task holding the stdio context
+        self._mcp_shutdown = None   # asyncio.Event to signal task to exit
+        self._mcp_ready = None      # asyncio.Event set when session is ready
+
+    async def start_mcp(self, mode: str, async_client, agent_model: str, callback):
+        """Start MCP subprocess in a long-lived background task and initialize agent."""
+        import sys, os
+        from mcp import ClientSession as MCPClientSession, StdioServerParameters
+        from mcp.client.stdio import stdio_client
+
+        self._mcp_shutdown = asyncio.Event()
+        self._mcp_ready = asyncio.Event()
+        init_error: list = []
+
+        async def _mcp_lifetime():
+            server_params = StdioServerParameters(
+                command=sys.executable,
+                args=["-m", "kb_mcp.server.mcp_stdio"],
+                env=os.environ.copy(),
+            )
+            try:
+                async with stdio_client(server_params) as (read, write):
+                    async with MCPClientSession(read, write) as session:
+                        await session.initialize()
+                        self.mcp_session = session
+
+                        if mode == 'plain':
+                            from ....agents.plain_agent import PlainAgent
+                            self.agent = PlainAgent(
+                                session=session, client=async_client,
+                                depth=1, agent_id="WebChat", callback=callback,
+                            )
+                        else:
+                            self.agent = NotebookAgent(
+                                session=session, client=async_client,
+                                depth=1, agent_id="WebChat", max_depth=2, callback=callback,
+                            )
+                        await self.agent.initialize_tools()
+                        self._mcp_ready.set()
+                        # Stay alive until session cleanup
+                        await self._mcp_shutdown.wait()
+            except Exception as e:
+                init_error.append(e)
+                self._mcp_ready.set()  # unblock waiters even on error
+
+        self._mcp_task = asyncio.get_event_loop().create_task(_mcp_lifetime())
+        await self._mcp_ready.wait()
+        if init_error:
+            raise init_error[0]
 
     async def cleanup(self):
         """Clean up MCP connection and resources."""
-        # Clean up MCP session context manager if it exists
-        if self.mcp_session_ctx:
+        if self._mcp_shutdown:
+            self._mcp_shutdown.set()
+        if self._mcp_task:
             try:
-                await self.mcp_session_ctx.__aexit__(None, None, None)
+                await asyncio.wait_for(self._mcp_task, timeout=5.0)
             except Exception as e:
-                logger.error(f"Error cleaning up MCP session context for session {self.session_id}: {e}")
+                logger.error(f"Error cleaning up MCP task for session {self.session_id}: {e}")
             finally:
-                self.mcp_session_ctx = None
-                self.mcp_session = None
-        
-        # Clean up stdio context manager
-        if self.stdio_context:
-            try:
-                await self.stdio_context.__aexit__(None, None, None)
-                logger.info(f"Cleaned up MCP connection for session {self.session_id}")
-            except Exception as e:
-                logger.error(f"Error cleaning up stdio context for session {self.session_id}: {e}")
-            finally:
-                self.stdio_context = None
-                self.mcp_session = None
-                self.agent = None
+                self._mcp_task = None
+        self.agent = None
+        self.mcp_session = None
 
 
 def setup_chat_routes(app, session_manager: WebSessionManager, require_auth_html, require_auth_api):
@@ -71,11 +107,18 @@ def setup_chat_routes(app, session_manager: WebSessionManager, require_auth_html
         if redirect:
             return redirect
 
-        username = session_data.get('username', 'Unknown')
+        # No default: base_template reads a truthy username as "this visitor
+        # is an admin". In public mode an anonymous visitor has an empty
+        # session_data, and a placeholder here would render the admin nav and
+        # a Logout link as if they were logged in.
+        username = session_data.get('username')
 
         # Check if starting chat with document context
         doc_id = request.query_params.get('doc_id')
         doc_title = request.query_params.get('title', 'Unknown Document')
+
+        from ....config import get_agent_config
+        agent_model = get_agent_config()['agent_model']
 
         # Build chat page HTML
         content = f"""
@@ -178,7 +221,7 @@ def setup_chat_routes(app, session_manager: WebSessionManager, require_auth_html
                 font-style: italic;
             }}
 
-            #chat-status.working::before {{
+            #chat-status-working.working::before {{
                 content: '';
                 display: inline-block;
                 width: 8px;
@@ -197,19 +240,33 @@ def setup_chat_routes(app, session_manager: WebSessionManager, require_auth_html
             }}
         </style>
         
-        <h1>Agent Chat Interface</h1>
+        <div style="display: flex; align-items: baseline; gap: 20px; margin-bottom: 10px;">
+            <h1 style="margin: 0;">Chat</h1>
+            <span style="color: #666; font-size: 13px;">Model: <code>{agent_model}</code></span>
+            <span style="font-size: 13px; color: #666;">
+                <label for="agent-mode-select">Mode:</label>
+                <select id="agent-mode-select" style="margin-left: 4px; font-size: 13px; padding: 2px 6px;">
+                    <option value="notebook" {"" if doc_id else "selected"}>Notebook agent (multi-step scratchpad)</option>
+                    <option value="plain" {"selected" if doc_id else ""}>Plain agent (tools, single-pass)</option>
+                    <option value="direct">Direct (no tools)</option>
+                </select>
+            </span>
+            <span id="context-size" style="font-size: 13px; color: rgba(100,100,100,0.8); margin-left: auto;"></span>
+        </div>
 
         <div id="chat-container" class="card">
             <div id="messages" style="max-height: 500px; overflow-y: auto; margin-bottom: 20px; padding: 10px; border: 1px solid #ddd;">
                 <!-- Messages will appear here -->
             </div>
 
-            <form id="chat-form" onsubmit="sendMessage(event)">
-                <input type="text" id="message-input" placeholder="Ask a question..." style="width: 80%; padding: 10px;" required>
-                <button type="submit" style="width: 18%; padding: 10px;">Send</button>
+            <form id="chat-form" onsubmit="sendMessage(event)" style="display: flex; gap: 8px; align-items: flex-end;">
+                <textarea id="message-input" placeholder="Ask a question..." rows="1"
+                    style="flex: 1; padding: 10px; resize: none; min-height: 40px; max-height: 120px; font-size: 14px; font-family: inherit; border: 1px solid #ccc; border-radius: 4px;"></textarea>
+                <button type="submit" style="padding: 10px 20px; white-space: nowrap;">Send</button>
             </form>
             <div id="chat-status" style="margin-top: 12px; font-size: 13px; color: #666;">
-                Status: Ready
+            </div>
+            <div id="chat-status-working" style="font-size: 13px; color: #1565c0; display: none;">
             </div>
 
             <div id="notebook-section" style="display: none; margin-top: 20px;">
@@ -225,6 +282,30 @@ def setup_chat_routes(app, session_manager: WebSessionManager, require_auth_html
             const docId = "{doc_id or ''}";
             const docTitle = "{doc_title}";
 
+            // Auto-resize textarea
+            document.getElementById('message-input').addEventListener('input', function() {{
+                this.style.height = 'auto';
+                this.style.height = Math.min(this.scrollHeight, 120) + 'px';
+            }});
+
+            // Enter to send, Shift+Enter for newline
+            document.getElementById('message-input').addEventListener('keydown', function(e) {{
+                if (e.key === 'Enter' && !e.shiftKey) {{
+                    e.preventDefault();
+                    document.getElementById('chat-form').dispatchEvent(new Event('submit'));
+                }}
+            }});
+
+            function updateContextSize(tokens) {{
+                const el = document.getElementById('context-size');
+                if (!el) return;
+                const maxContext = 200000;
+                const pct = (tokens / maxContext * 100).toFixed(1);
+                const formatted = tokens >= 1000 ? (tokens / 1000).toFixed(1) + 'k' : tokens.toLocaleString();
+                el.textContent = `Context: ${{pct}}% (${{formatted}} tokens)`;
+                el.style.color = pct < 50 ? 'rgba(100,100,100,0.8)' : pct < 80 ? '#f39c12' : '#e53935';
+            }}
+
             // Initialize chat session on page load
             window.addEventListener('load', async () => {{
                 await initChat();
@@ -238,7 +319,6 @@ def setup_chat_routes(app, session_manager: WebSessionManager, require_auth_html
                 }});
                 const data = await response.json();
                 chatSessionId = data.session_id;
-                setStatus('Ready', '#666');
 
                 if (docId) {{
                     addMessage('system', `Loaded document: ${{docTitle}}`);
@@ -265,7 +345,12 @@ def setup_chat_routes(app, session_manager: WebSessionManager, require_auth_html
                 }} else if (role === 'assistant') {{
                     msgDiv.style.backgroundColor = '#f1f8e9';
                     // Convert markdown to HTML for assistant messages
-                    const markdownHtml = typeof marked !== 'undefined' ? marked.parse(content || '') : content;
+                    let markdownHtml = typeof marked !== 'undefined' ? marked.parse(content || '') : content;
+                    // Turn 【doc_id】 citations into clickable links
+                    markdownHtml = markdownHtml.replace(/【([^\】]+)】/g, (match, docId) => {{
+                        const escaped = docId.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+                        return `<a href="/web/document/by-doc-id/${{encodeURIComponent(docId)}}" target="_blank" rel="noopener noreferrer" title="${{escaped}}" style="text-decoration: none; font-size: 0.85em; color: #1565c0; border: 1px solid #90caf9; border-radius: 3px; padding: 0 4px; margin: 0 1px;">[${{escaped}}]</a>`;
+                    }});
                     msgDiv.innerHTML = '<strong>Agent:</strong><div class="markdown-content" style="margin-top: 5px;">' + markdownHtml + '</div>';
                 }} else {{
                     msgDiv.style.backgroundColor = '#fff3e0';
@@ -293,18 +378,57 @@ def setup_chat_routes(app, session_manager: WebSessionManager, require_auth_html
                         const argsText = tool.arguments || '{{}}';
                         const escapedArgs = argsText.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
                         const escapedName = (tool.name || '?').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+                        const safeId = (tool.id || tool.name || '?').replace(/[^a-zA-Z0-9_-]/g, '_');
                         return `
-                            <details style="display: inline; margin-left: 6px;">
+                            <details style="display: inline-block; margin-left: 6px; vertical-align: top;" id="tool-call-${{safeId}}">
                                 <summary style="cursor: pointer; display: inline;"><strong>${{escapedName}}</strong></summary>
-                                <pre style="margin: 8px 0 0; white-space: pre-wrap; word-break: break-word; background: rgba(0,0,0,0.04); padding: 8px; border-radius: 4px;">${{escapedArgs}}</pre>
+                                <pre style="margin: 8px 0 0; white-space: pre-wrap; word-break: break-word; background: rgba(0,0,0,0.04); padding: 8px; border-radius: 4px; font-size: 11px;">${{escapedArgs}}</pre>
                             </details>
                         `;
                     }}).join('')
                     : '';
 
-                msgDiv.innerHTML = `<strong>Calling tools:</strong> ${{toolNames.join(', ') || 'unknown'}}${{detailsHtml ? detailsHtml : ''}}`;
+                msgDiv.innerHTML = `<strong>Tool calls:</strong>${{detailsHtml}}`;
                 messagesDiv.appendChild(msgDiv);
                 messagesDiv.scrollTop = messagesDiv.scrollHeight;
+            }}
+
+            function renderToolResultMessage(data) {{
+                const safeId = (data.tool_id || data.tool_name || '?').replace(/[^a-zA-Z0-9_-]/g, '_');
+                const detailsEl = document.getElementById(`tool-call-${{safeId}}`);
+                const escapedResult = (data.result || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+                if (detailsEl) {{
+                    const resultEl = document.createElement('pre');
+                    resultEl.style.cssText = 'margin: 4px 0 0; padding: 8px; white-space: pre-wrap; word-break: break-word; font-size: 11px; background: #f0f4e8; border-radius: 4px; border-left: 3px solid #a5d6a7;';
+                    resultEl.textContent = data.result || '';
+                    detailsEl.appendChild(resultEl);
+                }}
+            }}
+
+            let currentInfoMsgDiv = null;
+
+            function addInfoMessage(text) {{
+                const messagesDiv = document.getElementById('messages');
+                if (!currentInfoMsgDiv) {{
+                    currentInfoMsgDiv = document.createElement('div');
+                    currentInfoMsgDiv.style.marginBottom = '10px';
+                    currentInfoMsgDiv.style.padding = '8px 10px';
+                    currentInfoMsgDiv.style.borderRadius = '5px';
+                    currentInfoMsgDiv.style.backgroundColor = '#fff3e0';
+                    currentInfoMsgDiv.style.fontSize = '13px';
+                    currentInfoMsgDiv.style.color = '#555';
+                    messagesDiv.appendChild(currentInfoMsgDiv);
+                }}
+                const escaped = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+                currentInfoMsgDiv.innerHTML = `<em>${{escaped}}</em>`;
+                messagesDiv.scrollTop = messagesDiv.scrollHeight;
+            }}
+
+            function clearInfoMessage() {{
+                if (currentInfoMsgDiv) {{
+                    currentInfoMsgDiv.remove();
+                    currentInfoMsgDiv = null;
+                }}
             }}
 
             function updateNotebook(notebook) {{
@@ -314,13 +438,23 @@ def setup_chat_routes(app, session_manager: WebSessionManager, require_auth_html
 
             function setStatus(text, color = '#666', isWorking = false) {{
                 const statusEl = document.getElementById('chat-status');
+                const workingEl = document.getElementById('chat-status-working');
                 if (!statusEl) return;
-                statusEl.textContent = `Status: ${{text}}`;
-                statusEl.style.color = color;
                 if (isWorking) {{
-                    statusEl.classList.add('working');
+                    // Show working detail on second line; leave first line as-is
+                    if (workingEl) {{
+                        workingEl.textContent = text;
+                        workingEl.style.display = 'block';
+                        workingEl.classList.add('working');
+                    }}
                 }} else {{
-                    statusEl.classList.remove('working');
+                    statusEl.textContent = `Status: ${{text}}`;
+                    statusEl.style.color = color;
+                    if (workingEl) {{
+                        workingEl.style.display = 'none';
+                        workingEl.classList.remove('working');
+                        workingEl.textContent = '';
+                    }}
                 }}
             }}
 
@@ -340,17 +474,21 @@ def setup_chat_routes(app, session_manager: WebSessionManager, require_auth_html
                 document.getElementById('message-input').disabled = true;
                 setStatus('Working on it...', '#1565c0', true);
 
-                // Stream response via SSE
+                // Lock mode after first message
+                const modeSelect = document.getElementById('agent-mode-select');
+                const agentMode = modeSelect.value;
+                modeSelect.disabled = true;
                 const eventSource = new EventSource(
-                    `/web/api/chat/message?session_id=${{chatSessionId}}&message=${{encodeURIComponent(message)}}`
+                    `/web/api/chat/message?session_id=${{chatSessionId}}&message=${{encodeURIComponent(message)}}&mode=${{agentMode}}`
                 );
 
                 let responseText = '';
+                currentInfoMsgDiv = null;
 
                 eventSource.addEventListener('info', (e) => {{
                     const data = JSON.parse(e.data);
-                    console.log('Agent:', data.message);
                     if (data.message) {{
+                        addInfoMessage(data.message);
                         setStatus(data.message, '#1565c0', true);
                     }}
                 }});
@@ -371,11 +509,16 @@ def setup_chat_routes(app, session_manager: WebSessionManager, require_auth_html
                     setStatus('Working on it...', '#1565c0', true);
                 }});
 
+                eventSource.addEventListener('tool_result', (e) => {{
+                    const data = JSON.parse(e.data);
+                    renderToolResultMessage(data);
+                }});
+
                 eventSource.addEventListener('token_usage', (e) => {{
                     const data = JSON.parse(e.data);
                     const total = data?.token_overview?.totals?.total_tokens;
                     if (typeof total === 'number') {{
-                        setStatus(`Working on it... (${{total.toLocaleString()}} tokens)`, '#1565c0', true);
+                        updateContextSize(total);
                     }}
                 }});
 
@@ -386,6 +529,7 @@ def setup_chat_routes(app, session_manager: WebSessionManager, require_auth_html
 
                 eventSource.addEventListener('done', (e) => {{
                     eventSource.close();
+                    clearInfoMessage();
                     addMessage('assistant', responseText);
                     setStatus('Completed', '#2e7d32', false);
 
@@ -397,6 +541,7 @@ def setup_chat_routes(app, session_manager: WebSessionManager, require_auth_html
 
                 eventSource.addEventListener('error', (e) => {{
                     eventSource.close();
+                    clearInfoMessage();
                     let serverMessage = '';
                     try {{
                         const payload = e && e.data ? JSON.parse(e.data) : null;
@@ -414,7 +559,7 @@ def setup_chat_routes(app, session_manager: WebSessionManager, require_auth_html
         """
 
         return HTMLResponse(html_templates.base_template(
-            "Agent Chat",
+            "Chat",
             content,
             username=username
         ))
@@ -444,7 +589,7 @@ def setup_chat_routes(app, session_manager: WebSessionManager, require_auth_html
 
         # Create session
         session_id = secrets.token_urlsafe(16)
-        print("DEBUG Starting chat session:", session_id)
+        # print("DEBUG Starting chat session:", session_id)
         chat_session = ChatSession(session_id, username, document_context)
 
         # Store in active sessions
@@ -465,7 +610,8 @@ def setup_chat_routes(app, session_manager: WebSessionManager, require_auth_html
 
         session_id = request.query_params.get('session_id')
         message = request.query_params.get('message')
-        print("DEBUG Received message for session:", session_id, message)
+        mode = request.query_params.get('mode', 'notebook')  # notebook | plain | direct
+        # print("DEBUG Received message for session:", session_id, message, "mode:", mode)
 
         if not session_id or not message:
             return JSONResponse({'error': 'Missing session_id or message'}, status_code=400)
@@ -481,133 +627,104 @@ def setup_chat_routes(app, session_manager: WebSessionManager, require_auth_html
             'timestamp': datetime.utcnow()
         })
 
-        # Prepare query with document context if available
         query = message
+        doc_context = None
         if chat_session.document_context:
-            # kb_get already returns well-formatted text with metadata
             doc_text = chat_session.document_context['text']
             query = f"{doc_text}\n\nUser Question: {message}"
 
         # Stream response via SSE
         async def event_generator():
             """Generate SSE events from agent execution."""
-            print(f"DEBUG event_generator started for session {session_id}")
-            response_text = ""
+            # print(f"DEBUG event_generator started for session {session_id}")
 
-            # Yield initial event to establish connection
             yield f"event: info\ndata: {json.dumps({'message': 'Processing your message...'})}\n\n"
+
+            # --- Direct LLM mode (no agent/MCP) ---
+            if mode == 'direct':
+                try:
+                    client = get_openai_client(use_async=True)
+                    agent_config = get_agent_config()
+                    model = agent_config['agent_model']
+
+                    messages = []
+                    if chat_session.document_context:
+                        messages.append({'role': 'system', 'content': f"The user has loaded the following document for context:\n\n{chat_session.document_context['text']}"})
+                    messages += [{'role': m['role'], 'content': m['content']}
+                                 for m in chat_session.message_history
+                                 if m['role'] in ('user', 'assistant')]
+
+                    response = await client.chat.completions.create(
+                        model=model,
+                        messages=messages,
+                    )
+                    result = response.choices[0].message.content
+                    chat_session.message_history.append({'role': 'assistant', 'content': result, 'timestamp': datetime.utcnow()})
+                    yield f"event: response\ndata: {json.dumps({'content': result})}\n\n"
+                    yield f"event: done\ndata: {{}}\n\n"
+                except Exception as e:
+                    logger.error(f"Direct LLM error: {e}", exc_info=True)
+                    yield f"event: error\ndata: {json.dumps({'message': str(e)})}\n\n"
+                return
+
+            response_text = ""
 
             # Create callback for agent events
             event_queue = asyncio.Queue()
 
             async def agent_callback(event):
-                print(f"DEBUG agent_callback received event: {event.get('type')}")
+                # print(f"DEBUG agent_callback received event: {event.get('type')}")
                 await event_queue.put(event)
 
             # Initialize agent with callback if not already initialized
             if not chat_session.agent:
-                print(f"DEBUG Initializing new agent for session {session_id}")
+                # print(f"DEBUG Initializing new agent for session {session_id}")
                 try:
-                    from mcp import ClientSession as MCPClientSession, StdioServerParameters
-                    from mcp.client.stdio import stdio_client
-                    import sys
-                    import os
-
-                    # Get LLM client (without model - model is passed to agent.run())
                     async_client = get_openai_client(use_async=True)
-                    print(f"DEBUG Got LLM client")
-                    
-                    # Get agent model from config (like kb-agent does)
                     agent_config = get_agent_config()
                     agent_model = agent_config['agent_model']
-                    print(f"DEBUG Using agent model: {agent_model}")
-
-                    # Create MCP client session using stdio transport
-                    # Use sys.executable to ensure we use the same Python as the current process
-                    python_executable = sys.executable
-                    print(f"DEBUG Using Python executable: {python_executable}")
-
-                    server_params = StdioServerParameters(
-                        command=python_executable,
-                        args=["-m", "kb_mcp.server.mcp_stdio"],
-                        env=os.environ.copy(),  # Pass through environment variables
-                    )
-                    print(f"DEBUG Created server params")
-
-                    # Create and store stdio client context manager
-                    # This keeps the MCP connection alive for the session
-                    stdio_ctx = stdio_client(server_params)
-                    chat_session.stdio_context = stdio_ctx
-                    print(f"DEBUG Created stdio context")
-
-                    read_stream, write_stream = await stdio_ctx.__aenter__()
-                    print(f"DEBUG Entered stdio context, streams ready")
-
-                    # Create session using context manager pattern for proper initialization
-                    # We'll keep the context manager alive and clean it up in cleanup()
-                    mcp_session_ctx = MCPClientSession(read_stream, write_stream)
-                    await mcp_session_ctx.__aenter__()
-                    chat_session.mcp_session_ctx = mcp_session_ctx  # Store for cleanup
-                    mcp_session = mcp_session_ctx
-                    print(f"DEBUG Created MCP session context")
-                    
-                    # Explicitly initialize the session (performs MCP handshake)
-                    await mcp_session.initialize()
-                    print(f"DEBUG Initialized MCP session via stdio")
-
-                    # Store session
-                    chat_session.mcp_session = mcp_session
-
-                    # Create NotebookAgent
-                    chat_session.agent = NotebookAgent(
-                        session=mcp_session,
-                        client=async_client,
-                        depth=1,
-                        agent_id="WebChat",
-                        max_depth=2,
-                        callback=agent_callback
-                    )
-                    print(f"DEBUG Created NotebookAgent")
-
-                    await chat_session.agent.initialize_tools()
-                    print(f"DEBUG Agent initialized with {len(chat_session.agent.tools)} tools")
+                    await chat_session.start_mcp(mode, async_client, agent_model, agent_callback)
+                    # print(f"DEBUG Agent initialized with {len(chat_session.agent.tools)} tools")
                     logger.info(f"Initialized agent for chat session {session_id}")
                 except Exception as e:
-                    print(f"DEBUG Error initializing agent: {e}")
+                    # print(f"DEBUG Error initializing agent: {e}")
                     logger.error(f"Error initializing agent: {e}", exc_info=True)
-                    await event_queue.put({'type': 'error', 'message': f"Failed to initialize agent: {str(e)}"})
                     yield f"event: error\ndata: {json.dumps({'message': str(e)})}\n\n"
                     return
 
             # Temporarily set callback
             chat_session.agent.callback = agent_callback
-            print(f"DEBUG Set callback on agent")
+            # print(f"DEBUG Set callback on agent")
 
-            # Run agent in background task
+            import anyio
+
+            agent_done = anyio.Event()
+
             async def run_agent():
-                print(f"DEBUG Running agent for session: {session_id} with query: {query[:100]}...")
+                # print(f"DEBUG Running agent for session: {session_id} with query: {query[:100]}...")
                 try:
-                    # Get agent model from config (same pattern as kb-agent)
                     agent_config = get_agent_config()
                     model = agent_config['agent_model']
-                    result = await chat_session.agent.run(query, model=model)
-                    print(f"DEBUG Agent completed with result: {result[:100] if result else 'None'}...")
+                    prior_history = chat_session.message_history[:-1]
+                    result = await chat_session.agent.run(query, model=model, history=prior_history)
+                    # print(f"DEBUG Agent completed with result: {result[:100] if result else 'None'}...")
                     await event_queue.put({'type': 'response', 'content': result})
                     await event_queue.put({'type': 'done'})
                 except Exception as e:
-                    print(f"DEBUG Agent error: {e}")
+                    # print(f"DEBUG Agent error: {e}")
                     logger.error(f"Agent error: {e}", exc_info=True)
                     await event_queue.put({'type': 'error', 'message': str(e)})
+                finally:
+                    agent_done.set()
 
-            agent_task = asyncio.create_task(run_agent())
-            print(f"DEBUG Agent task created")
+            # print(f"DEBUG Agent task created")
+            agent_task = asyncio.get_event_loop().create_task(run_agent())
 
             # Stream events as they arrive
-            # Also monitor the agent task to catch any exceptions
             while True:
                 try:
                     event = await asyncio.wait_for(event_queue.get(), timeout=0.5)
-                    print(f"DEBUG Received event from queue: {event.get('type')}")
+                    # print(f"DEBUG Received event from queue: {event.get('type')}")
 
                     if event['type'] == 'done':
                         yield f"event: done\ndata: {{}}\n\n"
@@ -619,24 +736,17 @@ def setup_chat_routes(app, session_manager: WebSessionManager, require_auth_html
                         yield f"event: error\ndata: {json.dumps(event)}\n\n"
                         break
                     else:
-                        # Forward all other events (info, notebook_update, tool_call)
                         yield f"event: {event['type']}\ndata: {json.dumps(event)}\n\n"
 
                 except asyncio.TimeoutError:
-                    # Check if agent task is done (might have failed silently)
                     if agent_task.done():
-                        try:
-                            await agent_task  # This will raise if there was an exception
-                        except Exception as e:
-                            print(f"DEBUG Agent task failed: {e}")
-                            logger.error(f"Agent task failed: {e}", exc_info=True)
-                            yield f"event: error\ndata: {json.dumps({'message': f'Agent task failed: {str(e)}'})}\n\n"
+                        exc = agent_task.exception()
+                        if exc:
+                            print(f"DEBUG Agent task failed: {exc}")
+                            logger.error(f"Agent task failed: {exc}", exc_info=True)
+                            yield f"event: error\ndata: {json.dumps({'message': f'Agent task failed: {str(exc)}'})}\n\n"
                             break
-                    # Send heartbeat event that frontend can display.
-                    heartbeat = {
-                        'message': 'still_processing',
-                        'ts': datetime.utcnow().isoformat() + 'Z',
-                    }
+                    heartbeat = {'message': 'still_processing', 'ts': datetime.utcnow().isoformat() + 'Z'}
                     yield f"event: heartbeat\ndata: {json.dumps(heartbeat)}\n\n"
                     continue
 

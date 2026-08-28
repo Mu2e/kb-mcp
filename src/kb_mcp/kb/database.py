@@ -68,13 +68,28 @@ def create_engine_with_config() -> Engine:
 
     # PostgreSQL configuration
     db_config = get_database_config() # for schema setting
+
+    # The pgvector extension (the `vector` type/operators) lives in whichever
+    # schema it was installed into — public, on every deployment so far — and
+    # isn't reinstallable per-schema. A search_path of just the configured
+    # schema breaks any vector column/operator with "type vector does not
+    # exist" the moment that schema differs from public (e.g. DB_SCHEMA=v0
+    # for a per-source snapshot). Always fall back to public so custom
+    # schemas keep working without every caller needing to know to type
+    # "myschema,public" themselves.
+    configured_schema = db_config['schema']
+    schema_parts = [s.strip() for s in configured_schema.split(",") if s.strip()]
+    if "public" not in schema_parts:
+        schema_parts.append("public")
+    search_path = ",".join(schema_parts)
+
     engine = create_engine(
         database_url,
         connect_args={
             # Kill sessions idle in transaction for more than 30 minutes.
             # Must be longer than the slowest single document parse (marker on large scanned PDFs).
             # Prevents stuck locks when a worker process is killed externally.
-            "options": f"-c idle_in_transaction_session_timeout=7200000 -c search_path={db_config['schema']}",
+            "options": f"-c idle_in_transaction_session_timeout=7200000 -c search_path={search_path}",
             # TCP keepalives so PostgreSQL detects dead worker connections quickly.
             "keepalives": 1,
             "keepalives_idle": 60,
@@ -87,15 +102,24 @@ def create_engine_with_config() -> Engine:
     def set_search_path(dbapi_conn, connection_record):
         """Set schema search_path for PostgreSQL."""
         cursor = dbapi_conn.cursor()
-        cursor.execute(f"SET search_path TO {db_config['schema']}")
+        cursor.execute(f"SET search_path TO {search_path}")
         cursor.close()
-    
+
     return engine
 
 
 # Create engine and session factory
 _engine = None
 _SessionLocal = None
+# Whether init_db() has already run its schema setup (extension, create_all,
+# column patches, trigger, graph seed) this process. Every one of those is a
+# DB round trip and each is individually idempotent, but init_db() is called
+# once per embedding batch (embedder_base.py) as well as once per process
+# (cmd_ingest, _ensure_db_initialized) — unguarded, a single 599-document
+# reparse measured ~753 redundant schema-verification cycles. Only ever set
+# True after a create_tables=True run, so a hypothetical create_tables=False
+# call can't poison it for the real initialization that follows.
+_schema_ready = False
 
 
 def get_engine() -> Engine:
@@ -315,6 +339,15 @@ def _ensure_documents_columns(engine) -> None:
     new columns to tables that already exist. This helper patches that gap for
     a small, hand-maintained list of post-v0.2 columns. Replace with Alembic
     when schema drift outgrows this approach.
+
+    Note: `documents.parser_output` (JSONB) used to be added here. It has
+    been superseded by the `document_parser_outputs` table (see
+    `DocumentParserOutput` in db_models.py) so `Document` stays lean for the
+    many call sites that query it bare. The ADD-COLUMN step below is kept,
+    commented out, only as a reminder for anyone writing the data-carry-
+    forward migration off an old deployment — such a script should read
+    `documents.parser_output` (if present) and copy it into
+    `document_parser_outputs`, then the column can be dropped.
     """
     from sqlalchemy import inspect as sa_inspect
 
@@ -326,9 +359,7 @@ def _ensure_documents_columns(engine) -> None:
     existing = {col["name"] for col in inspector.get_columns("documents")}
 
     # (column_name, postgres_type, sqlite_type)
-    new_columns = [
-        ("parser_output", "JSONB", "JSON"),
-    ]
+    new_columns = []
 
     for col_name, pg_type, sqlite_type in new_columns:
         if col_name in existing:
@@ -342,10 +373,16 @@ def _ensure_documents_columns(engine) -> None:
 def _ensure_chunks_columns(engine) -> None:
     """Idempotent ALTER for chunks columns added post-v0.2.
 
-    Sister to `_ensure_documents_columns`. Covers the page-anchored
-    provenance columns: page_start / page_end / bbox / body_self_refs. They
-    are populated only by the DoclingDocument-aware chunker; legacy chunks
-    leave them NULL.
+    Sister to `_ensure_documents_columns`. `page_start` / `page_end` /
+    `bbox` / `body_self_refs` used to be added here as dedicated columns.
+    They've been folded into the existing `chunks.meta` JSONB column
+    instead — all four are opaque/write-once provenance (populated only by
+    the DoclingDocument-aware chunker; nothing queries them by value yet),
+    which is exactly what `meta` is for, so a dedicated column bought
+    nothing. A data-carry-forward script for old deployments should copy
+    each of the four columns (where non-null) into
+    `chunks.meta["page_start"/"page_end"/"bbox"/"body_self_refs"]`, then the
+    columns can be dropped.
     """
     from sqlalchemy import inspect as sa_inspect
 
@@ -356,12 +393,7 @@ def _ensure_chunks_columns(engine) -> None:
     is_pg = engine.url.drivername.startswith("postgresql")
     existing = {col["name"] for col in inspector.get_columns("chunks")}
 
-    new_columns = [
-        ("page_start", "INTEGER", "INTEGER"),
-        ("page_end", "INTEGER", "INTEGER"),
-        ("bbox", "JSONB", "JSON"),
-        ("body_self_refs", "JSONB", "JSON"),
-    ]
+    new_columns = []
 
     for col_name, pg_type, sqlite_type in new_columns:
         if col_name in existing:
@@ -399,24 +431,25 @@ def init_db(create_tables: bool = True) -> None:
         GraphNodeMap,
         GraphExtractionLog,
     )
-    from .db_models import ParserComparison, ParserCategories  # noqa: F401
+    from .db_models import ParserComparison, ParserCategories, LLMUsage  # noqa: F401
 
     engine = get_engine()
     database_url = get_database_url()
 
-    logger.info(f"Initializing database: {database_url.split('@')[-1] if '@' in database_url else database_url}")
+    global _schema_ready
+    if create_tables and not _schema_ready:
+        logger.info(f"Initializing database: {database_url.split('@')[-1] if '@' in database_url else database_url}")
 
-    # Enable pgvector extension for PostgreSQL (required for vector columns)
-    if database_url.startswith('postgresql'):
-        try:
-            with engine.connect() as conn:
-                conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
-                conn.commit()
-            logger.info("PostgreSQL vector extension enabled")
-        except Exception as e:
-            logger.warning(f"Could not enable vector extension (may not have permissions): {e}")
+        # Enable pgvector extension for PostgreSQL (required for vector columns)
+        if database_url.startswith('postgresql'):
+            try:
+                with engine.connect() as conn:
+                    conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+                    conn.commit()
+                logger.info("PostgreSQL vector extension enabled")
+            except Exception as e:
+                logger.warning(f"Could not enable vector extension (may not have permissions): {e}")
 
-    if create_tables:
         # Create all tables (including SearchLog from search module and eval models)
         Base.metadata.create_all(bind=engine)
         logger.info("Database tables created/verified")
@@ -449,9 +482,14 @@ def init_db(create_tables: bool = True) -> None:
         except Exception as e:
             logger.warning(f"Could not seed graph defaults: {e}")
 
-    # Test connection
+        _schema_ready = True
+
+    # Test connection. Cheap (one round trip) and worth doing on every call —
+    # it's what catches a dropped connection before an insert fails on it —
+    # but not worth announcing at INFO every time; that's what turned a
+    # 599-document reparse's log into 15,000+ near-duplicate lines.
     with engine.connect() as conn:
         result = conn.execute(text("SELECT 1"))
         result.fetchone()
-        logger.info("Database connection successful")
+        logger.debug("Database connection successful")
 

@@ -1,257 +1,358 @@
 """Chunking utilities for embedding module."""
 
 import logging
-from typing import List, Optional, Dict, Any, Set
+from typing import Any, Callable, Dict, List, Optional
+
+from ...chunking import base_strategy
 from .db_models import Chunk, Document
+from .section_chunker import chunk_from_docling_json
 
 logger = logging.getLogger(__name__)
 
+__all__ = ["chunk_from_docling_json"]  # re-exported for existing callers/tests
 
-def chunk_from_docling_json(
-    document: Document,
-    target_tokens: int = 1000,
-    min_chunk_tokens: int = 30,
-    hard_max_tokens: int = 1500,
-) -> List[Dict[str, Any]]:
-    """Walk the persisted DoclingDocument (`document.parser_output["body"]
-    ["children"]`) in reading order and emit chunks with page-anchored
-    provenance.
 
-    Behaviour:
-      * Tables and pictures are **skipped** — they are first-class records
-        emitted by the parser; chunking them again would re-introduce the
-        duplication step 1 just removed.
-      * Section headers (`section_header` / `title`) update an in-memory
-        header stack — used to populate `section_path` on every chunk that
-        follows. The header text itself is *not* added to chunk text; the
-        contextual prefix is built at embed time by `Chunk.embed_text()`.
-      * Group bodies (lists, key-value pairs, …) are expanded inline; list
-        items get a leading `- `.
-      * Each emitted chunk records `page_start` (min `prov.page_no` of the
-        contributing texts), `page_end` (max), and `body_self_refs` (list
-        of crefs that contributed). `bbox` is left None until per-chunk
-        bbox-merging is needed — page-level alone is enough for citations.
-      * Soft target: `target_tokens`. Flush early when the next text span
-        would push the chunk over budget.
-      * **Tiny-fragment merging** (2026-04-27): a flush whose
-        accumulated text is below ``min_chunk_tokens`` does NOT emit — it
-        keeps the accumulator alive so the fragment merges with the next
-        chunk. Stops the corpus from getting polluted with single-token
-        chunks like '2' / 'by' / '17' that escape between section
-        boundaries.
-      * **Oversized-span splitting** (2026-04-27): a single
-        body span larger than ``hard_max_tokens`` is split on paragraph
-        (`\\n\\n`) then sentence-ish (`. `) boundaries until each piece
-        fits. MiniLM truncates at 256 tokens; chunks > ~1500 tokens lose
-        most content at embed time, so the hard cap is load-bearing.
-      * Returns chunk dicts ready for the existing chunk-save path.
-        chunk_strategy = `"docling_json"`.
+def _load_parser_output(document: Document, session=None) -> Optional[Dict[str, Any]]:
+    """Return `document`'s structured parser output, or None.
 
-    Args:
-        document: Source document whose `parser_output` holds a
-            DoclingDocument payload.
-        target_tokens: Soft per-chunk budget. Flush early if appending
-            the next span would exceed it. Default 1000.
-        min_chunk_tokens: Floor — chunks below this token count merge
-            with the next instead of emitting. Default 30.
-        hard_max_tokens: Hard ceiling — single body spans larger than
-            this are split internally. Default 1500.
+    `Document.parser_output` is a lazy-loading relationship accessor: on a
+    detached instance (e.g. one returned by `kb.documents.get()`, which
+    closes its session before returning) touching it raises
+    DetachedInstanceError. Query the payload by document id instead, so
+    chunking works regardless of how the caller obtained the Document.
     """
-    from ..db_models import is_docling_document
+    from ..db_models import DocumentParserOutput
 
-    parser_output = getattr(document, "parser_output", None)
-    if not is_docling_document(parser_output):
-        # `parser_output` is parser-agnostic; this walker only understands
-        # DoclingDocument payloads (self-identified via `schema_name`).
-        # Anything else falls back through the dispatch's 0-chunks path.
-        return []
+    # Fast path: already loaded (or attached to a live session).
+    try:
+        return document.parser_output
+    except Exception:
+        pass
 
-    from ...chunking import count_tokens
+    if not document.id:
+        return None
+    try:
+        from ..database import get_db_session
+        with get_db_session(session) as s:
+            ref = (
+                s.query(DocumentParserOutput)
+                .filter(DocumentParserOutput.document_id == document.id)
+                .first()
+            )
+            return ref.output if ref is not None else None
+    except Exception as e:
+        logger.warning(
+            f"Could not load parser_output for document {document.id}: {e}"
+        )
+        return None
 
-    body = (parser_output.get("body") or {})
-    children = body.get("children") or []
-    texts_by_ref = {
-        t.get("self_ref") or f"#/texts/{i}": t
-        for i, t in enumerate(parser_output.get("texts") or [])
-    }
-    groups_by_ref = {
-        g.get("self_ref") or f"#/groups/{i}": g
-        for i, g in enumerate(parser_output.get("groups") or [])
-    }
+
+def enforce_embed_budget(
+    chunk_dicts: List[Dict[str, Any]],
+    document: Document,
+    prepend_section_path: bool = True,
+    prepend_gist: bool = True,
+) -> List[Dict[str, Any]]:
+    """Re-split any token chunk that would still overflow the encoder.
+
+    The token chunker slices by *tiktoken* offsets while the encoder reads
+    *word-pieces*, and no constant converts between them: measured over 150
+    real documents at `chunk_size=137`, the worst chunk came to 1085
+    word-pieces — 7.9x, not the 1.32x that normal prose shows. Tables,
+    formulas and URLs tokenize far denser than the ratio predicts, and the
+    encoder truncates silently, so a size chosen by ratio is a size that
+    quietly loses content on exactly the documents worth indexing.
+
+    Sizing is therefore a *target* and this is the guarantee: measure what
+    `embed_text()` will actually hand the encoder, and re-split anything over
+    with `_split_to_budget`, which measures every piece as it cuts.
+
+    A no-op for chunks already inside the budget, which is nearly all of them.
+    """
+    from .budget import get_embed_budget
+
+    budget = get_embed_budget(
+        gist=getattr(document, "gist", None),
+        prepend_section_path=prepend_section_path,
+        prepend_gist=prepend_gist,
+    )
+    text = document.text or ""
 
     out: List[Dict[str, Any]] = []
-    header_stack: List[tuple[int, str]] = []
-    acc_parts: List[str] = []
-    acc_self_refs: List[str] = []
-    acc_pages: Set[int] = set()
-    acc_tokens = 0
+    for cd in chunk_dicts:
+        start, end = cd.get("char_start_index"), cd.get("char_end_index")
+        cap = budget.content_budget(cd.get("section_path"))
 
-    def section_path() -> Optional[str]:
-        return " > ".join(t for _, t in header_stack) or None
-
-    def flush(*, force: bool = False) -> None:
-        """Emit the accumulator as a chunk.
-
-        If the accumulator has fewer than ``min_chunk_tokens`` tokens,
-        keep it alive (don't reset) so the fragment merges with whatever
-        comes next. ``force=True`` overrides this — used at end-of-doc
-        and on section-boundary flushes when keeping a tiny tail open
-        would mis-attribute its section_path to the next section.
-        """
-        nonlocal acc_parts, acc_self_refs, acc_pages, acc_tokens
-        text = "\n\n".join(p for p in acc_parts if p).strip()
-        if not text:
-            acc_parts = []
-            acc_self_refs = []
-            acc_pages = set()
-            acc_tokens = 0
-            return
-        # Tiny-fragment guard: keep accumulating unless forced.
-        if not force and acc_tokens < min_chunk_tokens:
-            return
-        pages = sorted(p for p in acc_pages if p is not None)
-        out.append({
-            "text": text,
-            "chunk_index": len(out),
-            "char_start_index": None,
-            "char_end_index": None,
-            "token_length": acc_tokens,
-            "section_path": section_path(),
-            "page_start": pages[0] if pages else None,
-            "page_end": pages[-1] if pages else None,
-            "bbox": None,
-            "body_self_refs": list(acc_self_refs),
-            "chunk_strategy": "docling_json",
-            "meta": {"source": "docling_body_walk"},
-        })
-        acc_parts = []
-        acc_self_refs = []
-        acc_pages = set()
-        acc_tokens = 0
-
-    def _split_oversized(rendered: str, ntokens: int) -> List[tuple[str, int]]:
-        """Split a single oversized span into pieces ≤ hard_max_tokens.
-
-        Strategy: paragraph (`\\n\\n`) first; if any piece is still too
-        big, split that piece on sentence-ending punctuation; if still
-        too big, hard-truncate every ``hard_max_tokens`` characters as
-        a last resort. Returns a list of (text, token_count) pairs.
-        """
-        if ntokens <= hard_max_tokens:
-            return [(rendered, ntokens)]
-        pieces: List[str] = []
-        # First pass: paragraphs
-        for para in rendered.split("\n\n"):
-            para = para.strip()
-            if not para:
-                continue
-            ptokens = count_tokens(para)
-            if ptokens <= hard_max_tokens:
-                pieces.append(para)
-            else:
-                # Second pass: sentence-ish — split on ". " preserving
-                # the period.
-                buf: List[str] = []
-                buf_tokens = 0
-                for sentence in para.split(". "):
-                    sentence = sentence.strip()
-                    if not sentence:
-                        continue
-                    if not sentence.endswith("."):
-                        sentence = sentence + "."
-                    stokens = count_tokens(sentence)
-                    # Check oversized FIRST. Otherwise a giant sentence
-                    # arriving when buf is non-empty falls into the first
-                    # branch (which puts it into buf) and gets emitted whole
-                    # at end-of-loop, defeating the cap. Markdown tables
-                    # with no `. ` separators are the typical trigger.
-                    if stokens > hard_max_tokens:
-                        if buf:
-                            pieces.append(" ".join(buf))
-                            buf = []
-                            buf_tokens = 0
-                        char_cap = hard_max_tokens * 4
-                        for i in range(0, len(sentence), char_cap):
-                            pieces.append(sentence[i:i + char_cap])
-                    elif buf_tokens + stokens > hard_max_tokens and buf:
-                        pieces.append(" ".join(buf))
-                        buf = [sentence]
-                        buf_tokens = stokens
-                    else:
-                        buf.append(sentence)
-                        buf_tokens += stokens
-                if buf:
-                    pieces.append(" ".join(buf))
-        return [(p, count_tokens(p)) for p in pieces]
-
-    def add_text(self_ref: str, text_node: Dict[str, Any], formatted: Optional[str] = None) -> None:
-        nonlocal acc_tokens
-        body_text = (text_node.get("text") or "").strip()
-        if not body_text:
-            return
-        rendered = formatted if formatted is not None else body_text
-        ntokens = count_tokens(rendered)
-
-        # Page-no provenance (same for all sub-pieces of an oversized span).
-        prov = text_node.get("prov") or []
-        page: Optional[int] = None
-        if prov and isinstance(prov[0], dict):
-            page = prov[0].get("page_no")
-
-        # Internal split for oversized spans.
-        pieces = _split_oversized(rendered, ntokens)
-        for piece_text, piece_tokens in pieces:
-            # Flush early if appending would exceed budget.
-            if acc_tokens > 0 and acc_tokens + piece_tokens > target_tokens:
-                flush(force=True)
-            acc_parts.append(piece_text)
-            acc_self_refs.append(self_ref)
-            if page is not None:
-                acc_pages.add(page)
-            acc_tokens += piece_tokens
-
-    for child in children:
-        cref = child.get("cref") if isinstance(child, dict) else None
-        if not cref:
+        # Without offsets there is no way to re-slice the source; leave it be
+        # (the strategies that emit offset-less chunks size themselves).
+        if start is None or end is None:
+            out.append(cd)
             continue
-        if cref.startswith("#/tables/") or cref.startswith("#/pictures/"):
-            continue
-        if cref.startswith("#/texts/"):
-            t = texts_by_ref.get(cref) or {}
-            label = t.get("label")
-            txt = (t.get("text") or "").strip()
-            if not txt:
-                continue
-            if label in ("section_header", "title"):
-                # Section boundary: flush, then update the header stack.
-                flush()
-                level = t.get("level") or 1
-                while header_stack and header_stack[-1][0] >= level:
-                    header_stack.pop()
-                header_stack.append((level, txt))
-                # Header text itself does not enter chunk.text — the
-                # section_path carries it via embed_text()'s prefix.
-            else:
-                add_text(cref, t)
-        elif cref.startswith("#/groups/"):
-            g = groups_by_ref.get(cref) or {}
-            for sub in g.get("children") or []:
-                sub_cref = sub.get("cref") if isinstance(sub, dict) else None
-                if not sub_cref or not sub_cref.startswith("#/texts/"):
-                    continue
-                sub_t = texts_by_ref.get(sub_cref) or {}
-                sub_txt = (sub_t.get("text") or "").strip()
-                if not sub_txt:
-                    continue
-                if sub_t.get("label") == "list_item":
-                    add_text(sub_cref, sub_t, formatted=f"- {sub_txt}")
-                else:
-                    add_text(sub_cref, sub_t)
 
-    # End-of-doc: force-emit whatever's left so the final fragment isn't
-    # silently dropped.
-    flush(force=True)
+        measured = budget.count(text[start:end])
+        if measured <= cap:
+            # Record the measured value even when nothing is re-split. The
+            # token chunker reports tiktoken counts and re-split pieces report
+            # word-pieces, so leaving it alone made `token_length` mean
+            # different units for different rows of the same document.
+            cd["token_length"] = measured
+            out.append(cd)
+            continue
+
+        pieces = _split_to_budget(text, start, end, cap, budget.count)
+        logger.debug(
+            "Chunk %s of document %s measured over the embedding budget; "
+            "re-split into %d",
+            cd.get("chunk_index"), (document.id or "?")[:8], len(pieces),
+        )
+        for p_start, p_end, p_tokens in pieces:
+            piece = dict(cd)
+            piece.update({
+                "text": text[p_start:p_end],
+                "char_start_index": p_start,
+                "char_end_index": p_end,
+                "token_length": p_tokens,
+            })
+            out.append(piece)
+
+    for i, cd in enumerate(out):
+        cd["chunk_index"] = i
     return out
+
+
+def apply_env_chunk_defaults(
+    config: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
+    """Fill `chunk_size` / `chunk_overlap` from CHUNK_SIZE / CHUNK_OVERLAP.
+
+    So the env vars apply to library calls, not only to the CLI's
+    `--chunk-size` / `--chunk-overlap`. An explicit value in `config` wins.
+
+    Used by both `chunk_document` and `resolve_strategy_name`: the strategy
+    name encodes these two numbers, so predicting the stored name and
+    actually writing it have to start from the same config, or
+    `chunk_and_embed_all` would look for `tokens_1000_100` while the chunker
+    wrote whatever CHUNK_SIZE said.
+    """
+    config = dict(config or {})
+
+    from ...config import get_embedding_config
+    emb_cfg = get_embedding_config()
+
+    if config.get("chunk_size") is None:
+        # CHUNK_SIZE unset -> size to the embedding window, not the library's
+        # model-agnostic 1000. Left at 1000 against a 256-window encoder,
+        # every token chunk is silently truncated to its first quarter.
+        from .budget import token_chunk_size
+        config["chunk_size"] = emb_cfg.get("chunk_size") or token_chunk_size()
+    # Left absent rather than None when unconfigured, so the chunker's
+    # "derive 10% of chunk_size" default still applies.
+    if config.get("chunk_overlap") is None:
+        config.pop("chunk_overlap", None)
+        if emb_cfg.get("chunk_overlap") is not None:
+            config["chunk_overlap"] = emb_cfg["chunk_overlap"]
+    return config
+
+
+def resolve_strategy_name(
+    requested: str, config: Optional[Dict[str, Any]] = None
+) -> str:
+    """The name a requested strategy is *stored* under.
+
+    `summary` and `section` are what callers ask for — `CHUNK_STRATEGY`, the
+    web UI dropdown, `chunk_and_embed(chunk_strategy="section")`. What lands in
+    the database is `summary_{window}` / `section_{window}`, because both are
+    split to fit the embedding model's window: under a 256-token encoder and a
+    512-token one the same name would label two incompatible chunkings of the
+    same document, with no way to tell them apart or keep both.
+
+    `section` carried a bare name until the move to a 512-token encoder made
+    the collision real: 256-window section chunks and 512-window ones sat in
+    the same table under one label, and re-chunking silently replaced the old
+    set instead of standing beside it.
+
+    `tokens` is named the same way — window, not the literal chunk_size — even
+    though its own resolver (`get_strategy_name`) would otherwise report the
+    *derived* tiktoken size (`tokens_331_33`), not the window it targets
+    (`tokens_512_51`). The derived number moves with `budget.token_chunk_size`
+    (SPECIAL_TOKENS/GIST_ALLOWANCE/FALLBACK_RATIO tuning) while the window it
+    fits does not, so the window is what belongs in a name meant to answer
+    "which embeddings can read this chunk set" — the real chunk_size actually
+    used to slice stays on each chunk's `meta` instead.
+
+    Everything else delegates to the pure-tiktoken resolver in
+    `kb_mcp.chunking`, which already encodes its own parameters
+    (`tokens_1000_200`). That one cannot resolve a window — it deliberately
+    has no `kb` imports and so no access to the embedder.
+    """
+    from ...chunking.chunking import get_strategy_name
+
+    if requested in ("summary", "section"):
+        from .budget import get_embed_budget
+        return f"{requested}_{get_embed_budget().window}"
+    if requested == "tokens":
+        from .budget import get_embed_budget
+        cfg = apply_env_chunk_defaults(config)
+        window = get_embed_budget().window
+        return get_strategy_name("tokens", {
+            "chunk_size": window,
+            "prepend_gist": cfg.get("prepend_gist", True),
+            "prepend_section_path": cfg.get("prepend_section_path", True),
+        })
+    return get_strategy_name(requested, apply_env_chunk_defaults(config))
+
+
+# Cut levels, coarsest first. A dense Markdown list (references, bullet
+# points) has no blank lines between items — paragraph-level ("\n\n") sees
+# the whole list as one oversized "paragraph" — but each item is its own
+# line and comfortably under any real cap, so a line-level cut resolves it
+# without ever falling through to sentence-splitting. That matters because
+# sentence-splitting on bare ". " is not real sentence detection — it also
+# fires on "Nucl. Instr. Meth. ", severing a citation between its
+# abbreviations — so anything line-structured should never reach it.
+_CUT_LEVELS: tuple[str, ...] = ("\n\n", "\n", ". ")
+
+
+def _split_to_budget(text: str, start: int, end: int, cap: int,
+                     count: Callable[[str], int]) -> List[tuple[int, int, int]]:
+    """Split `text[start:end]` into (start, end, tokens) pieces of at most `cap`.
+
+    Cuts on paragraph, then line, then sentence-ish boundaries — see
+    `_CUT_LEVELS` — falling back to a measured character cut for a single
+    unit that is still over cap at the finest level (a markdown table row
+    with no ". " is the usual trigger). Pieces that fit are packed together
+    up to `cap` at whichever level resolved them, so a small piece (a lone
+    heading, a short paragraph, a short list item) merges into its
+    neighbour instead of emitting alone. Offsets stay absolute into `text`
+    throughout, so every piece remains an exact slice.
+    """
+    tokens = count(text[start:end])
+    if tokens <= cap:
+        return [(start, end, tokens)]
+    return _pack_split(text, start, end, cap, count, 0)
+
+
+def _cut(text: str, sub_start: int, sub_end: int, sep: str) -> List[tuple[int, int]]:
+    """Split text[sub_start:sub_end) on `sep`, keeping absolute offsets.
+
+    The separator is kept with the preceding piece for "\\n" and ". " (so
+    a line still ends with its own newline / period), dropped for "\\n\\n"
+    (a blank line is not content worth keeping on either side).
+    """
+    pieces: List[tuple[int, int]] = []
+    pos = sub_start
+    while True:
+        nxt = text.find(sep, pos, sub_end)
+        if nxt == -1:
+            if pos < sub_end:
+                pieces.append((pos, sub_end))
+            break
+        piece_end = nxt + (len(sep) if sep != "\n\n" else 0)
+        if piece_end > pos:
+            pieces.append((pos, piece_end))
+        pos = nxt + len(sep)
+    return pieces
+
+
+def _char_cut(text: str, c_start: int, c_end: int, c_tokens: int, cap: int,
+              count: Callable[[str], int]) -> List[tuple[int, int, int]]:
+    """Last resort: cut by characters, measuring as it goes.
+
+    A fixed chars-per-token constant is wrong by a wide margin on the
+    content that reaches here (markdown tables, long formulas, CJK), and
+    overshooting means silent truncation. Calibrating on the span average
+    isn't enough either: a table's `---|---` separator row tokenizes
+    several times denser than its prose rows, so an average-derived step
+    still overshoots locally. Measure every piece and shrink the step
+    until it fits.
+    """
+    pieces: List[tuple[int, int, int]] = []
+    pos = c_start
+    # Seed from the span average, with 10% of headroom.
+    per_token = max(1.0, (c_end - c_start) / max(1, c_tokens))
+    step = max(1, int(cap * per_token * 0.9))
+    while pos < c_end:
+        take = step
+        while True:
+            ce = min(pos + take, c_end)
+            t = count(text[pos:ce])
+            if t <= cap or take <= 1:
+                break
+            # Overshot: rescale on what this stretch actually measured
+            # rather than halving blindly.
+            take = max(1, min(take - 1, int(take * cap / t * 0.9)))
+        pieces.append((pos, ce, t))
+        pos = ce
+        # Carry the corrected step forward — the density that tripped us
+        # up usually continues for a while.
+        step = max(1, take)
+    return pieces
+
+
+def _pack_split(text: str, start: int, end: int, cap: int,
+                 count: Callable[[str], int], level: int
+                 ) -> List[tuple[int, int, int]]:
+    """Cut text[start:end) on `_CUT_LEVELS[level]`, packing fitting pieces
+    together and recursing into any piece still over cap at the next level.
+
+    Uniform at every level: a unit that fits joins the pending pack if the
+    merge still fits under `cap`, otherwise the pack flushes as its own
+    piece and this unit starts a new one. A unit that doesn't fit on its
+    own — even alone — is split at the next finer level (or character-cut,
+    past the last level), and *that* result's first/last pieces are what
+    the pack test runs against, so a merge never skips the level in
+    between: a heading immediately before an oversized paragraph, say,
+    still gets a chance to merge into that paragraph's first sub-piece.
+    """
+    if level >= len(_CUT_LEVELS):
+        tokens = count(text[start:end])
+        return _char_cut(text, start, end, tokens, cap, count)
+
+    result: List[tuple[int, int, int]] = []
+    pack_start: Optional[int] = None
+    pack_end = 0
+
+    def flush_pack() -> None:
+        nonlocal pack_start, pack_end
+        if pack_start is not None:
+            result.append((pack_start, pack_end, count(text[pack_start:pack_end])))
+            pack_start, pack_end = None, 0
+
+    for u_start, u_end in _cut(text, start, end, _CUT_LEVELS[level]):
+        u_tokens = count(text[u_start:u_end])
+        if u_tokens <= cap:
+            if not u_tokens:
+                continue
+            # Measure the merged slice rather than summing: merging
+            # re-includes whatever the separator's un-kept characters were
+            # (blank lines at paragraph level), so a sum would drift under
+            # the real cost and overflow the window.
+            if pack_start is not None and count(text[pack_start:u_end]) > cap:
+                flush_pack()
+            if pack_start is None:
+                pack_start = u_start
+            pack_end = u_end
+            continue
+        # This unit alone is still over cap — split it at the next finer
+        # level. Its first sub-piece gets the same pack-merge chance any
+        # other fitting unit would: a pending pack from before this unit
+        # (e.g. a lone heading) can still land inside the same chunk as
+        # the start of what follows, rather than being forced out alone
+        # just because the *next* unit as a whole didn't fit.
+        sub_pieces = _pack_split(text, u_start, u_end, cap, count, level + 1)
+        if not sub_pieces:
+            continue
+        first_start, first_end, first_tokens = sub_pieces[0]
+        if (pack_start is not None
+                and count(text[pack_start:first_end]) <= cap):
+            pack_end = first_end
+            flush_pack()
+        else:
+            flush_pack()
+            result.append((first_start, first_end, first_tokens))
+        result.extend(sub_pieces[1:])
+    flush_pack()
+    return result
 
 
 def chunk_document(
@@ -310,16 +411,27 @@ def chunk_document(
         raise ValueError("Document must be saved to database first (must have id)")
 
     # Auto-route by doc_type for the special single-chunk-per-record types.
-    # Section / table / image records carry self-contained text (caption +
-    # nearby_text + grid for tables, title + body for sections, VLM
-    # description for images) and would only get noisier if token-chunked
-    # against the parent's text. The dedicated strategies emit one chunk
-    # per record, matching how the SYNTHESIS / TABLE / FIGURE doc_type_boost
-    # was designed to retrieve them. Override even if a chunk_strategy was
-    # passed — it's almost always the global default ("tokens") leaking in
-    # via the user's env var, and silently producing duplicates is worse
-    # than ignoring an inapplicable override.
-    if document.doc_type in ("image", "section", "table"):
+    # Table / image records carry self-contained text (caption + nearby_text
+    # + grid for tables, VLM description for images) and would only get
+    # noisier if token-chunked against the parent's text. The dedicated
+    # strategies emit one chunk per record, matching how the TABLE / FIGURE
+    # doc_type_boost was designed to retrieve them. Override even if a
+    # chunk_strategy was passed — it's almost always the global default
+    # ("tokens") leaking in via the user's env var, and silently producing
+    # duplicates is worse than ignoring an inapplicable override.
+    #
+    # doc_type="section" is legacy: the parser no longer emits separate
+    # section Documents (section-level retrieval is now the "section"
+    # chunk_strategy walking a doc_type="text" document's own body), but
+    # existing section-doctype rows from before that change remain in the
+    # database. They still need the same one-chunk-per-record, no-prefix
+    # treatment as table/image — NOT the new Docling-body-walker meaning of
+    # chunk_strategy="section" (which only applies to doc_type="text").
+    # Without this, chunk_and_embed_all's "no chunk of this strategy yet"
+    # query picks these rows up (nothing excludes doc_type="section") and,
+    # with CHUNK_STRATEGY=section configured, they'd otherwise fall through
+    # to plain token-chunking and get a spurious extra chunk.
+    if document.doc_type in ("image", "table", "section"):
         if chunk_strategy is not None and chunk_strategy != document.doc_type:
             logger.debug(
                 f"Overriding chunk_strategy={chunk_strategy!r} -> {document.doc_type!r} "
@@ -334,47 +446,75 @@ def chunk_document(
     # Extract embedding context flags from config (default to True)
     if config is None:
         config = {}
+
+    config = apply_env_chunk_defaults(config)
+
     prepend_section_path = config.get("prepend_section_path", True)
     prepend_gist = config.get("prepend_gist", True)
 
-    # Handle "summary" strategy specially - create single chunk from document summary
+    # Handle "summary" strategy specially - chunk the document summary.
     if chunk_strategy == "summary":
         if not document.summary:
             raise ValueError("Document must have summary to use 'summary' chunking strategy. Call generate_summary() first.")
 
-        # Calculate token length for the summary
-        from ...chunking import count_tokens
-        summary_tokens = count_tokens(document.summary)
+        from .budget import get_embed_budget
 
-        # Create a single chunk dict with the summary
-        chunk_dicts = [{
-            "text": document.summary,
-            "chunk_index": 0,
-            "char_start_index": None,
-            "char_end_index": None,
-            "token_length": summary_tokens,
-            "chunk_strategy": "summary",
-            "meta": {"source": "document.summary"},
-        }]
-    elif chunk_strategy in ("image", "section", "table"):
-        # Single-chunk-per-record strategies — section / table / image
-        # records carry self-contained text and would only get noisier if
-        # token-chunked against the parent. The dedicated strategies emit
-        # one chunk per record (and one only) for short content.
+        # `Chunk.embed_text()` returns a summary chunk's text verbatim — no
+        # Section:/Context: prefix — so the whole window is the summary's.
+        summary_budget = get_embed_budget(
+            prepend_section_path=False, prepend_gist=False
+        )
+        cap = summary_budget.content_budget()
+
+        # Summaries used to be stored as one chunk however long they were,
+        # so anything past the window was embedded as nothing: 84% of the
+        # corpus's summaries were over it. Split to the budget instead, in
+        # the embedding model's own token units.
+        spans = _split_to_budget(
+            document.summary, 0, len(document.summary), cap, summary_budget.count
+        )
+        summary_strategy = resolve_strategy_name("summary")
+        chunk_dicts = []
+        for i, (s_start, s_end, s_tokens) in enumerate(spans):
+            chunk_dicts.append({
+                "text": document.summary[s_start:s_end],
+                "chunk_index": i,
+                # Offsets stay NULL. They would index into `document.summary`,
+                # not `document.text`, and the search layer's positioned-chunk
+                # branch would slice the wrong string with them. Search returns
+                # the whole summary for a summary hit anyway, so per-piece
+                # offsets buy nothing.
+                "char_start_index": None,
+                "char_end_index": None,
+                "token_length": s_tokens,
+                "chunk_strategy": summary_strategy,
+                # No per-split fields here: chunk `meta` is not persisted on
+                # the row, and the first chunk's meta is what seeds the
+                # *global* ChunkStrategy row — so a split count from one
+                # document would end up describing the strategy itself.
+                "meta": {"source": "document.summary"},
+            })
+    elif chunk_strategy in ("image", "table", "section") and document.doc_type == chunk_strategy:
+        # Single-chunk-per-record strategies — table / image / legacy
+        # section records carry self-contained text and would only get
+        # noisier if token-chunked against the parent. The dedicated
+        # strategies emit one chunk per record (and one only) for short
+        # content.
         #
-        # However: long sections / wide tables / verbose VLM descriptions
-        # can blow past MiniLM's 256-token embed cap, where most of the
-        # content becomes invisible to retrieval. A production-corpus audit
-        # found `section` chunks up to 15,501 tokens. For long content
-        # we sub-chunk internally on paragraph / sentence boundaries
-        # while keeping the same chunk_strategy label so the record
-        # still routes through the SYNTHESIS / TABLE / FIGURE doc_type
-        # boost paths.
-        if document.doc_type != chunk_strategy:
-            raise ValueError(
-                f"'{chunk_strategy}' chunking strategy requires "
-                f"doc_type='{chunk_strategy}', got '{document.doc_type}'."
-            )
+        # The `document.doc_type == chunk_strategy` guard is what keeps
+        # this from also catching chunk_strategy="section" requested for a
+        # doc_type="text" document — that's the *new* meaning of "section"
+        # (the Docling-body-walker chunking a text document's own body by
+        # section boundaries, handled by the `use_section_walker` branch
+        # further below) and must not be confused with this legacy,
+        # doc_type="section"-only, one-chunk-per-record path.
+        #
+        # However: wide tables / verbose VLM descriptions can blow past
+        # the embedding model's window, where most of the content becomes
+        # invisible to retrieval. For long content we sub-chunk internally
+        # on paragraph / sentence boundaries while keeping the same
+        # chunk_strategy label so the record still routes through the
+        # TABLE / FIGURE doc_type boost paths.
 
         if not document.text:
             raise ValueError(
@@ -382,7 +522,15 @@ def chunk_document(
                 f"'{chunk_strategy}' chunking strategy."
             )
 
-        from ...chunking import count_tokens
+        from .budget import get_embed_budget
+
+        # These records embed their own text verbatim (`embed_text()`
+        # returns it unchanged for the image/table strategies), so the
+        # whole window is theirs — no Section:/Context: prefix to reserve.
+        record_budget = get_embed_budget(
+            prepend_section_path=False, prepend_gist=False
+        )
+        count_tokens = record_budget.count
 
         text_parts = []
         if prepend_gist and document.parent_id:
@@ -402,12 +550,14 @@ def chunk_document(
         chunk_text = "\n\n".join(text_parts)
         total_tokens = count_tokens(chunk_text)
 
-        # Hard cap for record-level chunks. Below this we keep the record
-        # as one chunk (cheap, preserves "one chunk per record" semantic
-        # that retrieval boost code relies on). Above it, sub-chunk.
-        SECTION_CHUNK_HARD_MAX = 1000
+        # Hard cap for record-level chunks, in the embedding model's own
+        # token units: exactly what fits before the encoder truncates.
+        # Below it we keep the record as one chunk (cheap, and preserves
+        # the "one chunk per record" semantic the retrieval boost code
+        # relies on). Above it, sub-chunk.
+        RECORD_CHUNK_HARD_MAX = record_budget.content_budget()
 
-        if total_tokens <= SECTION_CHUNK_HARD_MAX:
+        if total_tokens <= RECORD_CHUNK_HARD_MAX:
             chunk_dicts = [{
                 "text": chunk_text,
                 "chunk_index": 0,
@@ -431,11 +581,11 @@ def chunk_document(
                 if not para:
                     continue
                 ptokens = count_tokens(para)
-                if buf_tokens + ptokens > SECTION_CHUNK_HARD_MAX and buf:
+                if buf_tokens + ptokens > RECORD_CHUNK_HARD_MAX and buf:
                     pieces.append("\n\n".join(buf))
                     buf = []
                     buf_tokens = 0
-                if ptokens > SECTION_CHUNK_HARD_MAX:
+                if ptokens > RECORD_CHUNK_HARD_MAX:
                     # Single paragraph too big — split on sentence-ish.
                     if buf:
                         pieces.append("\n\n".join(buf))
@@ -456,7 +606,7 @@ def chunk_document(
                         # whole at end-of-loop, defeating the hard cap.
                         # Markdown tables (pipe-delimited rows with no
                         # `. `) are the typical trigger.
-                        if stokens > SECTION_CHUNK_HARD_MAX:
+                        if stokens > RECORD_CHUNK_HARD_MAX:
                             # Flush whatever's accumulated, then hard-cut
                             # the giant sentence by characters. ~4
                             # char/token rule of thumb.
@@ -464,10 +614,18 @@ def chunk_document(
                                 pieces.append(" ".join(sent_buf))
                                 sent_buf = []
                                 sent_buf_tokens = 0
-                            char_cap = SECTION_CHUNK_HARD_MAX * 4
+                            # Calibrate the cut on this sentence's own
+                            # chars-per-token rather than a flat ~4: the
+                            # content that reaches here (markdown tables,
+                            # formulas, CJK) is exactly where a constant
+                            # is most wrong, and overshooting truncates.
+                            per_token = max(1.0, len(sentence) / max(1, stokens))
+                            char_cap = max(
+                                1, int(RECORD_CHUNK_HARD_MAX * per_token * 0.9)
+                            )
                             for i in range(0, len(sentence), char_cap):
                                 pieces.append(sentence[i:i + char_cap])
-                        elif sent_buf_tokens + stokens > SECTION_CHUNK_HARD_MAX and sent_buf:
+                        elif sent_buf_tokens + stokens > RECORD_CHUNK_HARD_MAX and sent_buf:
                             pieces.append(" ".join(sent_buf))
                             sent_buf = [sentence]
                             sent_buf_tokens = stokens
@@ -498,40 +656,82 @@ def chunk_document(
                     },
                 })
     else:
-        # Regular chunking. PDF parents may opt into the
-        # DoclingDocument-aware chunker via CHUNK_FROM_DOCLING_JSON — it
-        # walks the persisted parser_output["body"] in reading order,
-        # populates page_start / page_end / body_self_refs on every chunk,
-        # and respects section boundaries. Falls back to the Markdown
-        # token-windowing path when the flag is off, the doc isn't a
-        # text record, or parser_output holds no DoclingDocument payload.
+        # Regular chunking. chunk_strategy="section" walks the persisted
+        # parser_output["body"] in reading order (chunk_from_docling_json),
+        # emitting one chunk per section — populating page_start /
+        # page_end / body_self_refs / section_path and respecting section
+        # boundaries — instead of plain token windows. Falls back to the
+        # Markdown token chunker when the doc isn't a text record, or
+        # parser_output holds no DoclingDocument payload (or the walk
+        # produces zero chunks), so a parent text doc never ends up with
+        # no chunks at all.
         if config is None:
             config = {}
         config["prepend_gist"] = prepend_gist
         config["prepend_section_path"] = prepend_section_path
 
-        from ...config import get_embedding_config
         from ..db_models import is_docling_document
-        use_docling = (
-            get_embedding_config().get("chunk_from_docling_json", False)
+        parser_output = None
+        if chunk_strategy == "section" and document.doc_type == "text":
+            parser_output = _load_parser_output(document, session=session)
+        use_section_walker = (
+            chunk_strategy == "section"
             and document.doc_type == "text"
-            and is_docling_document(getattr(document, "parser_output", None))
+            and is_docling_document(parser_output)
         )
 
-        if use_docling:
-            target_tokens = config.get("chunk_size", 1000)
-            chunk_dicts = chunk_from_docling_json(document, target_tokens=target_tokens)
+        if use_section_walker:
+            # No chunk_size default: the walker sizes itself from the
+            # embedding window. An explicit config value can only tighten
+            # that, never push chunks past what the encoder will read.
+            chunk_dicts = chunk_from_docling_json(
+                document,
+                target_tokens=config.get("chunk_size"),
+                parser_output=parser_output,
+                prepend_section_path=prepend_section_path,
+                prepend_gist=prepend_gist,
+            )
             if not chunk_dicts:
-                # Empty body or all tables/pictures; fall back to markdown
-                # so we don't end up with a parent text doc that has zero
-                # chunks.
                 logger.info(
                     f"chunk_from_docling_json produced 0 chunks for {document.id}; "
-                    f"falling back to Markdown {chunk_strategy} chunker"
+                    f"falling back to Markdown tokens chunker"
                 )
-                chunk_dicts = chunk(document.text, strategy=chunk_strategy, config=config)
+                chunk_dicts = chunk(document.text, strategy="tokens", config=config)
+        elif chunk_strategy == "section":
+            # Requested section chunking but no walkable Docling payload
+            # (e.g. non-PDF text). Fall back to plain token chunking.
+            #
+            # Warn, don't whisper: CHUNK_STRATEGY=section reads as "this
+            # corpus is chunked on structure", and silently degrading to
+            # token windows for some documents makes the config a lie. The
+            # chunks are still window-sized, so this costs structure and
+            # section_path provenance rather than correctness — but which
+            # documents took this path should be visible in the logs.
+            logger.warning(
+                "chunk_strategy='section' requested for document %s (%s) but "
+                "it has no DoclingDocument parser_output; falling back to the "
+                "token chunker — no section boundaries or section_path for "
+                "this document",
+                document.id[:8], document.source_type or "unknown type",
+            )
+            chunk_dicts = chunk(document.text, strategy="tokens", config=config)
         else:
             chunk_dicts = chunk(document.text, strategy=chunk_strategy, config=config)
+
+        # The token chunker sizes in tiktoken; the encoder reads word-pieces.
+        # Nothing above guarantees the result fits, so measure and re-split.
+        if chunk_dicts and chunk_dicts[0].get("chunk_strategy", "").startswith("tokens"):
+            chunk_dicts = enforce_embed_budget(
+                chunk_dicts, document, prepend_section_path, prepend_gist
+            )
+            # The chunker itself names its output after the derived tiktoken
+            # size (`tokens_331_33`); relabel to the window-based name so the
+            # stored strategy matches what resolve_strategy_name predicts
+            # (chunk_and_embed_all queries by that prediction to decide
+            # whether a document already has current chunks).
+            windowed_name = resolve_strategy_name("tokens", config)
+            for cd in chunk_dicts:
+                cd["chunk_strategy"] = windowed_name
 
 
     # Determine if we need to create a session
@@ -542,15 +742,22 @@ def chunk_document(
         strategy_names = {chunk_dict["chunk_strategy"] for chunk_dict in chunk_dicts}
 
         # Delete existing chunks for this document with any of these strategies
-        # This ensures re-chunking with the same strategy replaces old chunks
-        if strategy_names:
+        # This ensures re-chunking with the same strategy replaces old chunks.
+        #
+        # Window-tagged names also supersede their un-tagged predecessor:
+        # writing `summary_256` while a legacy `summary` row survives would
+        # leave the document with two summary chunk sets, the old one holding
+        # the truncated text this change exists to fix.
+        replaced_names = strategy_names | {base_strategy(n) for n in strategy_names}
+
+        if replaced_names:
             deleted_count = session.query(Chunk).filter(
                 Chunk.document_id == document.id,
-                Chunk.chunk_strategy.in_(strategy_names)
+                Chunk.chunk_strategy.in_(replaced_names)
             ).delete(synchronize_session=False)
 
             if deleted_count > 0:
-                strategy_list = ", ".join(sorted(strategy_names))
+                strategy_list = ", ".join(sorted(replaced_names))
                 logger.info(f"Replacing {deleted_count} existing chunk(s) for document {document.id[:8]}... (strategies: {strategy_list})")
                 session.flush()  # Ensure deletions are committed before inserts
 
@@ -589,7 +796,15 @@ def chunk_document(
         # model actually sees.
         chunks = []
         for chunk_dict in chunk_dicts:
-            is_special_strategy = chunk_dict.get("chunk_strategy") in ["summary", "image"]
+            # Must agree with Chunk.embed_text()'s special list, since this
+            # block exists only to count what that method will produce:
+            # base_strategy() so `summary_256` still counts as special, and
+            # "table" included because embed_text() returns table text
+            # verbatim too — counting a prefix it never adds overstated
+            # token_length on every table chunk.
+            is_special_strategy = base_strategy(
+                chunk_dict.get("chunk_strategy") or ""
+            ) in ("summary", "image", "table")
 
             # Build the embed-time text (prefix + clean) just to count its tokens
             # so we can budget for the embedder. The prefix is NOT stored on
@@ -605,8 +820,10 @@ def chunk_document(
             embed_parts.append(chunk_dict["text"])
 
             if context_added:
-                from ...chunking import count_tokens
-                final_token_length = count_tokens("\n\n".join(embed_parts))
+                from .budget import get_embed_budget
+                final_token_length = get_embed_budget().count(
+                    "\n\n".join(embed_parts)
+                )
             else:
                 final_token_length = chunk_dict.get("token_length")
 

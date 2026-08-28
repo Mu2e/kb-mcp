@@ -16,7 +16,12 @@ logger = logging.getLogger(__name__)
 _CONVERTER_CACHE = None
 
 def _get_converter() -> Any:
-    """Initialize and return the marker PdfConverter (cached)."""
+    """Initialize and return the marker PdfConverter (cached).
+
+    Raises:
+        ImportError: marker-pdf is not installed.
+        RuntimeError: the converter could not be constructed.
+    """
     global _CONVERTER_CACHE
     if _CONVERTER_CACHE is not None:
         return _CONVERTER_CACHE
@@ -24,9 +29,14 @@ def _get_converter() -> Any:
     try:
         from marker.converters.pdf import PdfConverter
         from marker.models import create_model_dict
-    except ImportError:
-        logger.error("marker-pdf not installed. Install with: pip install \"marker-pdf[all]\"")
-        return None
+    except ImportError as e:
+        # Raise rather than degrade: returning None here used to surface as an
+        # empty parse, which the ingest pipeline stored as a zero-length
+        # document and reported as a successful import.
+        raise ImportError(
+            "marker-pdf is not installed. Install the extra: "
+            'pip install -e ".[marker]"'
+        ) from e
 
     logger.info("Initializing marker PdfConverter (this may take a while)...")
 
@@ -42,14 +52,12 @@ def _get_converter() -> Any:
         return _CONVERTER_CACHE
     except (OSError, PermissionError) as e:
         if "Read-only file system" in str(e):
-            logger.error(
+            raise RuntimeError(
                 "Failed to initialize marker: Cannot write to read-only package directory. "
                 "Please install marker-pdf in a writable location (e.g., venv in $SCRATCH or $HOME). "
                 f"Error: {e}"
-            )
-        else:
-            logger.error(f"Failed to initialize marker: {e}")
-        return None
+            ) from e
+        raise RuntimeError(f"Failed to initialize marker: {e}") from e
 
 
 class MarkerParser(BaseParser):
@@ -73,8 +81,6 @@ class MarkerParser(BaseParser):
             Tuple of (markdown_text, list_of_image_dicts)
         """
         converter = _get_converter()
-        if converter is None:
-            return "", []
 
         try:
             from io import BytesIO
@@ -133,6 +139,7 @@ class MarkerParser(BaseParser):
                         "source_type": parent_data.get("source_type"),
                         "binary": img_bytes,
                         "parent_id": parent_data.get("id"),
+                        "uri": parent_data.get("uri"),
                         "meta": {
                             "image_name": img_name,
                             "parent_doc_id": parent_data.get("id", parent_data.get("doc_id")),
@@ -166,6 +173,8 @@ class MarkerParser(BaseParser):
             return text, image_dicts
             
         except Exception as e:
+            # Same reasoning as the import failure above: returning empty text
+            # here would be recorded as a successfully parsed, empty document.
             logger.error(f"Error parsing with marker: {e}", exc_info=True)
-            return "", []
+            raise
 

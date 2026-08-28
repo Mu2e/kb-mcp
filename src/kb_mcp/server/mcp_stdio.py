@@ -19,6 +19,7 @@ import logging
 from mcp.server.fastmcp import FastMCP
 
 from . import mcp as mcp_tools
+from .mcp_prompts import get_server_instructions
 
 # Configure logging to stderr since stdout is used for MCP communication
 logging.basicConfig(
@@ -30,7 +31,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Create FastMCP instance (no auth for stdio)
-mcp = FastMCP("kb-mcp-stdio")
+mcp = FastMCP("kb-mcp-stdio", instructions=get_server_instructions())
 
 # Register tools and prompts (no resources for stdio - they need server context)
 mcp_tools.register_tools(mcp)

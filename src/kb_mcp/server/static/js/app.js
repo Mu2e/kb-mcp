@@ -57,7 +57,11 @@ document.addEventListener('DOMContentLoaded', async function() {
         }
         
         loadDocuments(true); // Initial load
-        
+
+        // Focus search input on page load
+        const searchEl = document.getElementById('search-input');
+        if (searchEl) searchEl.focus();
+
         // Set up infinite scroll
         window.addEventListener('scroll', handleScroll);
     }
@@ -152,9 +156,14 @@ function initFilters() {
 
     // Update filters when search input changes
     if (searchInput) {
-        // Update filters when focus leaves the search field
+        // Update filters when focus leaves the search field, but only if the
+        // query actually changed - otherwise every stray blur (e.g. clicking
+        // a document card while the auto-focused search box has focus) wipes
+        // and reloads the document list, breaking the pending click.
         searchInput.addEventListener('blur', function() {
-            applyFilters();
+            if (searchInput.value !== currentFilters.search) {
+                applyFilters();
+            }
         });
 
         // Also update on Enter key
@@ -254,7 +263,7 @@ function initFilters() {
     // Initialize filters from URL params
     const urlParams = new URLSearchParams(window.location.search);
     currentFilters.source_id = urlParams.get('source_id') || '';
-    currentFilters.doc_type = urlParams.get('doc_type') || '';
+    currentFilters.doc_type = urlParams.has('doc_type') ? urlParams.get('doc_type') : 'text';
     currentFilters.search = urlParams.get('search') || '';
     currentFilters.search_type = urlParams.get('search_type') || 'hybrid';
     currentFilters.date_type = urlParams.get('date_type') || 'insert_time';
@@ -398,7 +407,9 @@ function applyFilters() {
     // Update URL without reload
     const params = new URLSearchParams();
     if (currentFilters.source_id) params.set('source_id', currentFilters.source_id);
-    if (currentFilters.doc_type) params.set('doc_type', currentFilters.doc_type);
+    // Always include doc_type (even empty = "All Types") so it round-trips through the
+    // URL correctly against the "text" default applied when the param is absent.
+    params.set('doc_type', currentFilters.doc_type);
     if (currentFilters.search) params.set('search', currentFilters.search);
     if (currentFilters.search_type && currentFilters.search_type !== 'hybrid') {
         params.set('search_type', currentFilters.search_type);
@@ -677,15 +688,15 @@ function createDocumentElement(doc, isSearchResult = false, showSimilarity = tru
     div.setAttribute('data-doc-type', doc.doc_type);
     div.setAttribute('data-doc-id', doc.id);
     
-    // Make entire box clickable
+    // Make entire box clickable, but let real links/buttons handle their own navigation
     div.addEventListener('click', function(e) {
-        // Don't navigate if clicking on action buttons
-        if (!e.target.closest('.document-actions')) {
+        if (!e.target.closest('a, .document-actions')) {
             window.location.href = `/web/document/${doc.id}`;
         }
     });
     
-    const insertTime = formatLocalTime(doc.insert_time);
+    const displayTimeLabel = doc.creating_time ? 'Created' : 'Inserted';
+    const displayTime = formatLocalTime(doc.creating_time || doc.insert_time);
     // Show summary if available, otherwise show text preview
     let contentPreview = '';
     if (doc.summary) {
@@ -747,7 +758,7 @@ function createDocumentElement(doc, isSearchResult = false, showSimilarity = tru
         }
     }
     
-    const uriButton = doc.uri ? 
+    const uriButton = doc.uri ?
         (() => {
             if (!doc.uri) return '';
             // Handle local URIs the same way as the document detail page
@@ -783,7 +794,7 @@ function createDocumentElement(doc, isSearchResult = false, showSimilarity = tru
                 <div class="document-meta">
                     <strong>Source:</strong> ${escapeHtml(doc.source_id)} |
                     <strong>Type:</strong> ${escapeHtml(doc.doc_type)} |
-                    <strong>Inserted:</strong> ${insertTime}
+                    <strong>${displayTimeLabel}:</strong> ${displayTime}
                 </div>
             </div>
         </div>
@@ -793,9 +804,6 @@ function createDocumentElement(doc, isSearchResult = false, showSimilarity = tru
         <div class="document-actions">
             <a href="/web/document/${doc.id}" class="btn">View Full Document</a>
             <a href="${chatLink}" class="btn" style="background-color: #2196F3;">💬 Chat with Document</a>
-            <!--${!doc.summary ? `<form method="POST" action="/web/document/${doc.id}/generate-summary" style="display: inline-block; margin-left: 10px;">
-                <button type="submit" class="btn" style="background-color: #FF9800; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; font-size: 14px;">Generate Summary</button>-->
-            </form>` : ''}
             ${uriButton}
         </div>
     `;
@@ -988,23 +996,43 @@ function initChunkHighlighting(docId) {
     
     function setupChunkHighlights() {
         if (!currentChunks || currentChunks.length === 0 || !originalText) return;
-        
+
+        // "section"-strategy chunks carry real char_start_index/char_end_index
+        // (resolved server-side by finding each chunk's text in the document),
+        // but a chunk whose text couldn't be located verbatim is left with
+        // both None. Treating a missing offset as 0 / originalText.length —
+        // the old behavior — made any such chunk silently span the entire
+        // document and appear to "overlap" every other chunk. Skip them here
+        // instead; they're listed separately below the highlighted text.
+        const hasRealOffsets = (chunk) =>
+            chunk.char_start_index !== null && chunk.char_start_index !== undefined &&
+            chunk.char_end_index !== null && chunk.char_end_index !== undefined;
+
+        const chunksWithoutOffsets = currentChunks.filter(c => !hasRealOffsets(c));
+        const chunksToHighlight = currentChunks.filter(hasRealOffsets);
+
+        if (chunksToHighlight.length === 0) {
+            textElement.textContent = originalText;
+            renderUnpositionedChunksList(chunksWithoutOffsets);
+            return;
+        }
+
         // Sort chunks by start index (ascending), then by end index (descending) for overlaps
-        const sortedChunks = [...currentChunks].sort((a, b) => {
-            const startDiff = (a.char_start_index || 0) - (b.char_start_index || 0);
+        const sortedChunks = [...chunksToHighlight].sort((a, b) => {
+            const startDiff = a.char_start_index - b.char_start_index;
             if (startDiff !== 0) return startDiff;
-            return (b.char_end_index || 0) - (a.char_end_index || 0);
+            return b.char_end_index - a.char_end_index;
         });
-        
+
         // Build a structure to handle overlaps
         // We'll create segments and track which chunks cover each segment
         const segments = [];
         const positions = new Set();
-        
+
         // Collect all start and end positions
         sortedChunks.forEach(chunk => {
-            positions.add(chunk.char_start_index || 0);
-            positions.add(chunk.char_end_index || originalText.length);
+            positions.add(chunk.char_start_index);
+            positions.add(chunk.char_end_index);
         });
         
         const sortedPositions = Array.from(positions).sort((a, b) => a - b);
@@ -1014,9 +1042,7 @@ function initChunkHighlighting(docId) {
             const start = sortedPositions[i];
             const end = sortedPositions[i + 1];
             const coveringChunks = sortedChunks.filter(chunk => {
-                const chunkStart = chunk.char_start_index || 0;
-                const chunkEnd = chunk.char_end_index || originalText.length;
-                return chunkStart <= start && chunkEnd >= end;
+                return chunk.char_start_index <= start && chunk.char_end_index >= end;
             });
             segments.push({ start, end, chunks: coveringChunks });
         }
@@ -1048,7 +1074,8 @@ function initChunkHighlighting(docId) {
         
         // Update content
         textElement.innerHTML = html;
-        
+        renderUnpositionedChunksList(chunksWithoutOffsets);
+
         // Add CSS for overlap highlighting
         if (!document.getElementById('chunk-highlight-styles')) {
             const style = document.createElement('style');
@@ -1159,6 +1186,39 @@ function initChunkHighlighting(docId) {
                 }
             });
         });
+    }
+
+    function renderUnpositionedChunksList(chunks) {
+        // Chunks with no char_start_index/char_end_index (e.g.
+        // "section"-strategy chunks) can't be positioned in originalText,
+        // so they're listed here instead of being highlighted inline.
+        const container = document.getElementById('unpositioned-chunks');
+        if (!container) return;
+        if (!chunks || chunks.length === 0) {
+            container.innerHTML = '';
+            container.style.display = 'none';
+            return;
+        }
+        container.style.display = 'block';
+        const items = chunks.map(chunk => {
+            const idx = (chunk.chunk_index !== null && chunk.chunk_index !== undefined) ? chunk.chunk_index : '?';
+            const path = chunk.section_path ? escapeHtml(chunk.section_path) : '(no section path)';
+            const tokens = chunk.token_length || 'N/A';
+            const text = escapeHtml((chunk.text || '').slice(0, 300));
+            return `
+                <div class="unpositioned-chunk" style="border-left: 3px solid #ff9800; padding: 8px 12px; margin-bottom: 8px;">
+                    <div><strong>Chunk #${idx}</strong> — ${path} (tokens: ${tokens})</div>
+                    <div style="color: #666; margin-top: 4px;">${text}${(chunk.text || '').length > 300 ? '…' : ''}</div>
+                </div>
+            `;
+        }).join('');
+        container.innerHTML = `
+            <p style="color: #666; font-style: italic;">
+                ${chunks.length} chunk(s) have no character offsets into the document text
+                (e.g. section-boundary chunks) and can't be highlighted inline:
+            </p>
+            ${items}
+        `;
     }
 }
 

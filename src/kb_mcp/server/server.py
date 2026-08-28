@@ -64,11 +64,21 @@ if PORT == 8888:
         "Please set a different port via the PORT environment variable."
     )
 HOST = _server_config['host']
+# MCP and the web UI bind separately; see the app split further down.
+MCP_HOST = _server_config['mcp_host']
+WEB_HOST = _server_config['web_host']
+WEB_PORT = _server_config['web_port']
 USE_HTTPS = _server_config['use_https']
 
 auth_config = get_auth_config()
 
-if auth_config['disable_auth'] != True:
+# The MCP endpoint and the web UI are served on separate sockets (see main()),
+# so they gate access independently. MCP_REQUIRE_API_KEY / WEB_REQUIRE_AUTH
+# override DISABLE_AUTH per surface; see config.get_auth_config.
+MCP_REQUIRE_API_KEY = auth_config['mcp_require_api_key']
+WEB_REQUIRE_AUTH = auth_config['web_require_auth']
+
+if MCP_REQUIRE_API_KEY:
     if auth_config['oauth_provider'] is None:
          # No OAuth but auth required - use base class in API-key-only mode
         oauth_provider = BaseOAuthProvider(None, None)
@@ -86,10 +96,13 @@ else:
 
 
 
+from .mcp_prompts import get_server_instructions
+
 # Create FastMCP with OAuth (only if provider is configured)
-if auth_config['disable_auth'] != True:
+if MCP_REQUIRE_API_KEY:
     mcp = FastMCP(
         "kb-mcp",
+        instructions=get_server_instructions(),
         auth=AuthSettings(
             issuer_url=BASE_URL,
             resource_server_url=f"{BASE_URL}/mcp",
@@ -101,6 +114,7 @@ if auth_config['disable_auth'] != True:
 else:
     # Create FastMCP without OAuth if authentication is disabled
     mcp = FastMCP("kb-mcp",
+        instructions=get_server_instructions(),
         auth=None, # no auth needed if authentication is disabled
     )
 
@@ -117,32 +131,10 @@ from .web import WebSessionManager, setup_shared_auth_routes, setup_web_routes
 
 web_session_manager = WebSessionManager(oauth_provider)
 
-# Root/Status responders need access to oauth_provider and web_session_manager
+# Root responder redirects to the Knowledge Base Explorer (the web UI landing page)
 async def root_responder(request):
-    from .web import html_templates
-    active_sessions = await oauth_provider.get_active_sessions_count() if oauth_provider else 0
-    username = await web_session_manager.get_session_username(request)
-    # Get required repo/group and provider info for display
-    required_access = None
-    provider_display = None
-    if oauth_provider:
-        if isinstance(oauth_provider, GitHubOAuthProvider):
-            required_access = oauth_provider.required_repo
-            provider_display = "GitHub"
-        elif isinstance(oauth_provider, GlobusOAuthProvider):
-            required_access = oauth_provider.required_group
-            provider_display = "Globus"
-        else:
-            # API-key-only mode
-            provider_display = "API Key Only"
-    else:
-        provider_display = "Disabled"
-    from starlette.responses import HTMLResponse
-    return HTMLResponse(
-        html_templates.root_page(
-            active_sessions, required_access, username, provider_display
-        )
-    )
+    from starlette.responses import RedirectResponse
+    return RedirectResponse(url="/web?doc_type=text")
 
 async def status_responder(request):
     from .web import html_templates
@@ -224,10 +216,24 @@ class AuditMiddleware(BaseHTTPMiddleware):
 
         return await call_next(request)
 
-# Create and configure the web application
+# The MCP endpoint and the web UI are two separate Starlette applications,
+# served by two uvicorn servers on two sockets (see main()). They are split so
+# they can have genuinely different exposure: MCP listens on MCP_HOST (often a
+# network interface) and is gated by an API key or OAuth token, while the web
+# UI listens on WEB_HOST, which defaults to loopback. Binding is what keeps the
+# web UI off the network - not a check inside the application.
+#
+# There is no HTTP traffic between them: the web chat page talks to MCP by
+# spawning `python -m kb_mcp.server.mcp_stdio` over stdio, not over the wire.
+from starlette.applications import Starlette
 from starlette.middleware.cors import CORSMiddleware
 from starlette.staticfiles import StaticFiles
 
+static_path = Path(__file__).parent / "static"
+
+# --- MCP application -------------------------------------------------------
+# `app` remains the MCP application so existing ASGI entry points
+# (e.g. `uvicorn kb_mcp.server.server:app`) keep working.
 app = mcp.streamable_http_app()
 
 # Add CORS middleware for browser-based MCP clients (tested with MCP Inspector)
@@ -240,71 +246,138 @@ app.add_middleware(
     expose_headers=["mcp-session-id"],  # Important for MCP session tracking
 )
 
-# Serve static files (CSS, JS)
-static_path = Path(__file__).parent / "static"
-app.mount("/static", StaticFiles(directory=str(static_path)), name="static")
-
 # Add audit middleware
 app.add_middleware(AuditMiddleware)
 
-# Setup unified login/logout routes
-setup_shared_auth_routes(app, web_session_manager)
-
-# Register routes
+# The OAuth callback lives on the MCP app because the MCP authorization flow
+# redirects to it. The web login flow uses the copy on the web app.
 app.add_route("/oauth/callback", oauth_callback_responder)
-app.add_route("/", root_responder)
-app.add_route("/status", status_responder)
-
-# Setup web routes (OAuth protected web interface for interactive tools)
-# This now includes admin and API routes
-setup_web_routes(app, oauth_provider, web_session_manager)
 
 
-# Startup hook to initialize background tasks. Starlette 1.0 removed
-# app.on_event — wrap the app's existing lifespan context instead.
-_inner_lifespan = app.router.lifespan_context
+def create_web_app() -> Starlette:
+    """Build the web UI application.
 
+    Kept separate from the MCP app so the two can be bound to different
+    addresses. Every route module already takes the app as an argument, so
+    nothing below is web-server specific beyond the wiring.
+    """
+    web_app = Starlette()
 
-@contextlib.asynccontextmanager
-async def _lifespan_with_startup(app_):
-    async with _inner_lifespan(app_):
+    # Static assets (CSS, JS) for the pages.
+    web_app.mount("/static", StaticFiles(directory=str(static_path)), name="static")
+
+    # Login/logout, and the OAuth callback for the *web* login flow.
+    setup_shared_auth_routes(web_app, web_session_manager)
+    web_app.add_route("/oauth/callback", oauth_callback_responder)
+
+    web_app.add_route("/", root_responder)
+    web_app.add_route("/status", status_responder)
+
+    # Documents, eval, logs, statistics, admin, API, graph and chat routes.
+    setup_web_routes(web_app, oauth_provider, web_session_manager)
+
+    # setup_chat_routes stashes a cleanup coroutine on app.state; start it with
+    # the web app's lifespan (the MCP app's lifespan belongs to FastMCP's
+    # session manager and must not be replaced).
+    @contextlib.asynccontextmanager
+    async def _web_lifespan(app_):
         import asyncio
 
-        # Start chat cleanup task if it exists
-        if hasattr(app_.state, 'chat_cleanup_task'):
+        if hasattr(app_.state, "chat_cleanup_task"):
             asyncio.create_task(app_.state.chat_cleanup_task())
             logger.info("Started chat session cleanup background task")
         yield
 
-
-app.router.lifespan_context = _lifespan_with_startup
+    web_app.router.lifespan_context = _web_lifespan
+    return web_app
 
 
 def main():
-    """Run the server."""
+    """Run the MCP server, the web UI server, or both."""
+    import argparse
+    import asyncio
     import uvicorn
-    
-    if auth_config['disable_auth'] == True and USE_HTTPS:
-        logger.warning("Authentication is disabled but HTTPS is enabled. Is this intended?")
-        logger.warning("HTTPS is only needed if authentication is enabled.")
-        logger.warning("To disable HTTPS, set USE_HTTPS=false in .env")
 
-    if USE_HTTPS:
-        uvicorn.run(
-            app,
-            host=HOST,
-            port=PORT,
-            ssl_keyfile="certs/key.pem",
-            ssl_certfile="certs/cert.pem",
-            log_level="debug",
+    parser = argparse.ArgumentParser(
+        prog="kb-server",
+        description=(
+            "Run the knowledge base servers. By default both are started: the "
+            "MCP endpoint on MCP_HOST:PORT and the web UI on WEB_HOST:WEB_PORT "
+            "(loopback by default)."
+        ),
+    )
+    surface = parser.add_mutually_exclusive_group()
+    surface.add_argument(
+        "--only-mcp",
+        action="store_true",
+        help="Run only the MCP endpoint (no web UI).",
+    )
+    surface.add_argument(
+        "--only-web",
+        action="store_true",
+        help="Run only the web UI (no MCP endpoint).",
+    )
+    parser.add_argument("--host", help="Override the MCP bind address (MCP_HOST).")
+    parser.add_argument("--port", type=int, help="Override the MCP port (PORT).")
+    parser.add_argument("--web-host", help="Override the web UI bind address (WEB_HOST).")
+    parser.add_argument("--web-port", type=int, help="Override the web UI port (WEB_PORT).")
+    args = parser.parse_args()
+
+    run_mcp = not args.only_web
+    run_web = not args.only_mcp
+
+    mcp_host = args.host or MCP_HOST
+    mcp_port = args.port or PORT
+    web_host = args.web_host or WEB_HOST
+    web_port = args.web_port or WEB_PORT
+
+    if run_mcp and not MCP_REQUIRE_API_KEY:
+        logger.warning(
+            "MCP endpoint is running WITHOUT authentication on %s:%s. "
+            "Set MCP_REQUIRE_API_KEY=true (or remove DISABLE_AUTH) to require "
+            "an API key.",
+            mcp_host,
+            mcp_port,
         )
-    else:
-        uvicorn.run(
-            app,
-            host=HOST,
-            port=PORT,
-            log_level="debug",
+    if run_web and not WEB_REQUIRE_AUTH and web_host not in ("127.0.0.1", "localhost", "::1"):
+        logger.warning(
+            "Web UI has authentication disabled but is bound to %s, which is not "
+            "loopback. Anyone who can reach that address has full access. "
+            "Set WEB_REQUIRE_AUTH=true or bind WEB_HOST to 127.0.0.1.",
+            web_host,
         )
+    if not MCP_REQUIRE_API_KEY and USE_HTTPS:
+        logger.warning("MCP authentication is disabled but HTTPS is enabled. Is this intended?")
+
+    def _ssl_kwargs():
+        if not USE_HTTPS:
+            return {}
+        return {"ssl_keyfile": "certs/key.pem", "ssl_certfile": "certs/cert.pem"}
+
+    async def _serve():
+        servers = []
+
+        if run_mcp:
+            logger.info("MCP endpoint listening on %s:%s", mcp_host, mcp_port)
+            servers.append(
+                uvicorn.Server(
+                    uvicorn.Config(app, host=mcp_host, port=mcp_port, **_ssl_kwargs())
+                ).serve()
+            )
+
+        if run_web:
+            logger.info("Web UI listening on %s:%s", web_host, web_port)
+            servers.append(
+                uvicorn.Server(
+                    uvicorn.Config(
+                        create_web_app(), host=web_host, port=web_port, **_ssl_kwargs()
+                    )
+                ).serve()
+            )
+
+        await asyncio.gather(*servers)
+
+    asyncio.run(_serve())
 
 
 if __name__ == "__main__":

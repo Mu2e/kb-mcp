@@ -33,8 +33,8 @@ def test_synthesis_query_boosts_sections():
     query = "compare all subsystems of the detector"
     assert ROUTER.classify(query) == QueryType.SYNTHESIS
     route = ROUTER.route(query)
-    assert route.doc_type_boost is not None
-    assert route.doc_type_boost.get("section", 0) > 1.0
+    assert route.chunk_strategy_boost is not None
+    assert route.chunk_strategy_boost.get("section", 0) > 1.0
 
 
 def test_factual_default_route():

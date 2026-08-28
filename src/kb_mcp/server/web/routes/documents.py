@@ -11,6 +11,7 @@ from starlette.requests import Request
 
 from ..auth import WebSessionManager
 from .. import html_templates
+from ....config import get_server_config
 
 logger = logging.getLogger(__name__)
 
@@ -58,17 +59,41 @@ async def require_auth_html(
     """
     session_data = await session_manager.get_session_data(request)
     if not session_data:
-        if redirect_url is None:
-            # Include return path in login redirect
-            return_path = str(request.url.path)
-            redirect_url = f"/login?redirect={return_path}"
-        return None, RedirectResponse(url=redirect_url, status_code=302)
+        # In public mode the browsable pages need no identity at all, so a
+        # missing session is fine - only the admin gate below still applies.
+        # (Without this the page would redirect to /login, which with web auth
+        # disabled just mints a throwaway session and comes straight back.)
+        if session_manager.public_mode:
+            # No session: an anonymous visitor. Handlers read username from
+            # this dict, so an empty one renders the public view; a logged-in
+            # admin still has a session and is handled by the branch above.
+            #
+            # Admin pages fall through to the gate below rather than to the
+            # /login redirect: when no ADMIN_PASSWORD is configured the gate is
+            # open, and redirecting here would make those pages unreachable
+            # instead of merely unprotected.
+            if not require_admin:
+                return {}, None
+            session_data = {}
+        else:
+            if redirect_url is None:
+                # Include return path in login redirect
+                return_path = str(request.url.path)
+                redirect_url = f"/login?redirect={return_path}"
+            return None, RedirectResponse(url=redirect_url, status_code=302)
     
-    # Check admin privileges if required
+    # Check admin privileges if required.
+    # Two independent gates, either of which is sufficient:
+    #  - the ADMIN_PASSWORD gate (used when the web UI runs without login, as
+    #    it does when bound to localhost), and
+    #  - the OAuth admin check, when an OAuth provider is configured.
     if require_admin:
-        if not await session_manager.has_admin_access(request, force_reverify=True):
-            return None, RedirectResponse(url="/login?redirect=/admin", status_code=302)
-    
+        from ..auth import require_admin as require_admin_password
+
+        guard = await require_admin_password(request, session_manager)
+        if guard is not None:
+            return None, guard
+
     return session_data, None
 
 
@@ -76,6 +101,7 @@ async def require_auth_api(
     request: Request,
     session_manager: WebSessionManager,
     json_response: bool = False,
+    admin_only: bool = False,
 ) -> tuple[dict | None, Response | JSONResponse | None]:
     """Check authentication for API routes.
     
@@ -90,6 +116,22 @@ async def require_auth_api(
         - If not authenticated: (None, Response/JSONResponse with 401)
     """
     session_data = await session_manager.get_session_data(request)
+
+    # Public mode: the read endpoints backing the browsable pages need no
+    # session. Endpoints marked admin_only still require the admin gate.
+    if session_manager.public_mode and not admin_only:
+        if not session_data:
+            return {}, None
+
+    if admin_only:
+        from ..auth import require_admin as require_admin_password
+
+        guard = await require_admin_password(request, session_manager)
+        if guard is not None:
+            if json_response:
+                return None, JSONResponse({"error": "Admin access required"}, status_code=403)
+            return None, guard
+
     if not session_data:
         if json_response:
             return None, JSONResponse(
@@ -227,6 +269,38 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
     data_dir = get_data_dir()
     upload_dir = Path(data_dir) / "uploads"
     upload_dir.mkdir(parents=True, exist_ok=True)
+    sources_dir = (Path(data_dir) / "sources").resolve()
+
+    def uri_to_link(uri: str) -> str:
+        """Convert a document URI to an HTML anchor tag with a friendly display label."""
+        from urllib.parse import unquote
+        if uri.startswith("local://uploads/"):
+            filename = uri[len("local://uploads/"):]
+            return f'<a href="/files/uploaded/{filename}" target="_blank" rel="noopener noreferrer">{filename}</a>'
+        if uri.startswith("local://local/"):
+            filename = uri[len("local://local/"):]
+            return f'<a href="/files/local/{filename}" target="_blank" rel="noopener noreferrer">{filename}</a>'
+        if uri.startswith("file://"):
+            file_path = Path(unquote(uri[len("file://"):])).resolve()
+            try:
+                rel = file_path.relative_to(sources_dir)
+            except ValueError:
+                # Path was recorded under a different root (e.g. ingested on the host
+                # filesystem, served from a container with a different DATA_DIR).
+                # Fall back to matching by the "sources/..." suffix instead of the
+                # absolute root, since that's what actually lives under sources_dir.
+                parts = file_path.parts
+                rel = None
+                if sources_dir.name in parts:
+                    idx = len(parts) - 1 - parts[::-1].index(sources_dir.name)
+                    rel = Path(*parts[idx + 1:])
+
+            if rel is not None and (sources_dir / rel).exists():
+                return f'<a href="/files/local/{rel}" target="_blank" rel="noopener noreferrer">{rel}</a>'
+
+            display = str(Path(*file_path.parts[-2:]))
+            return f'<span title="{html_escape(uri)}">{html_escape(display)}</span>'
+        return f'<a href="{html_escape(uri)}" target="_blank" rel="noopener noreferrer">{html_escape(uri)}</a>'
 
     async def web_page(request: Request):
         """Web interface (GitHub OAuth protected)."""
@@ -243,7 +317,7 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
 
         # Get initial filter values from query params (for initial state)
         source_id = request.query_params.get("source_id", "")
-        doc_type = request.query_params.get("doc_type", "")
+        doc_type = request.query_params.get("doc_type", "text")
         search = request.query_params.get("search", "")
         message = request.query_params.get("message", "")
         uploaded_docs = request.query_params.get("uploaded_docs", "")  # Comma-separated doc IDs
@@ -281,7 +355,7 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
             """
 
         content = f"""
-        <h1>Knowledge Base Explorer</h1>
+        <h1>{html_templates.get_site_name()}</h1>
         <!--<p>Authenticated as: <strong>{username}</strong></p>-->
 
         {auth_warning}
@@ -372,7 +446,7 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
         """
 
         return HTMLResponse(html_templates.base_template(
-            "Knowledge Base Explorer - MCP Server",
+            html_templates.get_site_name(),
             content,
             None,
             username
@@ -385,13 +459,14 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
         timings = {}
         t_start = time.time()
         
-        # Check authentication first
-        session_data = await session_manager.get_session_data(request)
-        if not session_data:
-            return RedirectResponse(url="/login?redirect=/web")
-        
-        # Get username from authenticated session
+        # Viewing a document is public; the write controls on the page are not.
+        session_data, redirect = await require_auth_html(request, session_manager)
+        if redirect:
+            return redirect
+
+        # Empty dict for an anonymous visitor in public mode.
         username = session_data.get("username")
+        is_admin_view = bool(session_data.get("has_admin"))
         timings['auth'] = time.time() - t_start
 
         doc_id = request.path_params["doc_id"]
@@ -415,28 +490,8 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
                     status_code=404
                 )
 
-            # Build display title: use title, title_gen, or doc_id
-            doc_title_display = doc.doc_id or "N/A"
-            if doc.title:
-                doc_title_display = f"{doc.title} ({doc.doc_id or doc.id})"
-            elif doc.title_gen:
-                doc_title_display = f"{doc.title_gen} ({doc.doc_id or doc.id})"
-            
             # Format URI as link if it exists
-            uri_display = "N/A"
-            if doc.uri:
-                # Convert local://uploads/filename to /files/uploaded/filename
-                if doc.uri.startswith("local://uploads/"):
-                    filename = doc.uri.replace("local://uploads/", "")
-                    uri_href = f"/files/uploaded/{filename}"
-                    uri_display = f'<a href="{uri_href}" target="_blank" rel="noopener noreferrer">{doc.uri}</a>'
-                # Convert local://local/filename to /files/local/filename
-                elif doc.uri.startswith("local://local/"):
-                    filename = doc.uri.replace("local://local/", "")
-                    uri_href = f"/files/local/{filename}"
-                    uri_display = f'<a href="{uri_href}" target="_blank" rel="noopener noreferrer">{doc.uri}</a>'
-                else:
-                    uri_display = f'<a href="{doc.uri}" target="_blank" rel="noopener noreferrer">{doc.uri}</a>'
+            uri_display = uri_to_link(doc.uri) if doc.uri else "N/A"
 
             # Get chunk strategies for this document
             chunk_strategies_html = ""
@@ -497,6 +552,7 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
             chunk_strategy_options_html_for_similar = '<option value="summary" selected>summary</option>'
             try:
                 from ....kb.embedding import get_chunk_strategies
+                from ....chunking import base_strategy
                 timings['get_all_strategies_since_last'] = time.time() - t0
                 t0 = time.time()
                 all_strategies = get_chunk_strategies()  # Get all strategies, not just for this document
@@ -507,13 +563,13 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
                     if strategy_name:
                         chunk_strategy_options_html += f'<option value="{html_escape(strategy_name)}">{html_escape(strategy_name)}</option>'
                         # For similar documents, include all strategies but default to summary
-                        if strategy_name != "summary":
+                        if base_strategy(strategy_name) != "summary":
                             chunk_strategy_options_html_for_similar += f'<option value="{html_escape(strategy_name)}">{html_escape(strategy_name)}</option>'
             except (ImportError, Exception) as e:
                 logger.debug(f"Could not load chunk strategies: {e}")
                 # Fallback to default options
-                chunk_strategy_options_html = '<option value="">Default (tokens)</option><option value="tokens">tokens</option><option value="slide">slide</option>'
-                chunk_strategy_options_html_for_similar = '<option value="summary" selected>summary</option><option value="tokens">tokens</option><option value="slide">slide</option>'
+                chunk_strategy_options_html = '<option value="">Default (tokens)</option><option value="tokens">tokens</option>'
+                chunk_strategy_options_html_for_similar = '<option value="summary" selected>summary</option><option value="tokens">tokens</option>'
             
             # For backward compatibility
             rechunk_strategy_options = chunk_strategy_options_html
@@ -536,6 +592,7 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
                     <span onclick="toggleTextContent()" style="position: absolute; top: 10px; right: 10px; cursor: pointer; font-size: 16px; color: #666; user-select: none; background: white; padding: 2px 6px; border-radius: 3px;">+</span>
                 </div>
             </div>
+            <div id="unpositioned-chunks" style="display: none; margin-top: 15px;"></div>
             <script>
             function toggleTextContent() {{
                 const expanded = document.getElementById('text-expanded');
@@ -565,7 +622,7 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
                 <img src="{image_url}" alt="Document Image" style="max-width: 100%; height: auto; border: 1px solid #ddd; border-radius: 4px;">
                 <div class="document-meta" style="margin-top: 10px;">
                     <strong>Size:</strong> {binary_size} bytes | 
-                    <strong>Type:</strong> {doc.source_type or "image"}
+                    <strong>Type:</strong> {html_escape(str(doc.source_type)) if doc.source_type else "image"}
                 </div>
             </div>
                     '''
@@ -671,6 +728,24 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
                         """
                 except Exception as e:
                     logger.warning(f"Could not fetch raw document for {doc.id}: {e}")
+
+            # Whether persisted structured parser output exists - drives the
+            # "Parser" field link in the Document Information card below.
+            # The payload itself is only fetched on the dedicated sub-page.
+            has_parser_output = False
+            try:
+                timings['check_parser_output_since_last'] = time.time() - t0
+                t0 = time.time()
+                from ....kb.database import get_db_session
+                from ....kb.db_models import DocumentParserOutput
+                with get_db_session() as session:
+                    has_parser_output = session.query(
+                        DocumentParserOutput.document_id
+                    ).filter(DocumentParserOutput.document_id == doc.id).first() is not None
+                timings['check_parser_output'] = time.time() - t0
+                timings['check_parser_output_since_start'] = time.time() - t_start
+            except Exception as e:
+                logger.warning(f"Could not check parser output for {doc.id}: {e}")
 
             t0 = time.time()
             timings['build_meta_html_since_last'] = time.time() - t0
@@ -913,6 +988,8 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
                     graph_nodes_html = ""
                     graph_extraction_logs_data = "[]"
                     try:
+                        if get_server_config()['hide_graph']:
+                            raise ImportError("Graph UI disabled via HIDE_GRAPH")
                         from ....kb.graph.queries import get_nodes_for_document
                         from ....kb.graph.db_models import GraphExtractionLog
 
@@ -1070,6 +1147,67 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
             timings['gap_before_content'] = t_before_content - t_after_session_exit
             timings['time_until_content_start'] = t_before_content - t_start
             t0 = time.time()
+            # Document Functions (generate summary, re-chunk, find similar,
+            # delete) are admin-only. The endpoints behind the buttons already
+            # require admin, so this only avoids showing controls that would
+            # bounce an anonymous visitor to the login page.
+            document_functions_html = ""
+            if is_admin_view:
+                document_functions_html = f'''
+    <div class="card">
+        <h2>Document Functions</h2>
+        <div style="display: flex; gap: 15px; margin-top: 20px; align-items: flex-start;">
+            <div class="card" style="flex: 1; min-width: 200px; margin-top: 0;">
+                <!-- <h2>Generate Summary</h2> -->
+                <form id="generate-summary-form" method="POST" action="/web/document/{doc.id}/generate-summary">
+                    <button type="submit" id="generate-summary-submit-btn" style="width: 100%; padding: 10px 20px; background-color: #FF9800; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 14px;">Generate Summary</button>
+                </form>
+                <div id="generate-summary-status" style="margin-top: 10px;"></div>
+            </div>
+            
+            <div class="card" style="flex: 1; min-width: 250px; margin-top: 0;">
+                <!--<h2>Re-chunk and Embed</h2>-->
+                <form id="rechunk-form" method="POST" action="/web/document/{doc.id}/rechunk-embed">
+                    <button type="submit" id="rechunk-submit-btn" style="width: 100%; padding: 10px 20px; background-color: #2196F3; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; margin-bottom: 15px;">Re-chunk and Embed</button>
+                    <div>
+                        <label for="rechunk-strategy" style="display: block; margin-bottom: 5px; font-size: 14px; color: #666;">Re-chunk Strategy:</label>
+                        <select id="rechunk-strategy" name="strategy" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                            {rechunk_strategy_options}
+                        </select>
+                    </div>
+                </form>
+                <div id="rechunk-status" style="margin-top: 10px;"></div>
+            </div>
+            
+            <div class="card" style="flex: 1; min-width: 300px; margin-top: 0;">
+                <!--<h2>Find Similar Documents</h2>-->
+                <button id="load-similar-btn" style="width: 100%; padding: 10px 20px; background-color: #4CAF50; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; margin-bottom: 15px;">Find Similar Documents</button>
+                <div style="display: flex; gap: 10px; align-items: flex-end;">
+                    <div style="flex: 1;">
+                        <label for="similar-strategy" style="display: block; margin-bottom: 5px; font-size: 14px; color: #666;">Chunk Strategy:</label>
+                        <select id="similar-strategy" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                            {chunk_strategy_options_html_for_similar}
+                        </select>
+                    </div>
+                    <div style="min-width: 100px;">
+                        <label for="similar-max-results" style="display: block; margin-bottom: 5px; font-size: 14px; color: #666;">Max Results:</label>
+                        <input type="number" id="similar-max-results" value="3" min="1" max="20" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                    </div>
+                </div>
+                <div id="similar-content" style="margin-top: 15px; color: #666;"></div>
+            </div>
+            
+            <div class="card" style="flex: 1; min-width: 200px; margin-top: 0;">
+                <!--<h2>Delete Document</h2>-->
+                <form id="delete-form" method="POST" action="/web/document/{doc.id}/delete" onsubmit="return confirm('Are you sure you want to delete this document? This will also delete all chunks and embeddings. This action cannot be undone.');">
+                    <button type="submit" id="delete-submit-btn" style="width: 100%; padding: 10px 20px; background-color: #f44336; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 14px;">Delete Document</button>
+                </form>
+                <div id="delete-status" style="margin-top: 10px;"></div>
+            </div>
+        </div>
+    </div>
+'''
+
             content = f"""
             <h1>Document Details</h1>
             <p><a href="/web">← Back to Document List</a></p>
@@ -1086,14 +1224,14 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
             <div class="card">
                 <h2>Document Information</h2>
                 <table>
-                    <tr><th>ID</th><td><code>{doc.id}</code></td></tr>
-                    <tr><th>Source ID</th><td>{doc.source_id}</td></tr>
-                    <tr><th>Document ID</th><td>{doc.doc_id or "N/A"}</td></tr>
-                    <tr><th>Parser</th><td>{doc.parser_id}</td></tr>
-                    <tr><th>Title</th><td>{doc.title or "N/A"}</td></tr>
+                    <tr><th>ID</th><td><code>{html_escape(str(doc.id))}</code></td></tr>
+                    <tr><th>Source ID</th><td>{html_escape(str(doc.source_id))}</td></tr>
+                    <tr><th>Document ID</th><td>{html_escape(str(doc.doc_id)) if doc.doc_id else "N/A"}</td></tr>
+                    <tr><th>Parser</th><td>{f'<a href="/web/document/{doc.id}/parser-output">{html_escape(str(doc.parser_id))}</a>' if doc.parser_id and has_parser_output else (html_escape(str(doc.parser_id)) if doc.parser_id else "N/A")}</td></tr>
+                    <tr><th>Title</th><td>{html_escape(str(doc.title)) if doc.title else "N/A"}</td></tr>
                     <tr><th>URI</th><td>{uri_display}</td></tr>
-                    <tr><th>Source Type</th><td>{doc.source_type}</td></tr>
-                    <tr><th>Document Type</th><td>{doc.doc_type}</td></tr>
+                    <tr><th>Source Type</th><td>{html_escape(str(doc.source_type))}</td></tr>
+                    <tr><th>Document Type</th><td>{html_escape(str(doc.doc_type))}</td></tr>
                     <tr><th>Parent Document</th><td>{parent_display}</td></tr>
                     <tr><th>Insert Time</th><td class="utc-timestamp" data-iso="{_to_utc_iso(doc.insert_time) or ''}">{_to_utc_iso(doc.insert_time) or "N/A"}</td></tr>
                     <tr><th>Creating Time</th><td class="utc-timestamp" data-iso="{_to_utc_iso(doc.creating_time) or ''}">{_to_utc_iso(doc.creating_time) or "N/A"}</td></tr>
@@ -1127,58 +1265,7 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
                 </div>
                 {text_content if text_content else (f'<div class="info-box">No text content available.{" Summary is shown above." if doc.summary else ""}</div>')}
             </div>
-            <div class="card">
-                <h2>Document Functions</h2>
-                <div style="display: flex; gap: 15px; margin-top: 20px; align-items: flex-start;">
-                    <div class="card" style="flex: 1; min-width: 200px; margin-top: 0;">
-                        <!-- <h2>Generate Summary</h2> -->
-                        <form id="generate-summary-form" method="POST" action="/web/document/{doc.id}/generate-summary">
-                            <button type="submit" id="generate-summary-submit-btn" style="width: 100%; padding: 10px 20px; background-color: #FF9800; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 14px;">Generate Summary</button>
-                        </form>
-                        <div id="generate-summary-status" style="margin-top: 10px;"></div>
-                    </div>
-                    
-                    <div class="card" style="flex: 1; min-width: 250px; margin-top: 0;">
-                        <!--<h2>Re-chunk and Embed</h2>-->
-                        <form id="rechunk-form" method="POST" action="/web/document/{doc.id}/rechunk-embed">
-                            <button type="submit" id="rechunk-submit-btn" style="width: 100%; padding: 10px 20px; background-color: #2196F3; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; margin-bottom: 15px;">Re-chunk and Embed</button>
-                            <div>
-                                <label for="rechunk-strategy" style="display: block; margin-bottom: 5px; font-size: 14px; color: #666;">Re-chunk Strategy:</label>
-                                <select id="rechunk-strategy" name="strategy" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
-                                    {rechunk_strategy_options}
-                                </select>
-                            </div>
-                        </form>
-                        <div id="rechunk-status" style="margin-top: 10px;"></div>
-                    </div>
-                    
-                    <div class="card" style="flex: 1; min-width: 300px; margin-top: 0;">
-                        <!--<h2>Find Similar Documents</h2>-->
-                        <button id="load-similar-btn" style="width: 100%; padding: 10px 20px; background-color: #4CAF50; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; margin-bottom: 15px;">Find Similar Documents</button>
-                        <div style="display: flex; gap: 10px; align-items: flex-end;">
-                            <div style="flex: 1;">
-                                <label for="similar-strategy" style="display: block; margin-bottom: 5px; font-size: 14px; color: #666;">Chunk Strategy:</label>
-                                <select id="similar-strategy" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
-                                    {chunk_strategy_options_html_for_similar}
-                                </select>
-                            </div>
-                            <div style="min-width: 100px;">
-                                <label for="similar-max-results" style="display: block; margin-bottom: 5px; font-size: 14px; color: #666;">Max Results:</label>
-                                <input type="number" id="similar-max-results" value="3" min="1" max="20" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
-                            </div>
-                        </div>
-                        <div id="similar-content" style="margin-top: 15px; color: #666;"></div>
-                    </div>
-                    
-                    <div class="card" style="flex: 1; min-width: 200px; margin-top: 0;">
-                        <!--<h2>Delete Document</h2>-->
-                        <form id="delete-form" method="POST" action="/web/document/{doc.id}/delete" onsubmit="return confirm('Are you sure you want to delete this document? This will also delete all chunks and embeddings. This action cannot be undone.');">
-                            <button type="submit" id="delete-submit-btn" style="width: 100%; padding: 10px 20px; background-color: #f44336; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 14px;">Delete Document</button>
-                        </form>
-                        <div id="delete-status" style="margin-top: 10px;"></div>
-                    </div>
-                </div>
-            </div>
+            {document_functions_html}
             
             <script>
             // Initialize chunk highlighting for this document
@@ -1478,12 +1565,14 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
             timings['build_content'] = time.time() - t0
             timings['build_content_since_start'] = time.time() - t_start
 
-            # Build page title: use title, title_gen, or doc_id
-            page_title = doc.doc_id or doc.id
+            # Build page title: use title, title_gen, or doc_id.
+            # Escaped here because it is interpolated into <title> by
+            # base_template(), which does not escape its arguments.
+            page_title = html_escape(str(doc.doc_id or doc.id))
             if doc.title:
-                page_title = f"{doc.title} ({doc.doc_id or doc.id})"
+                page_title = f"{html_escape(str(doc.title))} ({html_escape(str(doc.doc_id or doc.id))})"
             elif doc.title_gen:
-                page_title = f"{doc.title_gen} ({doc.doc_id or doc.id})"
+                page_title = f"{html_escape(str(doc.title_gen))} ({html_escape(str(doc.doc_id or doc.id))})"
             
             # Log timing information
             timings['total'] = time.time() - t_start
@@ -1512,10 +1601,53 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
             )
     app.add_route("/web/document/{doc_id}", document_detail)
 
+    async def document_by_doc_id(request: Request):
+        """Redirect to document detail page by human-readable doc_id string."""
+        session_data = await session_manager.get_session_data(request)
+        if not session_data:
+            # Public in public mode; otherwise a session is still required.
+            if not session_manager.public_mode:
+                return RedirectResponse(url="/login?redirect=/web")
+            session_data = {}
+
+        doc_id_str = request.path_params["doc_id_str"]
+        from ....kb import get
+        try:
+            doc = get(doc_id=doc_id_str)
+            if not doc:
+                return HTMLResponse(
+                    html_templates.base_template(
+                        "Document Not Found",
+                        f'<div class="error-box"><h2>Document Not Found</h2><p>No document with doc_id <code>{html_escape(doc_id_str)}</code> found.</p><p><a href="/web">← Back to Document List</a></p></div>',
+                        None,
+                        session_data.get("username"),
+                    ),
+                    status_code=404,
+                )
+            # get() may return a list if multiple docs share the same doc_id; take the first
+            if isinstance(doc, list):
+                doc = doc[0]
+            return RedirectResponse(url=f"/web/document/{doc.id}", status_code=302)
+        except Exception as e:
+            logger.error(f"Error looking up doc_id {doc_id_str}: {e}")
+            return HTMLResponse(
+                html_templates.base_template(
+                    "Error",
+                    f'<div class="error-box"><h2>Error</h2><p>{html_escape(str(e))}</p><p><a href="/web">← Back to Document List</a></p></div>',
+                    None,
+                    session_data.get("username"),
+                ),
+                status_code=500,
+            )
+
+    app.add_route("/web/document/by-doc-id/{doc_id_str:path}", document_by_doc_id)
+
     async def rechunk_embed_document(request: Request):
         """Re-chunk and embed a document (POST)."""
-        # Check authentication first
-        session_data, redirect = await require_auth_html(request, session_manager)
+        # Mutates stored documents, so it sits behind the admin gate.
+        session_data, redirect = await require_auth_html(
+            request, session_manager, require_admin=True
+        )
         if redirect:
             return redirect
         
@@ -1606,8 +1738,10 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
 
     async def delete_document_route(request: Request):
         """Delete a document (POST)."""
-        # Check authentication first
-        session_data, redirect = await require_auth_html(request, session_manager)
+        # Mutates stored documents, so it sits behind the admin gate.
+        session_data, redirect = await require_auth_html(
+            request, session_manager, require_admin=True
+        )
         if redirect:
             return redirect
         
@@ -1683,8 +1817,10 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
 
     async def generate_summary_document(request: Request):
         """Generate summary for a document (POST)."""
-        # Check authentication first
-        session_data, redirect = await require_auth_html(request, session_manager)
+        # Mutates stored documents, so it sits behind the admin gate.
+        session_data, redirect = await require_auth_html(
+            request, session_manager, require_admin=True
+        )
         if redirect:
             return redirect
         
@@ -1799,7 +1935,6 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
             # Fallback to default options
             chunk_strategy_options = '<option value="">Default (tokens)</option>'
             chunk_strategy_options += '<option value="tokens">tokens</option>'
-            chunk_strategy_options += '<option value="slide">slide</option>'
 
         content = f"""
             <h1>Upload Document</h1>
@@ -2600,6 +2735,123 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
                 status_code=500,
             )
 
+    async def document_parser_output(request: Request):
+        """Show the persisted structured parser output for a document."""
+        session_data, redirect = await require_auth_html(request, session_manager)
+        if redirect:
+            return redirect
+        username = session_data.get("username")
+        doc_id = request.path_params["doc_id"]
+
+        try:
+            from ....kb import get
+            from ....kb.database import get_db_session
+            from ....kb.db_models import DocumentParserOutput, is_docling_document
+
+            doc = get(uid=doc_id)
+            if not doc:
+                return HTMLResponse(
+                    html_templates.base_template(
+                        "Document Not Found",
+                        '<div class="error-box"><h2>Document Not Found</h2><p>The requested document could not be found.</p><p><a href="/web">← Back to Document List</a></p></div>',
+                        None,
+                        username,
+                    ),
+                    status_code=404,
+                )
+
+            with get_db_session() as session:
+                row = session.query(DocumentParserOutput).filter(
+                    DocumentParserOutput.document_id == doc.id
+                ).first()
+                output = row.output if row else None
+                created_time = str(row.created_time)[:19] if row and row.created_time else None
+
+            if output is None:
+                return HTMLResponse(
+                    html_templates.base_template(
+                        "No Parser Output",
+                        f'<div class="error-box"><h2>No Parser Output</h2>'
+                        f'<p>Document <code>{html_escape(doc_id)}</code> has no persisted parser output.</p>'
+                        f'<p><a href="/web/document/{doc.id}">← Back to Document</a></p></div>',
+                        None,
+                        username,
+                    ),
+                    status_code=404,
+                )
+
+            doc_label = html_escape(str(doc.doc_id or doc.id))
+
+            # --- Structured summary ---
+            if is_docling_document(output):
+                schema_name = output.get("schema_name", "DoclingDocument")
+                version = output.get("version", "")
+                num_pages = len(output.get("pages") or {})
+                num_texts = len(output.get("texts") or [])
+                num_tables = len(output.get("tables") or [])
+                num_pictures = len(output.get("pictures") or [])
+                num_groups = len(output.get("groups") or [])
+                summary_card = f"""
+<div class="card">
+    <h2>Parser Output Summary</h2>
+    <table>
+        <tr><th>Schema</th><td>{html_escape(str(schema_name))} {html_escape(str(version))}</td></tr>
+        <tr><th>Parser</th><td>{html_escape(str(doc.parser_id)) if doc.parser_id else "N/A"}</td></tr>
+        <tr><th>Pages</th><td>{num_pages}</td></tr>
+        <tr><th>Text elements</th><td>{num_texts}</td></tr>
+        <tr><th>Tables</th><td>{num_tables}</td></tr>
+        <tr><th>Pictures</th><td>{num_pictures}</td></tr>
+        <tr><th>Groups</th><td>{num_groups}</td></tr>
+        {'<tr><th>Stored</th><td>' + html_escape(created_time) + '</td></tr>' if created_time else ''}
+    </table>
+</div>"""
+            else:
+                summary_card = f"""
+<div class="card">
+    <h2>Parser Output Summary</h2>
+    <table>
+        <tr><th>Parser</th><td>{html_escape(str(doc.parser_id)) if doc.parser_id else "N/A"}</td></tr>
+        <tr><th>Format</th><td>Unrecognized / non-DoclingDocument payload</td></tr>
+        {'<tr><th>Stored</th><td>' + html_escape(created_time) + '</td></tr>' if created_time else ''}
+    </table>
+</div>"""
+
+            # --- Raw JSON (collapsed by default) ---
+            raw_json = html_escape(json.dumps(output, indent=2, default=str))
+            raw_json_card = f"""
+<div class="card">
+    <h2>Raw Output <span onclick="document.getElementById('parser-raw-json').style.display = document.getElementById('parser-raw-json').style.display === 'none' ? 'block' : 'none';" style="cursor: pointer; font-size: 0.6em; color: #2196F3; user-select: none;">[toggle]</span></h2>
+    <pre id="parser-raw-json" style="display: none; white-space: pre-wrap; max-height: 600px; overflow-y: auto; padding: 10px; background: #f9f9f9; border: 1px solid #ddd; border-radius: 4px; font-size: 12px;">{raw_json}</pre>
+</div>"""
+
+            content = f"""
+<h1>Parser Output</h1>
+<p><a href="/web/document/{doc.id}">← Back to Document</a> ({doc_label})</p>
+{summary_card}
+{raw_json_card}
+"""
+            return HTMLResponse(
+                html_templates.base_template(
+                    f"Parser Output: {doc_label}",
+                    content,
+                    None,
+                    username,
+                )
+            )
+
+        except Exception as e:
+            logger.error(f"Error fetching parser output for {doc_id}: {e}", exc_info=True)
+            error_msg = html_escape(str(e))
+            return HTMLResponse(
+                html_templates.base_template(
+                    "Error",
+                    f'<div class="error-box"><h2>Error</h2><p>{error_msg}</p><p><a href="/web">← Back</a></p></div>',
+                    None,
+                    username,
+                ),
+                status_code=500,
+            )
+
     async def raw_document_detail(request: Request):
         """Show details for a raw document, its parsed versions, and any parser comparison."""
         session_data, redirect = await require_auth_html(request, session_manager)
@@ -2934,6 +3186,7 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
     app.add_route("/web/upload/meeting-comments", upload_meeting_comments_page, methods=["GET"])
     app.add_route("/web/upload/meeting", upload_meeting_comments, methods=["POST"])
     app.add_route("/web/upload/meeting-comments", upload_meeting_comments, methods=["POST"])
+    app.add_route("/web/document/{doc_id}/parser-output", document_parser_output, methods=["GET"])
     app.add_route("/web/raw/{raw_doc_id}", raw_document_detail, methods=["GET"])
     app.add_route("/web/compare", compare_page, methods=["GET"])
 

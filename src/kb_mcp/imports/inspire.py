@@ -7,6 +7,7 @@ import os
 import re
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 from urllib.parse import urljoin, urlparse, parse_qs, urlencode
@@ -34,6 +35,50 @@ else:
 
 
 logger = logging.getLogger(__name__)
+
+
+def parse_inspire_date(value: Optional[str]) -> Optional[datetime]:
+    """Convert an INSPIRE date to an aware UTC datetime.
+
+    Handles both shapes the API returns:
+
+    * full ISO timestamps on the record envelope
+      ("2023-03-10T15:19:10.632902+00:00")
+    * partial `preprint_date` values, which may be "YYYY", "YYYY-MM" or
+      "YYYY-MM-DD" — INSPIRE records only the precision it actually knows.
+
+    Partial dates are anchored to the earliest instant they can denote
+    (January for a bare year, the 1st for a bare month) so ordering and
+    range filters stay meaningful. That makes a year-only date sort as
+    1 Jan, which is the conventional reading, not a claim of precision.
+
+    Returns None for missing or unparseable values — dates are
+    nice-to-have metadata and must never fail an import.
+    """
+    if not value:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+
+    # Full timestamp first; only fall back to the partial-date forms.
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        parsed = None
+        for fmt in ("%Y-%m-%d", "%Y-%m", "%Y"):
+            try:
+                parsed = datetime.strptime(text, fmt)
+                break
+            except ValueError:
+                continue
+        if parsed is None:
+            logger.warning(f"Could not parse INSPIRE date {value!r}")
+            return None
+
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 class InspireSource(Source):
@@ -321,6 +366,21 @@ class InspireSource(Source):
                 "error": f"Failed to download PDF for record {record_id}"
             }
 
+        # Promote the record's dates to the Document columns so search and
+        # the web UI can filter on when the work was published rather than
+        # when we happened to fetch it.
+        #
+        # creating_time prefers preprint_date — when the paper itself was
+        # written. The envelope's `created` is only when INSPIRE ingested
+        # the record, which for older literature can be decades later, so
+        # it serves as a fallback. update_time uses the envelope's
+        # `updated`, i.e. the record's last revision.
+        creating_time = (
+            parse_inspire_date(record_data.get("preprint_date"))
+            or parse_inspire_date(item.get("created"))
+        )
+        update_time = parse_inspire_date(item.get("updated"))
+
         # Add to knowledge base (let ingest copy file to KB storage)
         result = add_document(
             pdf_path,
@@ -328,6 +388,8 @@ class InspireSource(Source):
             doc_id=record_id,
             uri=uri,
             meta=metadata,
+            creating_time=creating_time,
+            update_time=update_time,
             copy_to_kb=True,  # Copy from temp dir to data/sources/inspire-hep/
             session=session
         )

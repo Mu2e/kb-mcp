@@ -300,6 +300,43 @@ def cmd_embedding_drop(args):
         sys.exit(1)
 
 
+def cmd_embedding_optimize_index(args):
+    """Rebuild the IVFFlat index with a 'lists' value sized for the current row count.
+
+    Worth running after a bulk import: IVFFlat partitions the vector space at
+    build time, so an index built when the table was much smaller gives
+    degraded recall once many rows have been added.
+    """
+    try:
+        from ..embedding import optimize_embedding_index
+
+        result = optimize_embedding_index(args.embedding_name)
+        print(result["message"])
+        if result.get("embedding_count"):
+            print(f"  embeddings: {result['embedding_count']}")
+            print(f"  lists:      {result['optimal_lists']}")
+            print(f"  rebuilt:    {result['index_rebuilt']}")
+    except Exception as e:
+        print(f"Error optimizing index: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+
+def cmd_embedding_vacuum(args):
+    """Run VACUUM ANALYZE on an embedding table to refresh planner statistics."""
+    try:
+        from ..embedding import vacuum_analyze_embedding_table
+
+        result = vacuum_analyze_embedding_table(args.embedding_name)
+        print(result.get("message", "Done."))
+    except Exception as e:
+        print(f"Error running vacuum analyze: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+
 def cmd_embedding_embed_all(args):
     """Generate embeddings for all chunks that don't have them yet."""
     try:
@@ -453,6 +490,20 @@ def setup_commands(subparsers):
     embedding_drop_parser.add_argument("chunk_id", help="Chunk ID (UUID)")
     embedding_drop_parser.add_argument("--embedding-name", help="Specific embedding name (optional, drops all if not provided)")
     embedding_drop_parser.set_defaults(func=cmd_embedding_drop)
+
+    embedding_optimize_parser = embedding_subparsers.add_parser(
+        "optimize-index",
+        help="Rebuild the IVFFlat index sized for the current row count (run after bulk imports)",
+    )
+    embedding_optimize_parser.add_argument("--embedding-name", help="Embedding config short name (e.g., 'st_MiniLML6v2')")
+    embedding_optimize_parser.set_defaults(func=cmd_embedding_optimize_index)
+
+    embedding_vacuum_parser = embedding_subparsers.add_parser(
+        "vacuum",
+        help="VACUUM ANALYZE the embedding table to refresh planner statistics",
+    )
+    embedding_vacuum_parser.add_argument("--embedding-name", help="Embedding config short name (e.g., 'st_MiniLML6v2')")
+    embedding_vacuum_parser.set_defaults(func=cmd_embedding_vacuum)
 
     embedding_embed_all_parser = embedding_subparsers.add_parser("embed-all", help="Generate embeddings for chunks that don't have them yet")
     embedding_embed_all_parser.add_argument("--source-id", help="Filter by source identifier")

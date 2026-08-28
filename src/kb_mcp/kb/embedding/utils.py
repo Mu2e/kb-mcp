@@ -23,11 +23,14 @@ logger = logging.getLogger(__name__)
 
 # Default values (used when env vars not set)
 DEFAULT_PROVIDER = "st"
+# Used when neither a caller nor EMBEDDING_MODEL names a model. bge-small-en-v1.5
+# over all-MiniLM-L6-v2: same 384 dimensions, but a 512-token window instead of
+# 256, and MiniLM's window was truncating most of a section-sized chunk.
 DEFAULT_MODELS = {
     "openai": "text-embedding-3-small",
-    "sentence-transformers": "all-MiniLM-L6-v2",
-    "sentence_transformers": "all-MiniLM-L6-v2",
-    "st": "all-MiniLM-L6-v2",
+    "sentence-transformers": "BAAI/bge-small-en-v1.5",
+    "sentence_transformers": "BAAI/bge-small-en-v1.5",
+    "st": "BAAI/bge-small-en-v1.5",
 }
 
 

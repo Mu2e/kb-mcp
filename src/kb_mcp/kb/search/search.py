@@ -273,7 +273,11 @@ def search_semantic(
         # Get embedder and embed the query
         # Don't pass kwargs to embedder - metadata filters should only go to search functions
         embedder = get_embedder(embedding_name=embedding_name, session=session)
-        query_embedding = embedder([query])[0]  # Get first (and only) embedding
+        # embed_query, not embedder([query]): asymmetric retrieval models
+        # (bge-*) want a query-side instruction that the indexed passages
+        # were deliberately embedded without. Symmetric models return an
+        # empty prefix, so this is a no-op for them.
+        query_embedding = embedder.embed_query(query)
         from ..embedding.embedding import _convert_embedding_to_list
         query_embedding = _convert_embedding_to_list(query_embedding)
         
@@ -304,7 +308,12 @@ def search_semantic(
         result['metadata']['time_embedding'] = embedding_time
         result['metadata']['time_search_total'] = time.time() - total_start
 
-        # Log search to database
+        # Log search to database.
+        # `search_type` is set explicitly here, so drop any copy travelling in
+        # **kwargs (callers such as search(search_type=...) forward it down) -
+        # otherwise log_search() gets two values for the same parameter and
+        # raises TypeError.
+        log_kwargs = {k: v for k, v in kwargs.items() if k != "search_type"}
         log_search(
             search_type="semantic",
             query=query,
@@ -323,7 +332,7 @@ def search_semantic(
             time_db_fetch=result['metadata'].get('time_db_fetch'),
             time_distance_calc=result['metadata'].get('time_distance_calc'),
             time_sort=result['metadata'].get('time_sort'),
-            **kwargs
+            **log_kwargs
         )
 
         return result

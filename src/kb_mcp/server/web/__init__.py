@@ -1,6 +1,7 @@
 """Web interface package - consolidates all web routes."""
 
-from .auth import WebSessionManager, setup_shared_auth_routes
+from ...config import get_server_config
+from .auth import WebSessionManager, require_admin, setup_shared_auth_routes
 from .routes.documents import (
     require_auth_html,
     require_auth_api,
@@ -48,8 +49,9 @@ def setup_web_routes(app, oauth_provider, session_manager: WebSessionManager):
     # Setup API routes (JSON endpoints)
     setup_api_routes(app, session_manager)
 
-    # Setup graph routes (knowledge graph exploration)
-    setup_graph_routes(app, session_manager)
+    # Setup graph routes (knowledge graph exploration), unless disabled via HIDE_GRAPH
+    if not get_server_config()['hide_graph']:
+        setup_graph_routes(app, session_manager)
 
     # Setup chat routes (agent-based chat interface)
     setup_chat_routes(app, session_manager, require_auth_html, require_auth_api)
@@ -57,6 +59,7 @@ def setup_web_routes(app, oauth_provider, session_manager: WebSessionManager):
 
 __all__ = [
     'WebSessionManager',
+    'require_admin',
     'setup_shared_auth_routes',
     'setup_web_routes',
     'require_auth_html',

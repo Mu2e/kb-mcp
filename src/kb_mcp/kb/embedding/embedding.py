@@ -667,17 +667,22 @@ def optimize_embedding_index(embedding_name: str, session=None) -> Dict[str, Any
         ```
     """
     from sqlalchemy import text
-    
+
+    # get_db_session() is a @contextmanager, so it has to be entered rather
+    # than called for its return value. Enter it explicitly here so the
+    # existing try/finally below keeps working unchanged.
+    _session_cm = None
     if session is None:
-        session = get_db_session()
+        _session_cm = get_db_session()
+        session = _session_cm.__enter__()
         should_close = True
     else:
         should_close = False
-    
+
     try:
         config, embedding_table, embedding_name = _get_embedding_table(session, embedding_name)
         dialect_name = session.bind.dialect.name
-        
+
         if dialect_name != 'postgresql':
             return {
                 "embedding_name": embedding_name,
@@ -784,8 +789,8 @@ def optimize_embedding_index(embedding_name: str, session=None) -> Dict[str, Any
                 "message": f"Failed to rebuild index: {e}"
             }
     finally:
-        if should_close:
-            session.close()
+        if should_close and _session_cm is not None:
+            _session_cm.__exit__(None, None, None)
 
 
 def vacuum_analyze_embedding_table(embedding_name: str, session=None) -> Dict[str, Any]:
@@ -814,17 +819,22 @@ def vacuum_analyze_embedding_table(embedding_name: str, session=None) -> Dict[st
         ```
     """
     from sqlalchemy import text
-    
+
+    # get_db_session() is a @contextmanager, so it has to be entered rather
+    # than called for its return value. Enter it explicitly here so the
+    # existing try/finally below keeps working unchanged.
+    _session_cm = None
     if session is None:
-        session = get_db_session()
+        _session_cm = get_db_session()
+        session = _session_cm.__enter__()
         should_close = True
     else:
         should_close = False
-    
+
     try:
         config, embedding_table, embedding_name = _get_embedding_table(session, embedding_name)
         dialect_name = session.bind.dialect.name
-        
+
         if dialect_name != 'postgresql':
             return {
                 "embedding_name": embedding_name,
@@ -841,10 +851,14 @@ def vacuum_analyze_embedding_table(embedding_name: str, session=None) -> Dict[st
             }
         
         try:
-            # VACUUM ANALYZE updates statistics for query planning
-            session.execute(text(f"VACUUM ANALYZE {embedding_table.name}"))
-            session.commit()
-            
+            # VACUUM ANALYZE updates statistics for query planning. It cannot
+            # run inside a transaction block, so take a separate connection in
+            # AUTOCOMMIT rather than going through the session.
+            session.commit()  # settle any open transaction on this session first
+            engine = session.bind
+            with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+                conn.execute(text(f"VACUUM ANALYZE {embedding_table.name}"))
+
             return {
                 "embedding_name": embedding_name,
                 "vacuumed": True,
@@ -858,6 +872,6 @@ def vacuum_analyze_embedding_table(embedding_name: str, session=None) -> Dict[st
                 "message": f"Failed to run VACUUM ANALYZE: {e}"
             }
     finally:
-        if should_close:
-            session.close()
+        if should_close and _session_cm is not None:
+            _session_cm.__exit__(None, None, None)
 

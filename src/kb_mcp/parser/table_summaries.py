@@ -9,15 +9,23 @@ downstream consumers that want the structured form.
 
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from ..config import get_llm_config, get_parser_config
+from ..llm.usage import STAGE_TABLE_SUMMARY, UsageAccumulator
 
 logger = logging.getLogger(__name__)
 
 
-def _get_single_table_summary(client, table_dict: Dict[str, Any], model: str) -> str:
-    """Ask the LLM for a 1–2 sentence factual summary of one table."""
+def _get_single_table_summary(
+    client, table_dict: Dict[str, Any], model: str
+) -> tuple[str, Any]:
+    """Ask the LLM for a 1–2 sentence factual summary of one table.
+
+    Returns the summary text and the response's raw `usage` object, so the
+    caller can account for tokens without this helper touching the DB from
+    inside a worker thread.
+    """
     meta = table_dict.get("meta") or {}
     caption = (meta.get("caption") or "").strip()
     nearby_text = (meta.get("nearby_text") or "").strip()
@@ -35,11 +43,12 @@ def _get_single_table_summary(client, table_dict: Dict[str, Any], model: str) ->
         max_tokens=800,
     )
     content = response.choices[0].message.content
-    return (content or "").strip()
+    return (content or "").strip(), getattr(response, "usage", None)
 
 
 def generate_table_summaries(
     table_dicts: List[Dict[str, Any]],
+    usage_out: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     """Generate a 1–2 sentence summary for each `doc_type="table"` record.
 
@@ -51,6 +60,13 @@ def generate_table_summaries(
       - PARSE_TABLE_SUMMARY_MODEL — model name (defaults to DEFAULT_LLM_MODEL).
       - PARSE_TABLE_SUMMARY_NUMWORKERS — parallel worker count (default 6).
       - OPENAI_BASE_URL / OPENAI_API_KEY — credentials (required).
+
+    Args:
+        table_dicts: Table records to summarise (modified in place).
+        usage_out: Optional dict that receives the token-usage summary for
+            this batch. Parsing runs before the document row exists, so the
+            caller carries these counters forward and persists them once the
+            document has an id.
 
     On failure (no API key, openai package missing, request error) the
     table dicts are returned unchanged — the table records are still
@@ -79,13 +95,22 @@ def generate_table_summaries(
     model = parser_config["table_summary_model"]
     max_workers = parser_config["table_summary_num_workers"]
 
-    client_kwargs = {"api_key": api_key}
-    base_url = llm_config["openai_base_url"]
+    # Honour per-model routing (OPENAI_BASE_URL_MODELS / OPENAI_API_KEY_MODELS)
+    # like llm/llm.py and image_descriptions.py do. Without it, a deployment
+    # that splits models across endpoints sends the table-summary model to
+    # whichever host happens to be the global default — which won't serve it.
+    client_kwargs = {
+        "api_key": llm_config["openai_api_key_models"].get(model, api_key)
+    }
+    base_url = llm_config["openai_base_url_models"].get(
+        model, llm_config["openai_base_url"]
+    )
     if base_url:
         client_kwargs["base_url"] = base_url
     client = OpenAI(**client_kwargs)
 
     summaries: List[str | None] = [None] * len(targets)
+    usage = UsageAccumulator()
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_to_index = {
@@ -95,7 +120,8 @@ def generate_table_summaries(
         for future in as_completed(future_to_index):
             i = future_to_index[future]
             try:
-                summaries[i] = future.result()
+                summaries[i], call_usage = future.result()
+                usage.add(call_usage, stage=STAGE_TABLE_SUMMARY, model=model)
             except Exception as e:
                 meta = targets[i].get("meta") or {}
                 idx = meta.get("table_index")
@@ -108,6 +134,10 @@ def generate_table_summaries(
         td.setdefault("meta", {})["summary"] = summary
         existing = (td.get("text") or "").strip()
         td["text"] = f"{existing}\n\n{summary}" if existing else summary
+
+    logger.info(f"Table summary tokens — {usage.format_summary()}")
+    if usage_out is not None:
+        usage_out.update(usage.summary())
 
     return table_dicts
 

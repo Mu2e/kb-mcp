@@ -7,6 +7,8 @@ import time
 from typing import Dict, Optional
 
 from ..llm import get_openai_client
+from ..llm.retry import call_with_backoff
+from ..llm.usage import STAGE_DOCUMENT_SUMMARY, record_llm_usage
 from ..config import get_llm_config
 
 logger = logging.getLogger(__name__)
@@ -34,6 +36,7 @@ def summarize(
     include_title: bool = True,
     include_metadata: bool = False,
     model: Optional[str] = None,
+    document_id: Optional[str] = None,
 ) -> Dict[str, str]:
     """Generate AI summary, gist, and/or title for a document.
 
@@ -53,6 +56,8 @@ def summarize(
         include_title: Whether to generate title (default: False)
         include_metadata: Whether to extract structured metadata (default: False)
         model: Model name to use (overrides SUMMARY_MODEL env var)
+        document_id: Document being summarized. Only used to attribute token
+            usage; summarization itself doesn't need it.
 
     Returns:
         Dictionary with requested keys ('title', 'gist', 'summary'), 'time_summary' (seconds), and 'query' (prompt sent to LLM)
@@ -124,7 +129,11 @@ Return ONLY a valid JSON object in this format:
 
     try:
         start_time = time.time()
-        response = client.chat.completions.create(
+        # Wrapped in backoff: one summary call per document means a bulk
+        # reparse hammers this endpoint 595 times in a row, and a transient
+        # 429 here would otherwise abort the whole document.
+        response = call_with_backoff(
+            client.chat.completions.create,
             model=model,
             messages=[
                 {
@@ -138,6 +147,13 @@ Return ONLY a valid JSON object in this format:
             ],
             #max_tokens=max_tokens,
             response_format={"type": "json_object"}  # Enforce JSON response
+        )
+
+        record_llm_usage(
+            getattr(response, "usage", None),
+            stage=STAGE_DOCUMENT_SUMMARY,
+            model=model,
+            document_id=document_id,
         )
 
         content = response.choices[0].message.content.strip()

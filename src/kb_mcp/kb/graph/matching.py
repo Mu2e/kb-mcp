@@ -249,6 +249,7 @@ def _disambiguate_nodes_with_llm(
         Selected GraphNode, or None if LLM suggests creating a new node.
     """
     from ...llm import get_openai_client
+    from ...llm.usage import STAGE_GRAPH_MATCHING, record_llm_usage
 
     try:
         # Build prompt
@@ -278,6 +279,12 @@ If no good match exists, return null for choice."""
                 {"role": "user", "content": prompt}
             ],
             response_format={"type": "json_object"}
+        )
+
+        record_llm_usage(
+            getattr(response, "usage", None),
+            stage=STAGE_GRAPH_MATCHING,
+            meta={"query_name": query_name, "num_candidates": len(candidates)},
         )
 
         # Parse response

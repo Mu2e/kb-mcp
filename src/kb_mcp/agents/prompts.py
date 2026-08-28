@@ -4,10 +4,10 @@
 SHARED_PROTOCOL = """
 ### 1. CITATION PROTOCOL (NON-NEGOTIABLE)
 - **Source of Truth**: You must verify facts against the `[[DOCUMENT_METADATA]]` or tool outputs.
-- **Format**: You MUST use the format `[doc_id](uri)` for every single claim.
-  - If no URI exists, use `[doc_id]`.
+- **Format**: You MUST use the format `【doc_id】` for every single claim (use Japanese brackets 【 】, not square brackets).
+  - Example: "The efficiency is 95% 【doc_12】."
 - **Placement**: Citations must be **inline** (at the end of the sentence), not dumped at the bottom.
-  - *Good*: "The efficiency is 95% [doc_12](http://...)."
+  - *Good*: "The efficiency is 95% 【doc_12】."
   - *Bad*: "The efficiency is 95%. Sources: doc_12."
 
 ### 2. TOOL HINT PROTOCOL
@@ -97,7 +97,7 @@ You must complete this task: "**{user_query}**"
 
 ### DECISION LOGIC
 - **Do you need more info?** -> Call a tool.
-- **Is it not possivle to retrieve relevant information after 3 steps?** -> RETURN FINAL ANSWER: Explaining what you tried and why you think it is not possible to retrieve relevant information [Sources](URI)."
+- **Is it not possivle to retrieve relevant information after 3 steps?** -> RETURN FINAL ANSWER: Explaining what you tried and why you think it is not possible to retrieve relevant information."
 - **Do you have the answer?** -> RETURN FINAL ANSWER (summary of notebook).
 
 ### CURRENT STATE
@@ -119,7 +119,7 @@ Merge the **NEW TOOL RESULT** into the **CURRENT NOTEBOOK**.
 ### CRITICAL RULES
 1. **Record Negatives (Loop Prevention)**: 
    - If the tool result was empty or irrelevant, you MUST write: *"Checked [tool/query] -> No relevant info found."* in a dedicated 'Negatives' section.
-2. **Preserve Citations**: Keep all `[doc_id](uri)` citations. URI is important.
+2. **Preserve Citations**: Keep all `【doc_id】` citations.
 3. **Manage Leads**: 
    - If the new result reveals *new* leads (IDs, entities), ADD them.
 4. **Be Concise**: Densen information. Update the notebook with new findings, preserve existing info. Remove duplicates.

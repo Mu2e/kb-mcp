@@ -249,17 +249,10 @@ def search_fulltext(
             if not doc or not chunks:
                 continue
 
-            # Add text to chunks
-            for chunk in chunks:
-                if chunk["char_start"] is not None and \
-                   chunk["char_end"] is not None and \
-                   documents_by_id[doc_id].text is not None:
-                    chunk["text"] = documents_by_id[doc_id].text[chunk["char_start"]:chunk["char_end"]]
-                if chunk["chunk_strategy"] == "summary" and documents_by_id[doc_id].summary is not None:
-                    chunk["text"] = documents_by_id[doc_id].summary
-
-            # Sort chunks by score (best first)
-            chunks.sort(key=lambda x: x["score"], reverse=True)
+            # Rebuild each chunk's text from the live document and sort
+            # best-first (also collapses a split summary back to one result).
+            from .chunk_text import attach_chunk_text
+            chunks = attach_chunk_text(chunks, doc, score_key="score")
 
             from .provenance import doc_provenance
             result_dict = {
@@ -285,7 +278,10 @@ def search_fulltext(
 
         time_search_total = time.time() - start_time
 
-        # Log search to database
+        # Log search to database.
+        # `search_type` is set explicitly here, so drop any copy travelling in
+        # **kwargs - see the same guard in search_semantic().
+        log_kwargs = {k: v for k, v in kwargs.items() if k != "search_type"}
         log_search(
             search_type="fulltext",
             query=query,
@@ -299,7 +295,7 @@ def search_fulltext(
             filter=filter,
             time_search_total=time_search_total,
             time_deduplication=time_deduplication,
-            **kwargs
+            **log_kwargs
         )
 
         return {

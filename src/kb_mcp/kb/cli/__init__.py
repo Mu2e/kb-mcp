@@ -2,7 +2,31 @@
 """CLI tool for knowledge base operations."""
 
 import argparse
+import logging
 import sys
+
+
+def _setup_logging(verbose: bool = False) -> None:
+    """Route library log records to the console.
+
+    Without this the `kb` CLI configures no handlers at all, so every
+    logger.info/warning/error raised anywhere in the pipeline is discarded —
+    including the "endpoint is throttling" and "N image descriptions failed"
+    reports, which then only surface as placeholder text in the corpus long
+    afterwards.
+
+    The root stays at WARNING so torch/docling/transformers don't drown the
+    output; kb_mcp's own loggers go to INFO (DEBUG with --verbose), matching
+    what `kb-import` already does.
+    """
+    root = logging.getLogger()
+    if not root.handlers:
+        logging.basicConfig(
+            level=logging.WARNING,
+            format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
+            datefmt="%H:%M:%S",
+        )
+    logging.getLogger("kb_mcp").setLevel(logging.DEBUG if verbose else logging.INFO)
 
 
 class GroupedHelpFormatter(argparse.RawDescriptionHelpFormatter):
@@ -75,6 +99,10 @@ def main():
         description="Knowledge base CLI",
         formatter_class=GroupedHelpFormatter
     )
+    parser.add_argument(
+        "-v", "--verbose", action="store_true",
+        help="Show DEBUG-level logs from kb_mcp modules",
+    )
     subparsers = parser.add_subparsers(dest="command", help="Commands")
 
     # Import and setup all command modules
@@ -98,6 +126,8 @@ def main():
     compare_commands.setup_commands(subparsers)
 
     args = parser.parse_args()
+
+    _setup_logging(getattr(args, "verbose", False))
 
     if not args.command:
         parser.print_help()
@@ -169,7 +199,7 @@ def main():
                 parser.print_help()
                 sys.exit(1)
         elif args.command == "logs":
-            from .tools_commands import cmd_logs_chunking, cmd_logs_parsing
+            from .tools_commands import cmd_logs_chunking, cmd_logs_parsing, cmd_logs_tokens
             from .search_commands import cmd_search_logs
             if args.logs_command == "search":
                 cmd_search_logs(args)
@@ -177,6 +207,8 @@ def main():
                 cmd_logs_chunking(args)
             elif args.logs_command == "parsing":
                 cmd_logs_parsing(args)
+            elif args.logs_command == "tokens":
+                cmd_logs_tokens(args)
             else:
                 parser.print_help()
                 sys.exit(1)

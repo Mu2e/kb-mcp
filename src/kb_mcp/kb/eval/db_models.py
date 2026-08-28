@@ -50,7 +50,6 @@ class EvalGeneration(Base):
         String(36),
         primary_key=True,
         default=lambda: str(uuid.uuid4()),
-        index=True,
     )
 
     # Generation metadata
@@ -122,7 +121,6 @@ class EvalDataset(Base):
         String(36),
         primary_key=True,
         default=lambda: str(uuid.uuid4()),
-        index=True,
     )
 
     # Question data
@@ -201,7 +199,6 @@ class EvalAudit(Base):
         String(36),
         primary_key=True,
         default=lambda: str(uuid.uuid4()),
-        index=True,
     )
 
     # Link to question
@@ -274,7 +271,6 @@ class EvalRun(Base):
         String(36),
         primary_key=True,
         default=lambda: str(uuid.uuid4()),
-        index=True,
     )
 
     # Run metadata
@@ -355,7 +351,6 @@ class EvalResult(Base):
         String(36),
         primary_key=True,
         default=lambda: str(uuid.uuid4()),
-        index=True,
     )
 
     # Links
@@ -452,7 +447,6 @@ class EvalRetrievedDocument(Base):
         String(36),
         primary_key=True,
         default=lambda: str(uuid.uuid4()),
-        index=True,
     )
 
     # Links

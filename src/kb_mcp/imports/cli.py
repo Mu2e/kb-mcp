@@ -85,11 +85,14 @@ def cmd_docdb(args):
     # Explicit doc IDs (--ids 100 200 300)
     doc_ids = getattr(args, "ids", None) or None
 
+    skip_parse = getattr(args, "skip_parse", False)
+
     with DocDBSource(
         source_id=args.source_id,
         delay=args.delay,
         skip_existing=args.skip_existing,
         force_reparse=getattr(args, "force_reparse", False),
+        skip_parse=skip_parse,
     ) as source:
         # Override fetch_items kwargs through process_all by monkey-patching
         # the positional query; pass extra state via the source object
@@ -111,13 +114,32 @@ def cmd_docdb(args):
             )
         source.fetch_items = _fetch_with_extras
 
+        from datetime import timezone
+        run_started = datetime.now(timezone.utc)
+
         documents = source.process_all(
             query=getattr(args, "query", None),
             max_results=args.max_results,
             output_dir=args.output_dir,
-            auto_embed=not args.no_auto_embed,
-            auto_summarize=not args.no_auto_summarize,
+            auto_embed=not args.no_auto_embed and not skip_parse,
+            auto_summarize=not args.no_auto_summarize and not skip_parse,
         )
+
+    if skip_parse:
+        # process_all()'s returned document_ids stays empty under
+        # skip_parse (only RawDocument rows exist yet), so report against
+        # the raw table instead of the misleading empty list.
+        from ..kb.database import get_db_session
+        from ..kb.db_models import RawDocument
+        with get_db_session() as session:
+            raw_count = session.query(RawDocument).filter(
+                RawDocument.source_id == args.source_id,
+                RawDocument.created_time >= run_started,
+            ).count()
+        print(f"\n  {raw_count} raw document(s) newly staged for {args.source_id}")
+        print(f"  Parse them with:")
+        print(f"    kb tools parse-all {args.source_id}")
+        return
 
     print(f"\n  Successfully processed {len(documents)} document(s)")
     for doc_id in documents[:10]:
@@ -185,8 +207,16 @@ def main():
         description="Import documents from various external sources",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    
-    subparsers = parser.add_subparsers(dest="source", help="Data source", required=True)
+    parser.add_argument(
+        "--check-connections",
+        action="store_true",
+        help="Check that the database, embedding, LLM and source endpoints "
+             "respond, print a report and exit (no import is run)",
+    )
+
+    # required=False so `kb-import --check-connections` works with no
+    # subcommand; a bare `kb-import` still falls through to print_help below.
+    subparsers = parser.add_subparsers(dest="source", help="Data source")
     
     # Inspire source
     inspire_parser = subparsers.add_parser(
@@ -348,12 +378,14 @@ def main():
     docdb_parser.add_argument(
         "--before",
         metavar="YYYY-MM-DD",
-        help="Upper date bound for search (only with --query)",
+        help="Upper date bound. Usable with --query or on its own, in which "
+             "case the date range alone selects the documents",
     )
     docdb_parser.add_argument(
         "--after",
         metavar="YYYY-MM-DD",
-        help="Lower date bound for search (only with --query)",
+        help="Lower date bound. Usable with --query or on its own, in which "
+             "case the date range alone selects the documents",
     )
     docdb_parser.add_argument(
         "--max-results",
@@ -401,6 +433,16 @@ def main():
         action="store_true",
         help="Re-download and re-parse documents even if they already exist in the database",
     )
+    docdb_parser.add_argument(
+        "--skip-parse",
+        action="store_true",
+        help=(
+            "Only download files and register them as RawDocument rows — no "
+            "parsing, chunking, or embedding. Parse the staged rows later with "
+            "'kb tools parse-all'. Useful for staging a large backfill "
+            "(network-bound) separately from parsing it (CPU-bound)."
+        ),
+    )
     docdb_parser.set_defaults(func=cmd_docdb)
 
     # Local PDF source
@@ -444,10 +486,16 @@ def main():
 
     # Parse arguments
     args = parser.parse_args()
-    
+
     # Call the appropriate command function
-    if hasattr(args, 'func'):
+    if args.check_connections:
+        from kb_mcp.health import run_and_report
+
+        setup_logging(getattr(args, "verbose", False))
+        exit_code = run_and_report()
+    elif hasattr(args, 'func'):
         args.func(args)
+        exit_code = 0
     else:
         parser.print_help()
         sys.exit(1)
@@ -459,7 +507,7 @@ def main():
         get_engine().dispose()
     except Exception:
         pass
-    sys.exit(0)
+    sys.exit(exit_code)
 
 
 if __name__ == "__main__":

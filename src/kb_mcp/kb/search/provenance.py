@@ -17,17 +17,23 @@ def doc_provenance(doc) -> Dict[str, Any]:
     `null`-valued keys.
 
     Always includes:
-        doc_type — so clients can branch on figure / table / section / text.
+        doc_type — so clients can branch on figure / table / text.
 
     Optionally includes (when the parser populated them):
         page          — int. From meta["page"] for table / image records.
-        page_start    — int. From meta["page_start"] for section records.
-        page_end      — int. From meta["page_end"]   for section records.
+        page_start    — int. From meta["page_start"], if present.
+        page_end      — int. From meta["page_end"], if present.
         caption       — str. From meta["caption"]    for figure / table records.
-        section_title — str. From meta["section_title"] for section records.
-        level         — int. From meta["level"]      for section records.
+        section_title — str. From meta["section_title"], if present.
+        level         — int. From meta["level"], if present.
         num_rows      — int. From meta["num_rows"]   for table records.
         num_cols      — int. From meta["num_cols"]   for table records.
+
+    Note: section-level info (section_path, page range, heading level) now
+    lives on Chunk rows (chunk_strategy="section"), not a dedicated section
+    Document — this function only ever saw the old section-doctype Document's
+    meta, so these keys are unlikely to appear on a Document going forward.
+    Kept generic (doesn't hardcode doc_type) since nothing here depends on it.
     """
     meta = (doc.meta or {}) if doc is not None else {}
     out: Dict[str, Any] = {"doc_type": getattr(doc, "doc_type", None)}

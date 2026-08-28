@@ -27,7 +27,7 @@ def extract_all(
 
     This function processes documents in batch, similar to parse_all and chunk_and_embed_all.
     By default, it skips documents that already have extraction logs (unless force=True),
-    and only processes documents with `doc_type="text"` — sections, tables, and images
+    and only processes documents with `doc_type="text"` — tables and images
     largely re-cover the parent text and would otherwise produce duplicate relations.
 
     Args:
@@ -35,7 +35,7 @@ def extract_all(
         parser_id: Optional parser ID filter.
         doc_types: List of doc_type strings to include. Defaults to ["text"] — graph
                    relations are extracted from the parent text doc only. Pass
-                   ["text", "section"] (or similar) to opt structural records back in.
+                   ["text", "table"] (or similar) to opt structural records back in.
         force: If True, re-process documents even if they already have extraction logs.
                If False (default), skip documents with existing extraction logs.
         limit: If provided, process only this many documents (useful for testing/incremental processing).

@@ -7,10 +7,14 @@ import re
 from typing import Optional, List, Dict, Any
 
 from mcp.types import ImageContent
+from mcp.server.fastmcp import Context
 
-from .mcp_prompts import BASE_SYSTEM_PROMPT
 
 logger = logging.getLogger(__name__)
+
+#: Documents returned by kb_search when the caller doesn't specify a count and
+#: the query router is off (or declines to set one).
+DEFAULT_MAX_RESULTS = 5
 
 
 # Graph imports
@@ -154,9 +158,11 @@ def _format_search_results(results: List[Dict[str, Any]], context_chars: int = 5
         doc_id = doc.id or doc_identifier
 
         # Prepare Content Body & Determine Status
+        from ..chunking import base_strategy
         summary_chunks = [
             c for c in chunks
-            if c.get("chunk_strategy") == "summary" or (c.get("char_start") is None and c.get("text"))
+            if base_strategy(c.get("chunk_strategy") or "") == "summary"
+            or (c.get("char_start") is None and c.get("text"))
         ]
         positioned_chunks = [c for c in chunks if c.get("char_start") is not None and c.get("char_end") is not None]
 
@@ -277,27 +283,59 @@ def _format_search_results(results: List[Dict[str, Any]], context_chars: int = 5
 
 def kb_search(
     query: str,
-    max_results: int = 5,
+    max_results: int | None = None,
     search_type: str = "hybrid",
     search_filter: dict | None = None,
     rerank: bool | None = None,
 ) -> str:
-    """Search documents in the knowledge base.
+    """Search the Mu2e experiment knowledge base (Fermilab muon-to-electron conversion).
+
+    Mu2e DocDB and the Mu2e collaboration wiki are the authoritative sources and
+    answer most questions; published papers, meeting transcripts and uploads are
+    also indexed. The server instructions describe each source in detail.
 
     Returns formatted results with metadata blocks. Small docs (<2000 chars) in full,
     large docs as excerpts with <match> tags highlighting matches.
 
     Args:
         query: Search query
-        max_results: Max documents to return (default: 5)
-        search_type: "hybrid" (recommended), "semantic", or "fulltext" (default: "hybrid")
-        search_filter: Optional JSON filter, e.g. `{"term": {"source_id": "inspire-sld"}}`
-        rerank: Whether to apply cross-encoder reranking (default: None = use server config).
-                Set True to force reranking, False to disable.
+        max_results: Max documents to return. Omit to let the server choose
+                (5, or a count the query router picks for this kind of query).
+        search_type: "hybrid" (default, use this). "fulltext" only to match an exact
+                string such as a DocDB number or filename; "semantic" only when the
+                wording is expected to differ entirely from the source.
+        search_filter: Optional filter, written as a subset of the Elasticsearch
+                Query DSL. Filter to the Mu2e sources when the question is
+                Mu2e-internal and papers would be noise:
+                  {"term": {"source_id": "mu2e-docdb"}}
+                  {"terms": {"source_id": ["mu2e-docdb", "mu2e-wiki"]}}
+                  {"bool": {"must": [{"term": {"source_id": "mu2e-docdb"}},
+                                     {"term": {"doc_type": "table"}}]}}
+                Fields: source_id (mu2e-docdb, mu2e-wiki, inspire-hep,
+                MeetingTranscripts, upload, test-flow), doc_type (text, section,
+                table, image, meeting_comment), doc_id, title, title_gen, the
+                insert_time/creating_time/update_time timestamps, and any
+                document metadata key.
+                Queries: term, terms, range ({"gte":..,"lte":..}), match,
+                wildcard (* and ?), bool (must / should / must_not).
+                Three departures from Elasticsearch: `match` is a plain substring
+                test, not analysed full-text (put full-text in `query` instead);
+                `range` on a metadata key compares as text, so numeric ranges only
+                sort correctly for zero-padded or ISO-8601 values; and `must_not`
+                also excludes documents that lack the field entirely.
+                Anything unsupported is reported as an error, not matched silently.
+        rerank: True to force cross-encoder reranking, False to disable. Omit to let
+                the server decide.
 
     Returns:
-        JSON with results in [[DOCUMENT_METADATA]]/[[CONTENT_START]] blocks.
-        Use kb_get() for full docs if STATUS shows EXCERPTS/SUMMARY/PREVIEW.
+        JSON. Each result carries source_id, doc_id, title and a `text` field
+        holding a [[DOCUMENT_METADATA]] header (ID, TITLE, URI, TYPE, STATUS)
+        followed by the content. Pass the header's ID to kb_get for the full
+        document whenever STATUS shows EXCERPTS, SUMMARY or PREVIEW.
+        No matches returns {"message": "No results found", "results": []} - a valid
+        empty answer, not an error to retry. A malformed or unsupported
+        search_filter returns {"error": "Invalid search_filter: ..."} naming the
+        supported queries; fix the filter rather than concluding nothing matched.
     """
     from ..kb import search
     from ..kb.search import search_semantic, search_fulltext
@@ -313,6 +351,23 @@ def kb_search(
                 except json.JSONDecodeError as e:
                     return json.dumps({"error": f"Invalid filter JSON: {e}"}, indent=2)
 
+        # Validate the filter before searching. search_hybrid catches a failing
+        # branch and reports "No results found", so without this an unsupported
+        # or malformed filter is indistinguishable from one that legitimately
+        # matched nothing - and the caller has no way to learn it wrote a bad
+        # filter. Parsing here is cheap and builds no query.
+        if filter_dict:
+            from sqlalchemy.orm import aliased
+            from ..kb.db_models import Document
+            from ..kb.search.filters import _parse_elasticsearch_filter
+
+            try:
+                _parse_elasticsearch_filter(
+                    aliased(Document, name="d"), filter_dict, dialect_name="postgresql"
+                )
+            except ValueError as e:
+                return json.dumps({"error": f"Invalid search_filter: {e}"}, indent=2)
+
         # Select search function based on type
         if search_type == "semantic":
             search_fn = search_semantic
@@ -324,6 +379,7 @@ def kb_search(
         # Apply query router if enabled and using hybrid search
         route_info = None
         doc_type_boost = None
+        chunk_strategy_boost = None
         if search_fn is search:
             from ..config import get_search_config
             search_config = get_search_config()
@@ -332,27 +388,36 @@ def kb_search(
                 router = get_router()
                 route = router.route(query)
                 route_info = {"query_type": route.query_type.value, "reasoning": route.reasoning}
-                # Router overrides defaults unless caller explicitly set them
-                if max_results == 5:  # default value — let router override
+                # Router overrides defaults unless caller explicitly set them.
+                # None means "not specified", so an explicit max_results=5 is
+                # honoured rather than being mistaken for the default.
+                if max_results is None:
                     max_results = route.max_results
                 if rerank is None:
                     rerank = route.rerank
                 # doc_type boost: e.g. {"table": 1.7} for table-shaped queries.
                 # search_hybrid applies it after RRF.
                 doc_type_boost = route.doc_type_boost
+                # chunk_strategy boost: e.g. {"section": 1.3} for synthesis
+                # queries — keyed on the chunk's own strategy rather than its
+                # parent document's doc_type.
+                chunk_strategy_boost = route.chunk_strategy_boost
 
         # Build search kwargs
         search_kwargs = dict(
             query=query,
-            max_results=max_results,
+            max_results=DEFAULT_MAX_RESULTS if max_results is None else max_results,
             filter=filter_dict,
         )
-        # Only pass rerank / doc_type_boost to hybrid search (which supports them).
+        # Only pass rerank / doc_type_boost / chunk_strategy_boost to hybrid
+        # search (which supports them).
         if search_fn is search:
             if rerank is not None:
                 search_kwargs["rerank"] = rerank
             if doc_type_boost:
                 search_kwargs["doc_type_boost"] = doc_type_boost
+            if chunk_strategy_boost:
+                search_kwargs["chunk_strategy_boost"] = chunk_strategy_boost
 
         response = search_fn(**search_kwargs)
 
@@ -378,18 +443,26 @@ def kb_search(
 
 
 def kb_get(identifier: str) -> str:
-    """Get the complete content of a document.
+    """Get the complete text of one Mu2e knowledge base document.
 
-    Returns raw text with a metadata header, optimized for LLM reading.
+    Use this after kb_search whenever STATUS shows EXCERPTS_WITH_MATCHES,
+    SUMMARY_ONLY or PREVIEW_ONLY - those results contain only part of the document.
 
     Args:
-        identifier: Document ID in one of these formats:
-                   - "source_id/doc_id" (e.g., "inspire-sld/paper-123")
-                   - "doc_id" (just the document ID)
-                   - UUID (document's unique identifier)
+        identifier: Pass the value on the `ID:` line of a kb_search result's
+                   [[DOCUMENT_METADATA]] header, verbatim. Also accepted:
+                   - UUID (the document's unique identifier)
+                   - "source_id/doc_id" (e.g. "mu2e-docdb/56353-opsmeeting_10thApr")
+                   - "source_id_doc_id" (underscore form; kb_search emits this when
+                     the document has no UUID)
+                   - "doc_id" alone
 
     Returns:
-        Raw text with structured metadata header and full document content.
+        A metadata header, a [[DETECTED_CONCEPTS]] block listing knowledge-graph
+        nodes mentioned in the document (each with a kb_lookup_node CMD to follow),
+        then the full text between [[CONTENT_START]] and [[DOCUMENT_END]].
+        A string starting with "ERROR:" means the document was not found - that is
+        final, do not retry the same identifier.
     """
     from ..kb import get
 
@@ -435,20 +508,23 @@ def kb_get(identifier: str) -> str:
 
         meta_header = "\n".join(meta_lines)
 
-        # Fetch Associated Nodes from Knowledge Graph
-        graph_nodes = get_nodes_for_document(doc.doc_id)
+        # Fetch Associated Nodes from Knowledge Graph (unless disabled via HIDE_GRAPH)
+        from ..config import get_server_config
 
         graph_section = ""
-        if graph_nodes:
-            node_lines = []
-            # Sort by mention count and take top 15
-            for gn in graph_nodes[:15]:
-                node_lines.append(
-                    f"- {gn['name']} ({gn['type']}) [Mentions: {gn['mention_count']}] "
-                    f"-> CMD: kb_lookup_node(\"{gn['id']}\")"
-                )
+        if not get_server_config()['hide_graph']:
+            graph_nodes = get_nodes_for_document(doc.doc_id)
 
-            graph_section = "\n[[DETECTED_CONCEPTS]]\n" + "\n".join(node_lines) + "\n"
+            if graph_nodes:
+                node_lines = []
+                # Sort by mention count and take top 15
+                for gn in graph_nodes[:15]:
+                    node_lines.append(
+                        f"- {gn['name']} ({gn['type']}) [Mentions: {gn['mention_count']}] "
+                        f"-> CMD: kb_lookup_node(\"{gn['id']}\")"
+                    )
+
+                graph_section = "\n[[DETECTED_CONCEPTS]]\n" + "\n".join(node_lines) + "\n"
 
         # Return the natural text with metadata header
         return f"""[[DOCUMENT_METADATA]]
@@ -463,18 +539,24 @@ def kb_get(identifier: str) -> str:
 
 
 def kb_get_image(identifier: str, image_filename: Optional[str] = None) -> ImageContent:
-    """Retrieve an image from a document as an MCP Image resource.
+    """Retrieve an image from a Mu2e knowledge base document as an MCP Image resource.
+
+    Image filenames are discovered from markdown image references in kb_get output -
+    e.g. `![](image-1.png)` or `![](_page_9_Figure_7.png)`. Pass the parent
+    document's identifier plus that filename to fetch the figure it refers to.
 
     Args:
         identifier: Document identifier in one of these formats:
-                   - "source_id/doc_id" for the parent document (requires image_filename)
+                   - "source_id/doc_id" for the parent document (requires image_filename),
+                     e.g. "mu2e-docdb/56353-opsmeeting_10thApr"
                    - "source_id/doc_id-image.png" for the image directly
                    - UUID of the image document
-        image_filename: Optional image filename (e.g., "fig1.png").
-                       If provided, constructs the image doc_id as "doc_id-image_filename"
+        image_filename: Image filename taken from a markdown reference in the parent
+                       document (e.g. "image-1.png"). Combined with the parent doc_id
+                       as "doc_id-image_filename".
 
     Returns:
-        MCP Image with base64 data and mimeType.
+        MCP Image with base64 data and mimeType. Raises if no such image exists.
     """
     from ..kb import get
 
@@ -555,6 +637,9 @@ def kb_lookup_node(identifier: str, node_type: Optional[str] = None) -> str:
 
     Returns:
         Structured text describing the node, its neighbors, and linked documents.
+        Relations carry CMD_NODE / CMD_EVIDENCE hints - literal follow-up calls.
+        "Node not found: <identifier>" means no such concept exists; try kb_search
+        rather than retrying with a variation of the name.
     """
     try:
         # Try finding by ID first, then by Name
@@ -581,7 +666,9 @@ def kb_node_relation_evidence(relation_id: str) -> str:
         relation_id: The ID of the relationship (found in kb_lookup_node output).
 
     Returns:
-        Text excerpts from documents that support this relationship.
+        Text excerpts from documents that support this relationship, each with a
+        kb_get CMD for the source document. "No specific text evidence found."
+        means the relationship has no stored evidence - that is final.
     """
     try:
         evidence = get_relation_evidence(relation_id)
@@ -622,7 +709,9 @@ def kb_find_path(start_node: str, end_node: str, max_depth: int = 4) -> str:
         max_depth: Maximum path length to search (default: 4).
 
     Returns:
-        Paths connecting the two nodes, if any exist.
+        Paths connecting the two nodes, each step carrying a CMD to look up the node
+        or its supporting evidence. "No paths found" and "Could not find start/end
+        node" are final answers, not errors to retry.
     """
     try:
         # Resolve names to IDs
@@ -676,15 +765,107 @@ def kb_find_path(start_node: str, end_node: str, max_depth: int = 4) -> str:
         return f"ERROR: {str(e)}"
 
 
+async def kb_research(question: str, ctx: Context = None) -> str:
+    """Run a multi-step research agent over the knowledge base and return a synthesized answer.
+
+    Use this for open-ended questions that require multiple searches, cross-referencing
+    documents, or exploring the knowledge graph before an answer can be composed.
+
+    It runs up to 10 agent iterations, each making several LLM calls, so expect it to
+    take minutes and to cost far more than a direct lookup - prefer kb_search/kb_get
+    whenever a search or two would settle the question. Progress is reported as the
+    run proceeds, so a long silence is the agent working, not a stall.
+
+    Args:
+        question: The research question to investigate.
+
+    Returns:
+        A synthesized answer composed from the agent's findings.
+    """
+    import sys
+    from datetime import datetime
+    from mcp import ClientSession, StdioServerParameters
+    from mcp.client.stdio import stdio_client
+
+    from ..agents.notebook_agent import NotebookAgent
+    from ..llm import get_openai_client
+    from ..config import get_agent_config
+
+    # NotebookAgent runs up to MAX_ITERATIONS steps, each involving one or more
+    # LLM calls, and can comfortably exceed a client's idle timeout. Report
+    # progress on every step so MCP clients (e.g. Claude Code) that key their
+    # idle timeout off notifications/progress don't abort the call early.
+    NOTEBOOK_MAX_ITERATIONS = 10
+
+    async def report_progress(event: dict):
+        if ctx is None:
+            return
+        etype = event.get("type")
+        iteration = event.get("iteration")
+        if etype == "info":
+            message = event.get("message", "")
+        elif etype == "tool_call":
+            message = f"calling tools: {', '.join(event.get('tools', []))}"
+        elif etype == "notebook_update":
+            message = "updated research notes"
+        else:
+            return
+        try:
+            await ctx.report_progress(
+                progress=iteration or 0,
+                total=NOTEBOOK_MAX_ITERATIONS,
+                message=message,
+            )
+        except Exception:
+            logger.debug("failed to report kb_research progress", exc_info=True)
+
+    try:
+        agent_config = get_agent_config()
+        model = agent_config["agent_model"]
+
+        server_params = StdioServerParameters(
+            command=sys.executable,
+            args=["-m", "kb_mcp.server.mcp_stdio"],
+            env=None,
+        )
+
+        async with stdio_client(server_params) as (read, write):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+
+                client = get_openai_client(use_async=True)
+                run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+                worker = NotebookAgent(
+                    session=session,
+                    client=client,
+                    depth=1,
+                    agent_id="kb_research",
+                    run_id=run_id,
+                    callback=report_progress,
+                )
+                await worker.initialize_tools()
+                return await worker.run(question, model=model)
+
+    except Exception as e:
+        logger.error(f"Error in kb_research: {e}", exc_info=True)
+        return f"ERROR: {str(e)}"
+
+
 def register_tools(mcp):
     """Register MCP tools with the FastMCP instance."""
+    from ..config import get_server_config
+
     mcp.tool()(kb_search)
     mcp.tool()(kb_get)
     mcp.tool()(kb_get_image)  # Keep for explicit image retrieval by filename
-    # Graph Tools
-    mcp.tool()(kb_lookup_node)
-    mcp.tool()(kb_find_path)
-    mcp.tool()(kb_node_relation_evidence)
+    # Graph Tools (skipped when HIDE_GRAPH is set)
+    if not get_server_config()['hide_graph']:
+        mcp.tool()(kb_lookup_node)
+        mcp.tool()(kb_find_path)
+        mcp.tool()(kb_node_relation_evidence)
+    # Agentic research (long-running; excluded from worker agents' own tool lists)
+    mcp.tool()(kb_research)
 
 
 def register_resources(mcp, oauth_provider, base_url):
@@ -738,35 +919,35 @@ def register_prompts(mcp):
     @mcp.resource("kb://sys/domain_context")
     def get_domain_context() -> str:
         """Returns domain-specific context and tool usage tips."""
-        return """
-### KNOWLEDGE BASE STRUCTURE
-This system is a **Hybrid Knowledge Base** comprising two interconnected layers:
+        # Same text the server advertises via MCP `instructions`, so a client
+        # that reads this resource and one that only sees the initialize
+        # response get the same briefing.
+        from .mcp_prompts import get_server_instructions
 
-1.  **Document Store** (Unstructured Text)
-    - Contains PDFs, logs, papers, and reports.
-    - **Primary Tool**: `kb_search("query")` -> Returns text segments matches.
-    - **Use Case**: Finding specific facts, error codes, methodologies, or general topic overviews.
-    - **Links**: Documents often mention **Nodes**, which you can look up in the Graph layer.
+        return get_server_instructions()
 
-2.  **Knowledge Graph** (Structured Concepts)
-    - Contains **Nodes** (Concepts, Entities, Components) and **Relationships**.
-    - **Primary Tools**: 
-      - `kb_lookup_node("Name" or "UUID")`: Explores a concept's immediate neighbors.
-      - `kb_find_path("Start", "End")`: Finds how two concepts are connected.
-      - `kb_node_relation_evidence("RelID")`: Gets text proving a relationship.
-    - **Use Case**: Understanding system architecture, causal chains ("What causes X?"), and verifying connections.
+    # A resource and a prompt with no database or model dependency, so a
+    # client (or a test) can verify that resource and prompt plumbing works
+    # without a populated knowledge base. Everything else here reads real KB
+    # state, which makes it useless for telling "server is misconfigured"
+    # apart from "the knowledge base is empty".
+    @mcp.resource("kb://sys/selftest")
+    def selftest_resource() -> str:
+        """Static resource for checking that resource reads work."""
+        return json.dumps(
+            {
+                "status": "ok",
+                "server": "kb-mcp",
+                "resource": "kb://sys/selftest",
+                "note": "Static self-test payload; reads no knowledge base state.",
+            },
+            indent=2,
+        )
 
-### EXECUTION STRATEGY
-- **Start Broad**: Use `kb_search` to find relevant documents.
-- **Pivot to Graph**: If documents mention a specific component (e.g., "dtc01", "Module X"), use `kb_lookup_node` to see its structural context.
-- **Deep Dive**: Use `kb_get` to read full content of highly relevant documents found via search or graph traversal.
-"""
-
-    # Register system prompt as a resource
-    @mcp.resource("prompts://agent/system")
-    def get_system_prompt() -> str:
-        """Returns the core system prompt for the Recursive Agent."""
-        return BASE_SYSTEM_PROMPT
+    @mcp.prompt()
+    def selftest(echo: str = "ping") -> str:
+        """Static prompt for checking that prompt rendering and arguments work."""
+        return f"kb-mcp self-test. Echo: {echo}"
 
     @mcp.prompt()
     def search_kb(topic: str) -> str:

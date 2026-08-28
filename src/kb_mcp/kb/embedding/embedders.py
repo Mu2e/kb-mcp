@@ -2,6 +2,7 @@
 
 import logging
 import os
+import re
 from typing import List, Optional
 
 from .embedder_base import BaseEmbedder
@@ -72,6 +73,8 @@ class OpenAIEmbedder(BaseEmbedder):
         Returns:
             List of embedding vectors (each is a list of floats)
         """
+        from ...llm.usage import STAGE_EMBEDDING, record_llm_usage
+
         try:
             if batch_size is None:
                 # OpenAI API can handle batches, so process all at once
@@ -79,6 +82,15 @@ class OpenAIEmbedder(BaseEmbedder):
                     model=self.model,
                     input=texts,
                     **self.config,
+                )
+                # Embedding responses carry prompt_tokens (and no completion
+                # tokens); recording it here is the only account of what
+                # embedding a corpus cost.
+                record_llm_usage(
+                    getattr(response, "usage", None),
+                    stage=STAGE_EMBEDDING,
+                    model=self.model,
+                    meta={"num_texts": len(texts)},
                 )
                 return [item.embedding for item in response.data]
             else:
@@ -90,6 +102,12 @@ class OpenAIEmbedder(BaseEmbedder):
                         model=self.model,
                         input=batch,
                         **self.config,
+                    )
+                    record_llm_usage(
+                        getattr(response, "usage", None),
+                        stage=STAGE_EMBEDDING,
+                        model=self.model,
+                        meta={"num_texts": len(batch)},
                     )
                     batch_embeddings = [item.embedding for item in response.data]
                     embeddings.extend(batch_embeddings)
@@ -135,6 +153,19 @@ class OpenAIEmbedder(BaseEmbedder):
 
 class SentenceTransformersEmbedder(BaseEmbedder):
     """SentenceTransformers embedding generator."""
+
+    # Query-side instructions for asymmetric retrieval models, keyed by the
+    # model name as it appears in EMBEDDING_MODEL. Each string is fixed by
+    # how the model was trained — these are not tunable prompts, and a
+    # model absent from this map is symmetric and gets no prefix.
+    #
+    # BAAI publishes these with bge-*-v1.5; the trailing space is part of
+    # the string. Applied to queries only (see `BaseEmbedder.query_prefix`).
+    _QUERY_PREFIXES = {
+        "bge-small-en-v1.5": "Represent this sentence for searching relevant passages: ",
+        "bge-base-en-v1.5": "Represent this sentence for searching relevant passages: ",
+        "bge-large-en-v1.5": "Represent this sentence for searching relevant passages: ",
+    }
 
     def __init__(
         self,
@@ -208,8 +239,30 @@ class SentenceTransformersEmbedder(BaseEmbedder):
         # Most common models use 256 or 512 tokens
         return self._model.max_seq_length
 
+    @property
+    def query_prefix(self) -> str:
+        """Query-side instruction for asymmetric models (see base class).
+
+        Matched on the bare model name so an org-qualified id
+        ("BAAI/bge-small-en-v1.5") resolves the same as a plain one.
+        """
+        return self._QUERY_PREFIXES.get(self.model.split("/")[-1], "")
+
     def _generate_short_name(self) -> str:
-        """Generate default short name from provider and model."""
-        # For sentence-transformers, use "st" prefix
-        model_short = self.model.replace("all-", "").replace("-", "")
+        """Generate default short name from provider and model.
+
+        This becomes the `embedding_configs` primary key and the suffix of
+        the per-model embeddings table, so it has to survive being used as
+        an identifier: drop the org qualifier ("BAAI/bge-small-en-v1.5")
+        and anything that isn't alphanumeric or an underscore.
+        """
+        # For sentence-transformers, use "st" prefix.
+        # The "all-" strip is anchored: unanchored it also fires inside
+        # "bge-small-en-v1.5" (sm-ALL-en), which would name that model's table
+        # embeddings_st_bgesmenv1_5. Anchoring leaves all-MiniLM-L6-v2 and
+        # all-mpnet-base-v2 resolving exactly as before, so no existing
+        # embedding_configs key or table name changes.
+        model_short = self.model.split("/")[-1]
+        model_short = re.sub(r"^all-", "", model_short).replace("-", "")
+        model_short = re.sub(r"[^0-9A-Za-z_]", "_", model_short)
         return f"st_{model_short}"
