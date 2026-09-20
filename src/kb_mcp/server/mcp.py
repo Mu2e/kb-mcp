@@ -7,7 +7,7 @@ import re
 from typing import Optional, List, Dict, Any
 
 from mcp.types import ImageContent
-from mcp.server.fastmcp import Context
+from mcp.server.mcpserver import Context
 
 
 logger = logging.getLogger(__name__)
@@ -833,7 +833,7 @@ async def kb_research(question: str, ctx: Context = None) -> str:
             async with ClientSession(read, write) as session:
                 await session.initialize()
 
-                client = get_openai_client(use_async=True)
+                client = get_openai_client(model=model, use_async=True)
                 run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
 
                 worker = NotebookAgent(

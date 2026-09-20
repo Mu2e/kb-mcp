@@ -148,6 +148,7 @@ def extract_relations(
                 stage=STAGE_GRAPH_EXTRACTION,
                 model=model,
                 document_id=document_id,
+                session=session,
             )
 
             # Parse response

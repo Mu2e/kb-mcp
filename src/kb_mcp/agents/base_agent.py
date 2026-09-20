@@ -177,7 +177,7 @@ class BaseAgent:
                 "function": {
                     "name": t.name,
                     "description": t.description,
-                    "parameters": t.inputSchema,
+                    "parameters": t.input_schema,
                 }
             })
             tool_names.append(t.name)
@@ -216,10 +216,10 @@ class BaseAgent:
                     if len(text_content) > limit:
                          text_content = text_content[:limit] + "\n...(truncated by BaseAgent)..."
                     content_parts.append({"type": "text", "text": text_content})
-                elif hasattr(c, 'data') and hasattr(c, 'mimeType'):
+                elif hasattr(c, 'data') and hasattr(c, 'mime_type'):
                     # Image content - provide as image_url for multimodal models
                     # Format: data:<mime>;base64,<data>
-                    image_url = f"data:{c.mimeType};base64,{c.data}"
+                    image_url = f"data:{c.mime_type};base64,{c.data}"
                     content_parts.append({
                         "type": "image_url", 
                         "image_url": {"url": image_url}

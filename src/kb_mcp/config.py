@@ -524,6 +524,16 @@ def get_api_keys_file() -> str:
     """API keys file path. **Env Variable:** `API_KEYS_FILE`."""
     return _get_str("API_KEYS_FILE", f"{get_data_dir()}/api_keys.json")
 
+def get_mikey_keys_file() -> str | None:
+    """Shared mikey keys file. **Env Variable:** `MIKEY_KEYS_FILE` (default: unset, mikey auth off).
+
+    Deliberately the same variable name mikey and the other Mu2e MCP servers
+    use, so a deployment that already exports it gets kb-mcp interop without
+    extra configuration. The file is read-only here: keys are issued and
+    revoked with the `mikey` CLI, never by this server.
+    """
+    return _get_str("MIKEY_KEYS_FILE", "") or None
+
 def get_all_config() -> dict:
     """Get all configuration (sanitized for logging).
 
@@ -547,5 +557,9 @@ def get_all_config() -> dict:
         'parser': get_parser_config(),
         'embedding': get_embedding_config(),
         'eval': get_eval_config(),
-        'paths': {'data_dir': get_data_dir(), 'api_keys_file': get_api_keys_file()}
+        'paths': {
+            'data_dir': get_data_dir(),
+            'api_keys_file': get_api_keys_file(),
+            'mikey_keys_file': get_mikey_keys_file(),
+        }
     }

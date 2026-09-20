@@ -52,6 +52,37 @@ def resolve_parser_name(mime_type: Optional[str], parser_name: Optional[str]) ->
     return parser_name
 
 
+def resolved_parser_id_expr(mime_type_column: Any, parser_name: Optional[str]) -> Any:
+    """SQL expression mirroring resolve_parser_name(), for filtering on
+    documents.parser_id without loading each row into Python first.
+
+    A query that compares `Document.parser_id == parser_name` directly (for
+    an auto-pick `parser_name`) never matches, since add_document() always
+    resolves the sentinel to the concrete backend (e.g. "docling") before
+    storing it — the row's actual mime type just isn't available yet to do
+    that resolution in Python at query-build time. This does the same
+    sentinel-to-backend mapping as a SQL CASE, driven by the raw document's
+    own mime-type column, so it stays correct per-row in a single query.
+
+    Args:
+        mime_type_column: A SQLAlchemy column/expression holding the mime
+            type to key off (e.g. RawDocument.source_type).
+        parser_name: The requested parser, same as passed to resolve_parser_name.
+
+    Returns:
+        `parser_name` unchanged if it's already concrete; otherwise a CASE
+        expression usable anywhere a scalar column expression is.
+    """
+    if parser_name not in AUTO_PARSER_NAMES:
+        return parser_name
+    from sqlalchemy import case
+
+    return case(
+        (mime_type_column.in_(_DOCLING_DEFAULT_MIMES), "docling"),
+        else_=parser_name,
+    )
+
+
 def _deref_cref(structured_output: Dict[str, Any], cref: str) -> Optional[dict]:
     """Resolve a DoclingDocument cref like `#/groups/3` to its node dict."""
     try:

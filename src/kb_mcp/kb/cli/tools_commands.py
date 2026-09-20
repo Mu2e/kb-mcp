@@ -121,6 +121,134 @@ def cmd_logs_chunking(args):
             print(f"      Embedding: {log['embedding_name'] or 'N/A'}")
 
 
+
+def _run_is_dead(run) -> bool:
+    """True if a "running" import run's process is known to be gone (same host, pid not alive)."""
+    import os
+    import socket
+    if run["status"] != "running" or run["hostname"] != socket.gethostname() or not run["pid"]:
+        return False
+    try:
+        os.kill(run["pid"], 0)
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        return False
+    return False
+
+
+def _fmt_local(iso):
+    """'2026-09-19T18:35:58Z' -> '2026-09-19 13:35' in local time."""
+    from datetime import datetime
+    if not iso:
+        return "-"
+    return datetime.fromisoformat(iso.replace("Z", "+00:00")).astimezone().strftime("%Y-%m-%d %H:%M")
+
+
+def _fmt_duration(seconds):
+    if seconds is None:
+        return "-"
+    minutes = int(seconds // 60)
+    return f"{minutes // 60}h{minutes % 60:02d}m" if minutes >= 60 else f"{minutes}m{int(seconds % 60):02d}s"
+
+
+def cmd_logs_imports(args):
+    """Show import runs (cron or manual): when, how many found/parsed/failed, sweep results."""
+    from ..logs import get_import_runs
+
+    runs = get_import_runs(
+        source_id=args.source,
+        limit=None if args.run_id else args.limit,
+        run_id=args.run_id,
+    )
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+    for run in runs:
+        if _run_is_dead(run):
+            run["status"] = "dead"  # process gone without closing its row (SIGKILL, OOM, ...)
+        if run["duration_seconds"] is None and run["status"] == "running" and run["started_time"]:
+            started = datetime.fromisoformat(run["started_time"].replace("Z", "+00:00"))
+            run["duration_seconds"] = (now - started).total_seconds()  # elapsed so far
+        peak = (run["meta"] or {}).get("peak_rss_mb")
+        run["peak_memory"] = f"{peak / 1024:.1f}G" if peak else "-"
+
+    if args.json:
+        print(json.dumps(runs, indent=2, default=str))
+        return
+
+    if not runs:
+        print("No import runs found" + (f" matching {args.run_id}" if args.run_id else ""))
+        return
+
+    if args.run_id:
+        if len(runs) > 1:
+            print(f"{len(runs)} runs match '{args.run_id}' — use a longer prefix:")
+            for run in runs:
+                print(f"  {run['id']}  {_fmt_local(run['started_time'])}  {run['source_id']}")
+            return
+        run = runs[0]
+        print(f"Import run {run['id']}")
+        print("=" * 80)
+        print(f"  Source:    {run['source_id']}")
+        print(f"  Status:    {run['status']}")
+        print(f"  Started:   {_fmt_local(run['started_time'])}   Finished: {_fmt_local(run['finished_time'])}"
+              f"   ({_fmt_duration(run['duration_seconds'])})")
+        print(f"  Host/PID:  {run['hostname']} / {run['pid']}   Trigger: {run['trigger']}"
+              f"   Peak memory: {run['peak_memory']}")
+        if run["log_path"]:
+            print(f"  Log file:  {run['log_path']}")
+        argv = (run["args"] or {}).get("argv")
+        if argv:
+            print(f"  Command:   {' '.join(argv)}")
+        if run["items_found"] is None:
+            print("  Items:     not reached (the run ended before listing items)")
+        else:
+            print(f"  Items:     {run['items_found']} found, {run['items_processed']} processed, "
+                  f"{run['items_skipped']} skipped, {run['items_failed']} failed "
+                  f"({run['documents_created']} documents created)")
+        if run["summarized"] is None:
+            print("  Summarize: not run")
+        else:
+            print(f"  Summarize: {run['summarized']} summarized, {run['summarize_errors']} errors")
+        if run["chunked"] is None:
+            print("  Embed:     not run")
+        else:
+            print(f"  Embed:     {run['chunked']} chunked, {run['embed_errors']} errors, "
+                  f"{run['embed_oversized']} left in backlog (too large)")
+        extra = ((run["meta"] or {}).get("embed") or {})
+        if extra:
+            print(f"             " + ", ".join(f"{k}={v}" for k, v in sorted(extra.items())))
+        if run["error"]:
+            print(f"  Error:     {run['error']}")
+        failures = run["failures"] or []
+        if failures:
+            print(f"  Failures ({len(failures)}):")
+            for f in failures:
+                where = f.get("item_id") or f.get("step")
+                print(f"    - {where}: {f.get('error')}")
+        return
+
+    def n(v):
+        return "-" if v is None else str(v)
+
+    header = (f"{'STARTED':16}  {'SOURCE':12}  {'HOST':12}  {'TRIGGER':11}  {'STATUS':11}  {'TIME':>7}  "
+              f"{'FOUND':>5}  {'PARSED':>6}  {'NEW':>4}  {'SKIP':>5}  {'FAIL':>4}  {'SUMM':>4}  {'EMBED':>5}  {'ERR':>3}  {'PEAK':>5}  RUN")
+    print(header)
+    print("-" * len(header))
+    for run in runs:
+        errs = (run["summarize_errors"] or 0) + (run["embed_errors"] or 0)
+        # short hostname: jupyter-scorrodi, mu2egpvm02, ... (drop the domain)
+        host = (run["hostname"] or "-").split(".")[0]
+        print(f"{_fmt_local(run['started_time']):16}  {run['source_id'][:12]:12}  {host[:12]:12}  "
+              f"{(run['trigger'] or '-')[:11]:11}  "
+              f"{run['status']:11}  {_fmt_duration(run['duration_seconds']):>7}  "
+              f"{n(run['items_found']):>5}  {n(run['items_processed']):>6}  {n(run['documents_created']):>4}  "
+              f"{n(run['items_skipped']):>5}  "
+              f"{n(run['items_failed']):>4}  {n(run['summarized']):>4}  {n(run['chunked']):>5}  {errs:>3}  "
+              f"{run['peak_memory']:>5}  {run['id'][:8]}")
+    print("\nDetails (failures, log file, command): kb logs imports <RUN>")
+
+
 def cmd_logs_parsing(args):
     """Show text extraction/parsing operation logs for a document."""
     from ..logs import get_parsing_logs
@@ -244,6 +372,16 @@ def cmd_parse_all(args):
         from ..tools import parse_all
 
         doc_ids = getattr(args, 'doc_ids', None)
+        exclude_doc_ids = getattr(args, 'exclude_doc_ids', None)
+        exclude_doc_ids_file = getattr(args, 'exclude_doc_ids_file', None)
+        if exclude_doc_ids_file:
+            from pathlib import Path
+            file_ids = [
+                line.split('#', 1)[0].strip()
+                for line in Path(exclude_doc_ids_file).read_text().splitlines()
+            ]
+            file_ids = [doc_id for doc_id in file_ids if doc_id]
+            exclude_doc_ids = (exclude_doc_ids or []) + file_ids
         from_stored = getattr(args, 'from_stored', False)
         empty_only = getattr(args, 'empty_only', False)
         dry_run = getattr(args, 'dry_run', False)
@@ -262,11 +400,16 @@ def cmd_parse_all(args):
             print("Force re-parsing enabled (also reprocesses documents that already exist)")
         if doc_ids:
             print(f"Restricted to doc_id(s): {', '.join(doc_ids)}")
+        if exclude_doc_ids:
+            print(f"Excluding doc_id(s): {', '.join(exclude_doc_ids)}")
         if empty_only:
             print("Restricted to documents with empty text")
         full_pipeline = getattr(args, 'full_pipeline', False)
         if full_pipeline:
             print("Full pipeline enabled (new documents also get summary/chunk/embed here)")
+        max_file_size_mb = getattr(args, 'max_file_size_mb', None)
+        if max_file_size_mb is not None:
+            print(f"Skipping documents larger than {max_file_size_mb} MB")
 
         result = parse_all(
             source_id=args.source_id,
@@ -278,11 +421,13 @@ def cmd_parse_all(args):
             limit=getattr(args, 'limit', None),
             from_stored=from_stored,
             doc_ids=doc_ids,
+            exclude_doc_ids=exclude_doc_ids,
             empty_only=empty_only,
             dry_run=dry_run,
             generate_summary=not getattr(args, 'no_summary', False),
             chunk_and_embed=not getattr(args, 'no_embed', False),
             full_pipeline=full_pipeline,
+            max_file_size_mb=max_file_size_mb,
         )
 
         if result.get("dry_run"):
@@ -1277,6 +1422,16 @@ def setup_commands(subparsers):
     logs_parsing_parser.add_argument("--limit", type=int, help="Maximum number of logs to show (default: all)")
     logs_parsing_parser.set_defaults(func=cmd_logs_parsing)
 
+    # logs imports
+    logs_imports_parser = logs_subparsers.add_parser(
+        "imports", help="Show import runs (cron or manual): found/parsed/failed counts, sweep results, errors"
+    )
+    logs_imports_parser.add_argument("run_id", nargs="?", help="Show details for one run (ID or unique prefix)")
+    logs_imports_parser.add_argument("--source", help="Restrict to one source_id (e.g. mu2e-docdb)")
+    logs_imports_parser.add_argument("--limit", type=int, default=20, help="Maximum number of runs to list (default: 20)")
+    logs_imports_parser.add_argument("--json", action="store_true", help="Output as JSON")
+    logs_imports_parser.set_defaults(func=cmd_logs_imports)
+
     # logs tokens
     logs_tokens_parser = logs_subparsers.add_parser("tokens", help="Show LLM token usage for the knowledge base")
     logs_tokens_parser.add_argument("--document-id", help="Restrict to one document")
@@ -1365,6 +1520,19 @@ def setup_commands(subparsers):
         help="Restrict to specific doc_id(s); repeatable"
     )
     parse_all_parser.add_argument(
+        "--exclude-doc-id",
+        action="append",
+        dest="exclude_doc_ids",
+        help="Skip specific doc_id(s), e.g. one known to blow up memory while parsing; repeatable"
+    )
+    parse_all_parser.add_argument(
+        "--exclude-doc-ids-file",
+        metavar="PATH",
+        help="Skip doc_id(s) listed in this file, one per line ('#'-prefixed lines and "
+             "blank lines ignored). Combined with any --exclude-doc-id given. Growing this "
+             "file is the preferred way to accumulate known-problematic documents across runs."
+    )
+    parse_all_parser.add_argument(
         "--empty-only",
         action="store_true",
         help="Only process documents whose existing text is empty. Requires "
@@ -1404,6 +1572,12 @@ def setup_commands(subparsers):
         type=int,
         metavar="N",
         help="Stop after processing N documents (useful for testing)"
+    )
+    parse_all_parser.add_argument(
+        "--max-file-size-mb",
+        type=float,
+        metavar="MB",
+        help="Skip raw documents larger than this many MB (deferred to a later run)"
     )
     parse_all_parser.set_defaults(func=cmd_parse_all)
 

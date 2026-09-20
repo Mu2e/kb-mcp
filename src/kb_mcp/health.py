@@ -275,7 +275,16 @@ def check_source(name: str, url: str, env_vars: Tuple[str, ...],
     def run() -> str:
         import requests
 
-        response = requests.get(url, timeout=timeout, allow_redirects=False)
+        # mu2ewiki.fnal.gov sits behind Cloudflare, which silently drops
+        # (no response at all, not even a challenge page) requests.get()'s
+        # default "python-requests/x.y" User-Agent — the check would hang
+        # to the timeout and report a false FAIL. A browser-shaped UA gets
+        # answered normally; mediawiki.py's real curl requests need the same.
+        headers = {
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                          "(KHTML, like Gecko) Chrome/120.0 Safari/537.36",
+        }
+        response = requests.get(url, timeout=timeout, allow_redirects=False, headers=headers)
         missing = [v for v in env_vars if not os.getenv(v)]
         creds = f" — missing {', '.join(missing)}" if missing else ""
         if response.status_code >= 500:

@@ -16,7 +16,7 @@ env_path = project_root / ".env"
 load_dotenv(env_path)
 
 import logging
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 from . import mcp as mcp_tools
 from .mcp_prompts import get_server_instructions
@@ -30,8 +30,8 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
-# Create FastMCP instance (no auth for stdio)
-mcp = FastMCP("kb-mcp-stdio", instructions=get_server_instructions())
+# Create MCPServer instance (no auth for stdio)
+mcp = MCPServer("kb-mcp-stdio", instructions=get_server_instructions())
 
 # Register tools and prompts (no resources for stdio - they need server context)
 mcp_tools.register_tools(mcp)

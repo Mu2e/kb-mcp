@@ -146,7 +146,7 @@ if [ "$LIST_MODELS" = false ]; then
                 next;
             }
             { print }
-        ' "$TARGET_FILE" > "$TARGET_FILE.tmp" && mv "$TARGET_FILE.tmp" "$TARGET_FILE"
+        ' "$TARGET_FILE" > "$TARGET_FILE.tmp" && mv "$TARGET_FILE.tmp" "$TARGET_FILE" && chmod 600 "$TARGET_FILE"
         return 0
     fi
 
@@ -176,7 +176,7 @@ if [ "$LIST_MODELS" = false ]; then
                 print "OPENAI_BASE_URL=" base_url;
             }
         }
-    ' "$TARGET_FILE" > "$TARGET_FILE.tmp" && mv "$TARGET_FILE.tmp" "$TARGET_FILE"
+    ' "$TARGET_FILE" > "$TARGET_FILE.tmp" && mv "$TARGET_FILE.tmp" "$TARGET_FILE" && chmod 600 "$TARGET_FILE"
 
     echo "✓ Updated ALCF configuration in $TARGET_FILE"
     if [ "$TARGET_FILE" != "$ENV_FILE" ]; then

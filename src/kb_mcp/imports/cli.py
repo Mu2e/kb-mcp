@@ -123,6 +123,9 @@ def cmd_docdb(args):
             output_dir=args.output_dir,
             auto_embed=not args.no_auto_embed and not skip_parse,
             auto_summarize=not args.no_auto_summarize and not skip_parse,
+            max_embed_text_chars=getattr(args, "max_embed_chars", None),
+            embed_images=not getattr(args, "no_embed_images", False),
+            embed_tables=not getattr(args, "no_embed_tables", False),
         )
 
     if skip_parse:
@@ -442,6 +445,28 @@ def main():
             "'kb tools parse-all'. Useful for staging a large backfill "
             "(network-bound) separately from parsing it (CPU-bound)."
         ),
+    )
+    docdb_parser.add_argument(
+        "--max-embed-chars",
+        type=int,
+        help=(
+            "Skip auto-embedding (leave in the backlog for a later run) any "
+            "document whose extracted text exceeds this many characters. The "
+            "corpus has a handful of giant spreadsheets that run 10k+ chunks "
+            "each and can dominate a routine/cron run's time budget on their "
+            "own; this caps a single run's exposure to them. Has no effect on "
+            "fetching or parsing — only on the auto-embed step."
+        ),
+    )
+    docdb_parser.add_argument(
+        "--no-embed-images",
+        action="store_true",
+        help="Leave image documents unchunked in the auto-embed step (text is still embedded)",
+    )
+    docdb_parser.add_argument(
+        "--no-embed-tables",
+        action="store_true",
+        help="Leave table documents unchunked in the auto-embed step (text is still embedded)",
     )
     docdb_parser.set_defaults(func=cmd_docdb)
 

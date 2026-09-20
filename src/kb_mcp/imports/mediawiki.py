@@ -133,7 +133,14 @@ class MediaWikiSource(Source):
         query_string = urlencode(params)
         url = f"{self.api_url}?{query_string}"
 
-        cmd = ["curl", "-s", "--max-time", str(int(self.timeout))]
+        # -A: mu2ewiki.fnal.gov sits behind Cloudflare, which silently drops
+        # (never responds — no error, no challenge page) requests carrying
+        # curl's default "curl/x.y.z" User-Agent. A browser-shaped UA gets
+        # answered normally.
+        cmd = [
+            "curl", "-s", "--max-time", str(int(self.timeout)),
+            "-A", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
+        ]
         if self.use_kerberos:
             cmd.extend(["--negotiate", "-u", ":"])
         cmd.append(url)

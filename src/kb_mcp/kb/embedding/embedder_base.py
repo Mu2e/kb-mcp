@@ -192,7 +192,14 @@ class BaseEmbedder(ABC):
                 try:
                     # CREATE EXTENSION IF NOT EXISTS already checks if extension exists
                     session.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
-                    session.commit()
+                    # Only commit if we own this session — see the should_close
+                    # guard just above and at line ~296; a full commit on a
+                    # caller-provided session (e.g. parse_all()'s locked batch)
+                    # would release that caller's row locks early.
+                    if should_close:
+                        session.commit()
+                    else:
+                        session.flush()
                 except Exception as e:
                     logger.warning(f"Could not enable pgvector extension: {e}")
             

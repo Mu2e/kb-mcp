@@ -643,9 +643,9 @@ def setup_chat_routes(app, session_manager: WebSessionManager, require_auth_html
             # --- Direct LLM mode (no agent/MCP) ---
             if mode == 'direct':
                 try:
-                    client = get_openai_client(use_async=True)
                     agent_config = get_agent_config()
                     model = agent_config['agent_model']
+                    client = get_openai_client(model=model, use_async=True)
 
                     messages = []
                     if chat_session.document_context:
@@ -680,9 +680,9 @@ def setup_chat_routes(app, session_manager: WebSessionManager, require_auth_html
             if not chat_session.agent:
                 # print(f"DEBUG Initializing new agent for session {session_id}")
                 try:
-                    async_client = get_openai_client(use_async=True)
                     agent_config = get_agent_config()
                     agent_model = agent_config['agent_model']
+                    async_client = get_openai_client(model=agent_model, use_async=True)
                     await chat_session.start_mcp(mode, async_client, agent_model, agent_callback)
                     # print(f"DEBUG Agent initialized with {len(chat_session.agent.tools)} tools")
                     logger.info(f"Initialized agent for chat session {session_id}")

@@ -17,6 +17,11 @@ from .embedding.db_models import Chunk, get_embedding_table
 from .embedding.chunking import resolve_strategy_name
 from ..config import get_embedding_config
 
+# Single-record document types: chunked one record at a time under a strategy
+# named after the doc_type (see chunking.chunk_document), and swept separately
+# from text documents by record_chunk_and_embed_all.
+RECORD_DOC_TYPES = ("image", "table")
+
 logger = logging.getLogger(__name__)
 
 
@@ -345,11 +350,13 @@ def parse_all(
     *,
     from_stored: bool = False,
     doc_ids: Optional[List[str]] = None,
+    exclude_doc_ids: Optional[List[str]] = None,
     empty_only: bool = False,
     dry_run: bool = False,
     generate_summary: bool = True,
     chunk_and_embed: bool = True,
     full_pipeline: bool = False,
+    max_file_size_mb: Optional[float] = None,
 ) -> Dict[str, Any]:
     """Parse raw documents in parallel-safe batches (FOR UPDATE SKIP LOCKED).
 
@@ -385,6 +392,9 @@ def parse_all(
         from_stored: If True, rebuild from stored parser output instead of re-parsing;
                     dispatches to _parse_all_from_stored() (see its docstring for details).
         doc_ids: Restrict to specific doc_id(s).
+        exclude_doc_ids: Skip these specific doc_id(s) — e.g. a document known to
+                        blow up memory during parsing (large in-memory expansion,
+                        pathological structure). Left for a later, targeted run.
         empty_only: Only process rows whose existing Document has empty text. Requires
                    force_reparse or from_stored (there's nothing to check against otherwise).
         dry_run: List what would be processed and return without taking any locks or
@@ -404,6 +414,11 @@ def parse_all(
                       the same rows — each parse_all() worker instead does
                       one document's whole pipeline itself, so there's no
                       cross-tool contention on document_parser_outputs/chunks.
+        max_file_size_mb: If set, skip raw documents whose file_size exceeds
+                          this many MB — they're left for a later run. Large
+                          files (big PDFs, wide spreadsheets) parse slower and
+                          use more memory per worker; this keeps a run from
+                          being dominated by them.
 
     Returns:
         Dictionary with:
@@ -444,10 +459,21 @@ def parse_all(
     def _build_query(session):
         # Query for RawDocuments that don't have Documents with the specified parser
         # Use NOT EXISTS instead of LEFT JOIN to avoid FOR UPDATE on outer join
+        #
+        # parser_name is usually an auto-pick sentinel ("kb-mcp"/None/"auto"),
+        # but add_document() always stores the concrete backend it actually
+        # ran (e.g. "docling") in Document.parser_id — comparing against the
+        # sentinel literally would never match, making every already-parsed
+        # docling document look perpetually unparsed. resolved_parser_id_expr
+        # mirrors add_document()'s own resolve_parser_name() call per-row via
+        # RawDocument.source_type, so this matches what actually got stored.
+        from ..parser.parse import resolved_parser_id_expr
+
+        resolved_parser_id = resolved_parser_id_expr(RawDocument.source_type, parser_name)
         subquery = session.query(Document.id).filter(
             and_(
                 Document.raw_document_id == RawDocument.id,
-                Document.parser_id == parser_name
+                Document.parser_id == resolved_parser_id
             )
         ).exists()
 
@@ -461,6 +487,10 @@ def parse_all(
             query = query.filter(RawDocument.source_id == source_id)
         if doc_ids:
             query = query.filter(RawDocument.doc_id.in_(doc_ids))
+        if exclude_doc_ids:
+            query = query.filter(~RawDocument.doc_id.in_(exclude_doc_ids))
+        if max_file_size_mb is not None:
+            query = query.filter(RawDocument.file_size <= max_file_size_mb * 1_000_000)
         return query
 
     if dry_run:
@@ -872,11 +902,13 @@ def chunk_and_embed_all(
     chunk_strategy: Optional[str] = None,
     chunk_config: Optional[Dict[str, Any]] = None,
     include_images: bool = True,
+    include_tables: bool = True,
     embedding_name: Optional[str] = None,
     provider: Optional[str] = None,
     model: Optional[str] = None,
     parser_name: Optional[str] = None,
     force: bool = False,
+    max_text_chars: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Chunk and embed all documents for a source_id that don't have chunks yet.
 
@@ -892,11 +924,18 @@ def chunk_and_embed_all(
                      - chunk_size: Token chunk size (for tokens/slide strategies)
                      - chunk_overlap: Token overlap (for tokens/slide strategies)
         include_images: If True, also process image documents using "image" strategy (default: True)
+        include_tables: If True, also process table documents using "table" strategy (default: True)
         embedding_name: Optional short name for embedding config (e.g., "openai-small").
                        If provided, overrides provider/model.
         provider: Optional embedding provider (e.g., "openai", "voyage")
         model: Optional embedding model (e.g., "text-embedding-3-small")
         parser_name: Optional parser ID to filter documents by (e.g., "marker", "nougat", "docling").
+        max_text_chars: If set, documents whose extracted text is longer than
+            this are left in the backlog rather than processed this call —
+            lets a routine/cron sweep skip the corpus's few giant documents
+            (e.g. financial spreadsheets that run 10k+ chunks each and can
+            dominate run time on their own) while a separate, less frequent
+            pass handles them without a time budget.
 
     Returns:
         Dictionary with:
@@ -904,10 +943,14 @@ def chunk_and_embed_all(
         - chunked: Number of text documents that were chunked and embedded
         - skipped: Number of text documents skipped (no text or already had chunks)
         - errors: Number of text documents that failed
+        - oversized_skipped: Number of text documents left in the backlog because
+          their text exceeded max_text_chars (0 if max_text_chars is None)
         - image_processed: Number of image documents processed (if include_images=True)
         - image_chunked: Number of image documents chunked (if include_images=True)
         - image_skipped: Number of image documents skipped (if include_images=True)
         - image_errors: Number of image documents that failed (if include_images=True)
+        - table_processed/table_chunked/table_skipped/table_errors: Same, for
+          table documents (if include_tables=True)
 
     Example:
         ```python
@@ -928,8 +971,23 @@ def chunk_and_embed_all(
             Document.source_id == source_id,
             Document.text.isnot(None),
             Document.text != "",
-            Document.doc_type != "image"
+            # Images and tables are single-record documents: the chunker
+            # always stores their chunks under their own doc_type name
+            # ("image"/"table"), never under the requested strategy, so the
+            # backlog check below would never see them as done. They get
+            # their own sweep (record_chunk_and_embed_all) instead.
+            Document.doc_type.notin_(RECORD_DOC_TYPES),
         )
+
+        oversized_skipped = 0
+        if max_text_chars is not None:
+            from sqlalchemy import func
+            # An approximate count for the caller's benefit: how many
+            # documents over the cap exist at all, not how many were
+            # *actually* left in the backlog by this call (some may already
+            # be fully chunked and would've been excluded below anyway).
+            oversized_skipped = query.filter(func.length(Document.text) > max_text_chars).count()
+            query = query.filter(func.length(Document.text) <= max_text_chars)
 
         if parser_name is not None:
             query = query.filter(Document.parser_id == parser_name)
@@ -966,31 +1024,49 @@ def chunk_and_embed_all(
                 # For other strategies: find documents without chunks of this specific strategy
                 # This allows creating multiple strategies for the same documents (e.g., tokens and tokens_no_gist)
                 from sqlalchemy import and_
+                accepted_names = {strategy_full_name}
+                if chunk_strategy == "section":
+                    # A document with no DoclingDocument parser_output never
+                    # takes the section walker (see chunking.py's
+                    # `use_section_walker` branch) — it falls back to the
+                    # plain token chunker and its chunks get stored under
+                    # the *tokens* window name, never `section_*`. Checking
+                    # only for `section_*` here made every such document
+                    # (non-PDF/DOCX/PPTX/HTML sources: xlsx, plain text, ...)
+                    # look permanently un-chunked: this backlog query would
+                    # find it, and chunk_and_embed_all would re-chunk and
+                    # re-embed it, on *every single call* forever — for the
+                    # giant financial spreadsheets (11k+ chunks each) that
+                    # was minutes of wasted work per document, every run.
+                    # Accept the fallback name too, as evidence the document
+                    # already has current chunks (whichever path produced
+                    # them). Trade-off: a document that later gains Docling
+                    # output after previously falling back stays on its
+                    # stale token chunks until a deliberate `force=True`
+                    # re-chunk — same lever already used to redo any
+                    # already-chunked document on purpose.
+                    accepted_names.add(resolve_strategy_name("tokens", chunk_config))
                 query = query.outerjoin(
                     Chunk,
                     and_(
                         Document.id == Chunk.document_id,
-                        Chunk.chunk_strategy == strategy_full_name
+                        Chunk.chunk_strategy.in_(accepted_names)
                     )
                 ).filter(Chunk.id.is_(None))
         
         documents = query.all()
-        
-        if not documents:
-            logger.info(f"No documents found for source_id: {source_id}" + (f", parser_name: {parser_name}" if parser_name else "") + " that need chunking")
-            return {
-                "processed": 0,
-                "chunked": 0,
-                "skipped": 0,
-                "errors": 0,
-            }
-
-        logger.info(f"Found {len(documents)} document(s) for source_id: {source_id}" + (f", parser_name: {parser_name}" if parser_name else "") + " that need chunking")
 
         processed = 0
         chunked = 0
         skipped = 0
         errors = 0
+
+        # No early return when the text backlog is empty: the image/table
+        # sweeps below still need to run.
+        if not documents:
+            logger.info(f"No documents found for source_id: {source_id}" + (f", parser_name: {parser_name}" if parser_name else "") + " that need chunking")
+        else:
+            logger.info(f"Found {len(documents)} document(s) for source_id: {source_id}" + (f", parser_name: {parser_name}" if parser_name else "") + " that need chunking")
 
         # Use tqdm progress bar for better user experience
         for doc in tqdm(documents, desc="Chunking and embedding", unit="doc"):
@@ -1030,37 +1106,142 @@ def chunk_and_embed_all(
         "chunked": chunked,
         "skipped": skipped,
         "errors": errors,
+        "oversized_skipped": oversized_skipped,
     }
 
-    # Optionally process image documents
-    if include_images:
-        logger.info(f"Processing image documents for source_id: {source_id}")
-        image_result = image_chunk_and_embed_all(
+    # Optionally process the single-record document types
+    for doc_type, include in (("image", include_images), ("table", include_tables)):
+        if not include:
+            continue
+        logger.info(f"Processing {doc_type} documents for source_id: {source_id}")
+        record_result = record_chunk_and_embed_all(
             source_id=source_id,
+            doc_type=doc_type,
             embedding_name=embedding_name,
             provider=provider,
             model=model,
-            session=session,
         )
-        result["image_processed"] = image_result["processed"]
-        result["image_chunked"] = image_result["chunked"]
-        result["image_skipped"] = image_result["skipped"]
-        result["image_errors"] = image_result["errors"]
+        for key in ("processed", "chunked", "skipped", "errors"):
+            result[f"{doc_type}_{key}"] = record_result[key]
 
-    # Update log message to include images if processed
     log_msg = (
         f"Completed chunk_and_embed_all for source_id: {source_id}. "
         f"Text docs - Processed: {processed}, Chunked: {chunked}, Skipped: {skipped}, Errors: {errors}"
     )
-    if include_images and "image_processed" in result:
-        log_msg += (
-            f". Image docs - Processed: {result['image_processed']}, "
-            f"Chunked: {result['image_chunked']}, Skipped: {result['image_skipped']}, "
-            f"Errors: {result['image_errors']}"
-        )
+    if max_text_chars is not None:
+        log_msg += f", Left in backlog (over {max_text_chars} chars): {oversized_skipped}"
+    for doc_type in ("image", "table"):
+        if f"{doc_type}_processed" in result:
+            log_msg += (
+                f". {doc_type.capitalize()} docs - Processed: {result[f'{doc_type}_processed']}, "
+                f"Chunked: {result[f'{doc_type}_chunked']}, Skipped: {result[f'{doc_type}_skipped']}, "
+                f"Errors: {result[f'{doc_type}_errors']}"
+            )
     logger.info(log_msg)
 
     return result
+
+
+def record_chunk_and_embed_all(
+    source_id: str,
+    doc_type: str,
+    embedding_name: Optional[str] = None,
+    provider: Optional[str] = None,
+    model: Optional[str] = None,
+    session: Optional[Any] = None,
+) -> Dict[str, Any]:
+    """Chunk and embed all single-record documents of one doc_type that don't have chunks yet.
+
+    Image and table documents are self-contained records: the chunker stores
+    each as one chunk (or a few, if the record is longer than the embedding
+    window) under a strategy named after the doc_type itself. So "done" here
+    simply means "has any chunk", with no strategy-name matching needed.
+
+    Args:
+        source_id: Source identifier to process documents for
+        doc_type: One of RECORD_DOC_TYPES ("image" or "table")
+        embedding_name: Optional short name for embedding config (e.g., "openai-small").
+                       If provided, overrides provider/model.
+        provider: Optional embedding provider (e.g., "openai", "voyage")
+        model: Optional embedding model (e.g., "text-embedding-3-small")
+        session: Optional database session. If None, creates a new session.
+
+    Returns:
+        Dictionary with:
+        - processed: Number of documents processed
+        - chunked: Number of documents that were chunked and embedded
+        - skipped: Number of documents for which no chunks were created
+        - errors: Number of documents that failed
+    """
+    if doc_type not in RECORD_DOC_TYPES:
+        raise ValueError(f"doc_type must be one of {RECORD_DOC_TYPES}, got {doc_type!r}")
+
+    logger.info(f"Starting record_chunk_and_embed_all for source_id: {source_id}, doc_type: {doc_type}")
+
+    with get_db_session(session) as session:
+        # Find documents of this type without chunks using LEFT JOIN
+        query = session.query(Document).filter(
+            Document.source_id == source_id,
+            Document.doc_type == doc_type,
+            Document.text.isnot(None),
+            Document.text != ""
+        ).outerjoin(Chunk, Document.id == Chunk.document_id).filter(Chunk.id.is_(None))
+
+        documents = query.all()
+
+        if not documents:
+            logger.info(f"No {doc_type} documents found for source_id: {source_id} that need chunking")
+            return {
+                "processed": 0,
+                "chunked": 0,
+                "skipped": 0,
+                "errors": 0,
+            }
+
+        logger.info(f"Found {len(documents)} {doc_type} document(s) for source_id: {source_id} that need chunking")
+
+        processed = 0
+        chunked = 0
+        skipped = 0
+        errors = 0
+
+        for doc in documents:
+            try:
+                processed += 1
+
+                logger.debug(f"Chunking and embedding {doc_type} document {doc.id} ({doc.doc_id or doc.id})")
+                chunks = doc.chunk_and_embed(
+                    chunk_strategy=doc_type,
+                    embedding_name=embedding_name,
+                    provider=provider,
+                    model=model,
+                )
+
+                if chunks:
+                    chunked += 1
+                    logger.debug(f"Successfully chunked and embedded {doc_type} document {doc.id}")
+                else:
+                    skipped += 1
+                    logger.warning(f"No chunks created for {doc_type} document {doc.id}")
+
+            except Exception as e:
+                errors += 1
+                logger.error(f"Error processing {doc_type} document {doc.id}: {e}", exc_info=True)
+                continue
+
+        result = {
+            "processed": processed,
+            "chunked": chunked,
+            "skipped": skipped,
+            "errors": errors,
+        }
+
+        logger.info(
+            f"Completed record_chunk_and_embed_all for source_id: {source_id}, doc_type: {doc_type}. "
+            f"Processed: {processed}, Chunked: {chunked}, Skipped: {skipped}, Errors: {errors}"
+        )
+
+        return result
 
 
 def image_chunk_and_embed_all(
@@ -1072,98 +1253,16 @@ def image_chunk_and_embed_all(
 ) -> Dict[str, Any]:
     """Chunk and embed all image documents for a source_id that don't have chunks yet.
 
-    Uses the special "image" chunking strategy that creates a single chunk per image
-    with the image description, optionally prepended with the parent document's gist.
-
-    Args:
-        source_id: Source identifier to process image documents for
-        embedding_name: Optional short name for embedding config (e.g., "openai-small").
-                       If provided, overrides provider/model.
-        provider: Optional embedding provider (e.g., "openai", "voyage")
-        model: Optional embedding model (e.g., "text-embedding-3-small")
-        session: Optional database session. If None, creates a new session.
-
-    Returns:
-        Dictionary with:
-        - processed: Number of image documents processed
-        - chunked: Number of image documents that were chunked and embedded
-        - skipped: Number of image documents skipped (no text or already had chunks)
-        - errors: Number of image documents that failed
-
-    Example:
-        ```python
-        from kb_mcp.kb.tools import image_chunk_and_embed_all
-        result = image_chunk_and_embed_all("inspire-hep")
-        print(f"Processed {result['processed']} images, chunked {result['chunked']}")
-        ```
+    Thin wrapper around record_chunk_and_embed_all(doc_type="image"); see there.
     """
-    logger.info(f"Starting image_chunk_and_embed_all for source_id: {source_id}")
-
-    with get_db_session(session) as session:
-        # Find image documents without chunks using LEFT JOIN
-        query = session.query(Document).filter(
-            Document.source_id == source_id,
-            Document.doc_type == "image",
-            Document.text.isnot(None),
-            Document.text != ""
-        ).outerjoin(Chunk, Document.id == Chunk.document_id).filter(Chunk.id.is_(None))
-
-        documents = query.all()
-
-        if not documents:
-            logger.info(f"No image documents found for source_id: {source_id} that need chunking")
-            return {
-                "processed": 0,
-                "chunked": 0,
-                "skipped": 0,
-                "errors": 0,
-            }
-
-        logger.info(f"Found {len(documents)} image document(s) for source_id: {source_id} that need chunking")
-
-        processed = 0
-        chunked = 0
-        skipped = 0
-        errors = 0
-
-        for doc in documents:
-            try:
-                processed += 1
-
-                # Chunk and embed the image document using "image" strategy
-                logger.debug(f"Chunking and embedding image document {doc.id} ({doc.doc_id or doc.id})")
-                chunks = doc.chunk_and_embed(
-                    chunk_strategy="image",
-                    embedding_name=embedding_name,
-                    provider=provider,
-                    model=model,
-                )
-
-                if chunks:
-                    chunked += 1
-                    logger.debug(f"Successfully chunked and embedded image document {doc.id}")
-                else:
-                    skipped += 1
-                    logger.warning(f"No chunks created for image document {doc.id}")
-
-            except Exception as e:
-                errors += 1
-                logger.error(f"Error processing image document {doc.id}: {e}", exc_info=True)
-                continue
-
-        result = {
-            "processed": processed,
-            "chunked": chunked,
-            "skipped": skipped,
-            "errors": errors,
-        }
-
-        logger.info(
-            f"Completed image_chunk_and_embed_all for source_id: {source_id}. "
-            f"Processed: {processed}, Chunked: {chunked}, Skipped: {skipped}, Errors: {errors}"
-        )
-
-        return result
+    return record_chunk_and_embed_all(
+        source_id=source_id,
+        doc_type="image",
+        embedding_name=embedding_name,
+        provider=provider,
+        model=model,
+        session=session,
+    )
 
 
 def embed_all(

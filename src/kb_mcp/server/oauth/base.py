@@ -20,8 +20,14 @@ from mcp.server.auth.provider import (
 from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
 
 from .api_keys import ApiKeyManager
+from .mikey_keys import MikeyKeyStore
 from ..session_store import SessionStore
-from ...config import get_api_keys_file, get_server_config, get_auth_config
+from ...config import (
+    get_api_keys_file,
+    get_mikey_keys_file,
+    get_server_config,
+    get_auth_config,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +68,12 @@ class BaseOAuthProvider(
         api_keys_file = get_api_keys_file()
         self.api_key_manager = ApiKeyManager(api_keys_file)
         logger.info(f"API key authentication enabled: {api_keys_file}")
+
+        # mikey keys - shared with the other Mu2e MCP servers, opt-in
+        mikey_keys_file = get_mikey_keys_file()
+        self.mikey_key_store = MikeyKeyStore(mikey_keys_file) if mikey_keys_file else None
+        if self.mikey_key_store:
+            logger.info(f"mikey key authentication enabled: {mikey_keys_file}")
 
         # Initialize session store for OAuth/MCP sessions
         self.session_store = SessionStore(collection_name="oauth_sessions")
@@ -365,6 +377,25 @@ class BaseOAuthProvider(
         """Load and verify access token (API key or OAuth token)."""
         logger.debug(f"Loading token: {token[:20]}...")
 
+        # Check if this is a mikey key (format: mikey_...) issued by the shared
+        # Mu2e keys file. Checked before sk_ so an unconfigured store rejects
+        # rather than falling through to the local key manager.
+        if MikeyKeyStore.is_mikey_token(token):
+            if not self.mikey_key_store:
+                logger.warning("mikey key presented but MIKEY_KEYS_FILE is not set")
+                return None
+            username = self.mikey_key_store.verify_key(token)
+            if username:
+                logger.info(f"Valid mikey key for user: {username}")
+                return AccessToken(
+                    token=token,
+                    client_id="mikey-client",
+                    scopes=[],
+                    expires_at=None,
+                )
+            logger.warning(f"Invalid mikey key: {MikeyKeyStore.fingerprint(token)}")
+            return None
+
         # Check if this is an API key (format: sk_...)
         if token.startswith("sk_"):
             username = self.api_key_manager.verify_key(token)
@@ -377,7 +408,7 @@ class BaseOAuthProvider(
                     expires_at=None,
                 )
             else:
-                logger.warning(f"Invalid API key: {token[:20]}...")
+                logger.warning("Invalid API key presented")
                 return None
 
         # Otherwise, treat as OAuth token - load consolidated data
@@ -450,6 +481,10 @@ class BaseOAuthProvider(
 
     async def get_username_for_token(self, token: str) -> str | None:
         """Get username for a given access token."""
+        # For mikey keys, check the shared keys file
+        if MikeyKeyStore.is_mikey_token(token):
+            return self.mikey_key_store.verify_key(token) if self.mikey_key_store else None
+
         # For API keys, check the API key manager
         if token.startswith("sk_"):
             return self.api_key_manager.verify_key(token)

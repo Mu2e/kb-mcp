@@ -38,7 +38,7 @@ async def async_main():
         async with ClientSession(read, write) as session:
             await session.initialize()
 
-            client = get_openai_client(use_async=True)
+            client = get_openai_client(model=model, use_async=True)
 
             # Generate run_id
             import time

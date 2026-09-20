@@ -14,7 +14,7 @@ dependencies = [
     "python-dotenv>=1.0.0",
 
     # Server dependencies
-    "mcp<1.23.0", # version 1.23 adds Host checking that doesn't work inside dockers but doesn't yet allow to disable it. Update when new version is avaiable.
+    "mcp>=2.0.0", # 2.x makes the Host checking added in 1.23 disablable (TransportSecuritySettings), which is what kept us pinned below it.
     "uvicorn>=0.27.0",
     "httpx>=0.27.0",
 

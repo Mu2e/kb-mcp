@@ -12,8 +12,9 @@ load_dotenv(env_path)
 
 import contextlib
 import logging
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 from mcp.server.auth.settings import AuthSettings, ClientRegistrationOptions
+from mcp.server.transport_security import TransportSecuritySettings
 
 from .oauth import GitHubOAuthProvider, GlobusOAuthProvider, BaseOAuthProvider
 from .web import html_templates
@@ -100,7 +101,7 @@ from .mcp_prompts import get_server_instructions
 
 # Create FastMCP with OAuth (only if provider is configured)
 if MCP_REQUIRE_API_KEY:
-    mcp = FastMCP(
+    mcp = MCPServer(
         "kb-mcp",
         instructions=get_server_instructions(),
         auth=AuthSettings(
@@ -109,11 +110,10 @@ if MCP_REQUIRE_API_KEY:
             client_registration_options=ClientRegistrationOptions(enabled=True),
         ),
         auth_server_provider=oauth_provider,
-        # settings={"enable_dns_rebinding_protection": False} # add one new mcp version that supports this is avaialble, so far use <1.23.0
     )
 else:
-    # Create FastMCP without OAuth if authentication is disabled
-    mcp = FastMCP("kb-mcp",
+    # Create MCPServer without OAuth if authentication is disabled
+    mcp = MCPServer("kb-mcp",
         instructions=get_server_instructions(),
         auth=None, # no auth needed if authentication is disabled
     )
@@ -234,7 +234,15 @@ static_path = Path(__file__).parent / "static"
 # --- MCP application -------------------------------------------------------
 # `app` remains the MCP application so existing ASGI entry points
 # (e.g. `uvicorn kb_mcp.server.server:app`) keep working.
-app = mcp.streamable_http_app()
+# DNS-rebinding protection is off because the Host header this server is
+# reached by is not knowable here: it runs behind Docker and is addressed by
+# container name, service IP and hostname alike, and mcp 1.23 rejecting those
+# is what kept this project pinned below it. Off restores the pre-1.23
+# behavior rather than loosening anything. To turn it on, drop this argument
+# and pass allowed_hosts with the names the deployment actually answers to.
+app = mcp.streamable_http_app(
+    transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False)
+)
 
 # Add CORS middleware for browser-based MCP clients (tested with MCP Inspector)
 app.add_middleware(
@@ -377,7 +385,10 @@ def main():
 
         await asyncio.gather(*servers)
 
-    asyncio.run(_serve())
+    try:
+        asyncio.run(_serve())
+    except KeyboardInterrupt:
+        logger.info("Shutting down.")
 
 
 if __name__ == "__main__":

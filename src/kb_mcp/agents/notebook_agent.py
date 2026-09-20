@@ -53,7 +53,7 @@ class NotebookAgent(BaseAgent):
                 "function": {
                     "name": t.name,
                     "description": t.description,
-                    "parameters": t.inputSchema,
+                    "parameters": t.input_schema,
                 }
             })
             tool_names.append(t.name)

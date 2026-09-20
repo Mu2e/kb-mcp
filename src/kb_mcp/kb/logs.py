@@ -313,3 +313,56 @@ def get_all_logs_for_document(
             "search": [],  # Search logs are not per-document
         }
 
+
+
+def get_import_runs(
+    source_id: Optional[str] = None,
+    limit: Optional[int] = 20,
+    run_id: Optional[str] = None,
+    session: Optional[Session] = None,
+) -> List[Dict[str, Any]]:
+    """Get import-run records (one per `Source.process_all()` run), newest first.
+
+    Args:
+        source_id: Optional source to restrict to (e.g. "mu2e-docdb")
+        limit: Optional maximum number of runs to return
+        run_id: Optional run ID (or unique prefix of one) to fetch just that run
+        session: Optional database session. If None, creates a new session.
+
+    Returns:
+        List of import-run dictionaries
+    """
+    with get_db_session(session) as session:
+        return _get_import_runs_impl(session, source_id, limit, run_id)
+
+
+def _get_import_runs_impl(
+    session: Session,
+    source_id: Optional[str],
+    limit: Optional[int],
+    run_id: Optional[str],
+) -> List[Dict[str, Any]]:
+    """Internal implementation of get_import_runs."""
+    from .db_models import ImportRun
+
+    query = session.query(ImportRun)
+    if source_id:
+        query = query.filter(ImportRun.source_id == source_id)
+    if run_id:
+        query = query.filter(ImportRun.id.startswith(run_id))
+    query = query.order_by(desc(ImportRun.started_time))
+    if limit:
+        query = query.limit(limit)
+
+    columns = [c.name for c in ImportRun.__table__.columns]
+    result = []
+    for run in query.all():
+        row = {name: getattr(run, name) for name in columns}
+        row["started_time"] = _to_utc_iso(run.started_time)
+        row["finished_time"] = _to_utc_iso(run.finished_time)
+        row["duration_seconds"] = (
+            (run.finished_time - run.started_time).total_seconds()
+            if run.finished_time and run.started_time else None
+        )
+        result.append(row)
+    return result

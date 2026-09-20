@@ -218,7 +218,7 @@ async def research(query: str) -> str:
             await session.initialize()
 
             # Create async LLM client
-            client = get_openai_client(use_async=True)
+            client = get_openai_client(model=model, use_async=True)
 
             # Generate run_id for this session
             import time

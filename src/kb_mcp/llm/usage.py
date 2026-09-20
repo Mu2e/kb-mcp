@@ -204,6 +204,7 @@ def record_llm_usage(
     raw_document_id: Optional[str] = None,
     accumulator: Optional[UsageAccumulator] = None,
     meta: Optional[Dict[str, Any]] = None,
+    session: Optional[Any] = None,
 ) -> Dict[str, int]:
     """Persist one call's token usage and optionally fold it into a total.
 
@@ -221,6 +222,15 @@ def record_llm_usage(
         raw_document_id: FK → documents_raw.id, when known.
         accumulator: Optional in-memory tally to update.
         meta: Extra context to store alongside the counters.
+        session: Optional caller session to write through instead of opening
+            an independent one. Pass this whenever document_id/raw_document_id
+            may have been created earlier in an still-open caller transaction
+            (see note below) — without it, a fresh connection's FK check on
+            that row has to wait for the caller's transaction to commit,
+            which can never happen if the caller is itself blocked waiting
+            for this call to return (a client-side self-deadlock Postgres
+            has no way to detect, since it can't see both connections belong
+            to the same process).
 
     Returns:
         The usage snapshot (all zeros if nothing was reported).
@@ -235,18 +245,41 @@ def record_llm_usage(
         from ..kb.database import get_db_session
         from ..kb.db_models import LLMUsage
 
-        # auto_expunge=False: the row is write-once and never read back here.
-        with get_db_session(auto_expunge=False) as session:
-            session.add(
-                LLMUsage(
-                    stage=stage,
-                    model=model,
-                    document_id=document_id,
-                    raw_document_id=raw_document_id,
-                    meta=meta or {},
-                    **snapshot,
+        if session is not None:
+            # Reuse the caller's session/transaction — see the `session` arg
+            # doc above for why a separate connection is unsafe here. A
+            # SAVEPOINT keeps this best-effort: a failure rolls back just
+            # this insert, not the caller's whole transaction.
+            savepoint = session.begin_nested()
+            try:
+                session.add(
+                    LLMUsage(
+                        stage=stage,
+                        model=model,
+                        document_id=document_id,
+                        raw_document_id=raw_document_id,
+                        meta=meta or {},
+                        **snapshot,
+                    )
                 )
-            )
+                session.flush()
+                savepoint.commit()
+            except Exception:
+                savepoint.rollback()
+                raise
+        else:
+            # auto_expunge=False: the row is write-once and never read back here.
+            with get_db_session(auto_expunge=False) as local_session:
+                local_session.add(
+                    LLMUsage(
+                        stage=stage,
+                        model=model,
+                        document_id=document_id,
+                        raw_document_id=raw_document_id,
+                        meta=meta or {},
+                        **snapshot,
+                    )
+                )
     except Exception as e:
         # Never let accounting break ingest.
         logger.debug(f"Could not record LLM usage for stage '{stage}': {e}")

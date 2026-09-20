@@ -431,7 +431,7 @@ def init_db(create_tables: bool = True) -> None:
         GraphNodeMap,
         GraphExtractionLog,
     )
-    from .db_models import ParserComparison, ParserCategories, LLMUsage  # noqa: F401
+    from .db_models import ParserComparison, ParserCategories, LLMUsage, ImportRun  # noqa: F401
 
     engine = get_engine()
     database_url = get_database_url()

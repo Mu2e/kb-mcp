@@ -1125,6 +1125,91 @@ class LLMUsage(Base):
         )
 
 
+class ImportRun(Base):
+    """Table 'logs_import_runs': one row per `Source.process_all()` run.
+
+    The overview of what each import run (cron or manual) did: when it ran,
+    how many items the source listed, how many were parsed / skipped /
+    failed, and what the auto-summarize and auto-embed sweeps did afterwards.
+    Shown by `kb logs imports`.
+
+    The row is inserted with status "running" when the run starts and
+    updated when it ends, so a run that was killed outright (SIGKILL, OOM,
+    node reboot) stays visible as "running" rather than leaving no trace.
+    Written best-effort (see `kb_mcp.imports.run_log`): a failure to record
+    never breaks the import itself.
+
+    Attributes:
+        id (str): Primary key (UUID).
+        source_id (str): Source that was imported (e.g. "mu2e-docdb").
+        status (str): "running", "success", "partial" (finished, but some
+            items or sweep steps failed) or "failed" (the run raised).
+        started_time / finished_time (datetime): Run start and end.
+        hostname (str), pid (int): Where the run executed.
+        trigger (str): How it was started — $KB_RUN_TRIGGER (e.g.
+            "cron-script"), else "manual".
+        log_path (str): Log file of the run ($KB_RUN_LOG), if any.
+        args (dict): Command line and process_all() parameters.
+        items_found / items_processed / items_skipped / items_failed (int):
+            Per-item outcome of the fetch+parse phase.
+        documents_created (int): Document rows created by processed items.
+        summarized / summarize_errors (int): Auto-summarize sweep outcome.
+        chunked / embed_errors / embed_oversized (int): Auto-embed sweep
+            outcome (text documents; oversized = left in the backlog by
+            max_embed_text_chars).
+        error (str): Exception that ended the run, if status is "failed".
+        failures (list): [{"item_id", "error"}] for each failed item, plus
+            {"step", "error"} for a sweep step that raised.
+        meta (dict): Anything else (e.g. image/table sweep counts).
+    """
+
+    __tablename__ = "logs_import_runs"
+
+    id = Column(
+        String(36),
+        primary_key=True,
+        default=lambda: str(uuid.uuid4()),
+    )
+    source_id = Column(String(256), nullable=False, index=True)
+    status = Column(String(16), nullable=False, default="running", index=True)
+    started_time = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=func.now(),
+        server_default=func.now(),
+        index=True,
+    )
+    finished_time = Column(DateTime(timezone=True), nullable=True)
+    hostname = Column(String(256), nullable=True)
+    pid = Column(Integer, nullable=True)
+    trigger = Column(String(64), nullable=True)
+    log_path = Column(String(2048), nullable=True)
+    args = Column(JSONB, nullable=True, default=dict)
+
+    items_found = Column(Integer, nullable=True)
+    items_processed = Column(Integer, nullable=True)
+    items_skipped = Column(Integer, nullable=True)
+    items_failed = Column(Integer, nullable=True)
+    documents_created = Column(Integer, nullable=True)
+
+    summarized = Column(Integer, nullable=True)
+    summarize_errors = Column(Integer, nullable=True)
+    chunked = Column(Integer, nullable=True)
+    embed_errors = Column(Integer, nullable=True)
+    embed_oversized = Column(Integer, nullable=True)
+
+    error = Column(Text, nullable=True)
+    failures = Column(JSONB, nullable=True, default=list)
+    meta = Column(JSONB, nullable=True, default=dict)
+
+    def __repr__(self) -> str:
+        return (
+            f"<ImportRun(source={self.source_id}, status={self.status}, "
+            f"started={self.started_time}, found={self.items_found}, "
+            f"failed={self.items_failed})>"
+        )
+
+
 class ParserComparison(Base):
     """Table 'parser_comparisons' storing LLM-generated comparisons of parser outputs.
 

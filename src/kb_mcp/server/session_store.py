@@ -2,13 +2,19 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import time
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from ..config import get_server_config, get_data_dir, get_api_keys_file
+from ..config import (
+    get_server_config,
+    get_data_dir,
+    get_api_keys_file,
+    get_mikey_keys_file,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -293,6 +299,29 @@ class SessionStore:
                     logger.debug(
                         f"Error checking API keys during cleanup: {e}"
                     )
+
+                # Same for revoked mikey keys. Matched by hash rather than by
+                # value, since the mikey file stores only hashes.
+                mikey_keys_file = get_mikey_keys_file()
+                if mikey_keys_file:
+                    try:
+                        # Imported here, not at module scope: oauth.base imports
+                        # this module, so a top-level import would be circular.
+                        from .oauth.mikey_keys import MikeyKeyStore
+
+                        valid_hashes = MikeyKeyStore(mikey_keys_file).valid_hashes()
+                        revoked_mikey_keys = [
+                            token
+                            for token in token_users.keys()
+                            if MikeyKeyStore.is_mikey_token(token)
+                            and hashlib.sha256(token.encode("utf-8")).hexdigest()
+                            not in valid_hashes
+                        ]
+                        for revoked_key in revoked_mikey_keys:
+                            del token_users[revoked_key]
+                            cleaned_count += 1
+                    except Exception as e:
+                        logger.debug(f"Error checking mikey keys during cleanup: {e}")
 
         # Save if we cleaned up anything
         if cleaned_count > 0:

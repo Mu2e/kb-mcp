@@ -439,6 +439,7 @@ def _record_parsing_usage(
     parsing_usage: Dict[str, Any],
     document_id: str | None,
     raw_document_id: str | None,
+    session: Any = None,
 ) -> None:
     """Write llm_usage rows for token counts collected during parsing.
 
@@ -465,6 +466,7 @@ def _record_parsing_usage(
                 document_id=document_id,
                 raw_document_id=raw_document_id,
                 meta={"requests": counters.get("requests", 0), "aggregated": True},
+                session=session,
             )
 
 
@@ -736,8 +738,17 @@ def add_document(
             session=db_session,
         )
 
-        # Commit to ensure raw_doc and parser have IDs
-        db_session.commit()
+        # Flush to ensure raw_doc and parser have IDs. Only commit if we own
+        # this session — a full commit on a session passed in by a caller
+        # (e.g. parse_all()'s FOR UPDATE SKIP LOCKED batch loop) would
+        # release that caller's row locks right here, before parsing has
+        # even started, letting another worker grab the same still-unparsed
+        # row and parse it concurrently (observed: multiple workers opening
+        # the same large spreadsheet at once, spiking memory and OOM-killing
+        # the pod).
+        db_session.flush()
+        if db_session.is_local:
+            db_session.commit()
 
         # If we get here, we need to parse the file
         # Import parse function (lazy import to avoid circular dependencies)
@@ -843,6 +854,7 @@ def add_document(
                 parsing_usage,
                 document_id=first_doc.id if first_doc else None,
                 raw_document_id=raw_doc_id,
+                session=session,
             )
 
     logger.info(
