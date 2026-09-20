@@ -1020,6 +1020,111 @@ def cmd_db_kill_idle(args):
     print(f"Terminated {terminated} session(s).")
 
 
+def cmd_db_maintain(args):
+    """Post-bulk-load Postgres bookkeeping: refresh planner statistics
+    (ANALYZE), reclaim dead tuple space (VACUUM), and rebuild the pgvector
+    IVFFlat indexes with a `lists` value sized to each table's current row
+    count.
+
+    IVFFlat index quality is fixed at build time by its `lists` parameter -
+    a table that grew substantially since its index was first created (e.g.
+    right after a schema was bootstrapped and started empty) keeps whatever
+    value it started with unless explicitly rebuilt, which can hurt search
+    recall as more rows accumulate. Follows pgvector's own sizing guidance:
+    `lists = rows / 1000` for under a million rows, `lists = sqrt(rows)`
+    above that.
+
+    Scoped to only the tables this app owns (not a database-wide VACUUM/
+    ANALYZE), since a shared Postgres server may host other schemas/tenants
+    that this command has no business touching.
+
+    Defaults to just --analyze (safe, fast, doesn't require the exclusive
+    locks VACUUM/REINDEX briefly take) if no flags are given.
+    """
+    from ..database import get_engine
+    from ..embedding.db_models import get_embedding_table_name
+    from sqlalchemy import text, inspect as sqlalchemy_inspect
+
+    # Same import trick as init_db() (database.py) - forces every model
+    # module to register its tables on the shared Base.metadata, so this
+    # command sees the app's full static table list without hardcoding it.
+    from ..embedding.db_models import Chunk, EmbeddingConfig  # noqa: F401
+    from ..search.db_models import SearchLog  # noqa: F401
+    from ..eval.db_models import (  # noqa: F401
+        EvalGeneration, EvalDataset, EvalAudit, EvalRun, EvalResult, EvalRetrievedDocument,
+    )
+    from ..graph.db_models import (  # noqa: F401
+        GraphNodeType, GraphVerb, GraphNode, GraphRelation, GraphRelationEvidence,
+        GraphNodeMap, GraphExtractionLog,
+    )
+    from ..db_models import Base, ParserComparison, ParserCategories, LLMUsage, ImportRun  # noqa: F401
+
+    do_analyze = args.analyze or not (args.vacuum or args.reindex_vectors)
+    engine = get_engine()
+    inspector = sqlalchemy_inspect(engine)
+    existing = set(inspector.get_table_names())
+
+    static_tables = sorted(t for t in Base.metadata.tables if t in existing)
+
+    with engine.connect() as conn:
+        embedding_configs = conn.execute(text("SELECT short_name, dimension FROM embedding_configs")).fetchall()
+    embedding_tables = [
+        (get_embedding_table_name(short_name), dim)
+        for short_name, dim in embedding_configs
+        if get_embedding_table_name(short_name) in existing
+    ]
+    all_tables = static_tables + [t for t, _dim in embedding_tables]
+
+    if do_analyze:
+        print(f"Running ANALYZE on {len(all_tables)} table(s)...")
+        with engine.connect() as conn:
+            conn = conn.execution_options(isolation_level="AUTOCOMMIT")
+            for table in all_tables:
+                conn.execute(text(f'ANALYZE "{table}"'))
+        print("  done.")
+
+    if args.vacuum:
+        print(f"Running VACUUM on {len(all_tables)} table(s)...")
+        with engine.connect() as conn:
+            conn = conn.execution_options(isolation_level="AUTOCOMMIT")
+            for table in all_tables:
+                conn.execute(text(f'VACUUM "{table}"'))
+        print("  done.")
+
+    if args.reindex_vectors:
+        if not embedding_tables:
+            print("No embeddings_* tables found, nothing to reindex.")
+            return
+        print("Rebuilding IVFFlat indexes with a lists value sized to each table's row count...")
+        with engine.connect() as conn:
+            conn = conn.execution_options(isolation_level="AUTOCOMMIT")
+            # IVFFlat's build-time memory need grows with lists (and vector
+            # dimension); a properly-sized lists value for a large table
+            # routinely exceeds Postgres's default maintenance_work_mem
+            # (64MB) - confirmed against prod, 2026-09-20: lists=451 needed
+            # 75MB. This is session-scoped and doesn't require superuser,
+            # so just raise it for the duration of this connection rather
+            # than requiring a server-wide config change.
+            conn.execute(text(f"SET maintenance_work_mem = '{args.maintenance_work_mem}'"))
+            for table, _dim in embedding_tables:
+                count = conn.execute(text(f'SELECT COUNT(*) FROM "{table}"')).scalar()
+                if count == 0:
+                    print(f"  {table}: 0 rows, skipping")
+                    continue
+                # pgvector's own guidance: rows/1000 below 1M rows, sqrt(rows) above.
+                lists = max(int(count / 1000), 1) if count < 1_000_000 else int(count ** 0.5)
+                index_name = f"{table}_vector_idx"
+                print(f"  {table}: {count} rows -> lists={lists}")
+                conn.execute(text(f'DROP INDEX IF EXISTS "{index_name}"'))
+                conn.execute(text(f"""
+                    CREATE INDEX "{index_name}"
+                    ON "{table}"
+                    USING ivfflat (embedding vector_cosine_ops)
+                    WITH (lists = {lists})
+                """))
+        print("  done.")
+
+
 def cmd_filter_all(args):
     """Run the LLM privacy filter over all unclassified raw documents."""
     try:
@@ -1849,6 +1954,20 @@ def setup_commands(subparsers):
     db_kill_idle_parser = tools_subparsers.add_parser("db-kill-idle", help="Terminate PostgreSQL sessions idle in transaction")
     db_kill_idle_parser.add_argument("--yes", action="store_true", help="Skip confirmation prompt")
     db_kill_idle_parser.set_defaults(func=cmd_db_kill_idle)
+
+    db_maintain_parser = tools_subparsers.add_parser(
+        "db-maintain",
+        help="Post-bulk-load bookkeeping: ANALYZE, VACUUM, and/or rebuild pgvector indexes sized to current row counts",
+    )
+    db_maintain_parser.add_argument("--analyze", action="store_true", help="Refresh planner statistics (default if no flags given)")
+    db_maintain_parser.add_argument("--vacuum", action="store_true", help="Reclaim dead tuple space")
+    db_maintain_parser.add_argument("--reindex-vectors", action="store_true", help="Rebuild IVFFlat indexes with lists sized to each table's row count")
+    db_maintain_parser.add_argument(
+        "--maintenance-work-mem", default="512MB",
+        help="Session-level maintenance_work_mem for index builds (default: 512MB; a properly-sized IVFFlat index "
+             "routinely needs more than Postgres's own 64MB default)",
+    )
+    db_maintain_parser.set_defaults(func=cmd_db_maintain)
 
     # Extract-all command (for graph relations)
     extract_all_parser = tools_subparsers.add_parser(

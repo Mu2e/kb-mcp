@@ -85,6 +85,13 @@ def get_database_config() -> dict:
             * `user` (str): Database user (Env: `DB_USER`).
             * `password` (str): Database password (Env: `DB_PASSWORD`).
             * `schema` (str): Database schema (Env: `DB_SCHEMA`, default: 'public').
+            * `hostaddr` (str): Actual TCP target when tunneling to a Kerberos-
+              authenticated server (Env: `DB_HOSTADDR`, optional). libpq derives
+              the GSSAPI service-principal hostname from `host`, so connecting
+              through an SSH local-forward (host would otherwise have to be
+              "127.0.0.1"/"localhost") breaks Kerberos auth — set `host` to the
+              real server name and `hostaddr` to the tunnel's local endpoint to
+              keep both the TCP target and the Kerberos identity correct.
             * `sqlite_path` (str): Path to SQLite DB (Env: `SQLITE_DB_PATH`, default: 'data/kb.db').
     """
     return {
@@ -94,6 +101,7 @@ def get_database_config() -> dict:
         'user': os.getenv("DB_USER"),
         'password': os.getenv("DB_PASSWORD"),
         'schema': _get_str("DB_SCHEMA", "public"),
+        'hostaddr': os.getenv("DB_HOSTADDR"),
         'sqlite_path': _get_str("SQLITE_DB_PATH", "data/kb.db"),
     }
 

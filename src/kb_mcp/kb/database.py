@@ -33,9 +33,18 @@ def get_database_url() -> str:
     # Check for PostgreSQL components
     if db_config['user'] and db_config['name']:
         if db_config['password']:
-            return f"postgresql://{db_config['user']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/{db_config['name']}"
+            url = f"postgresql://{db_config['user']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/{db_config['name']}"
         else:
-            return f"postgresql://{db_config['user']}@{db_config['host']}:{db_config['port']}/{db_config['name']}"
+            url = f"postgresql://{db_config['user']}@{db_config['host']}:{db_config['port']}/{db_config['name']}"
+        # hostaddr: see get_database_config()'s docstring — needed when
+        # tunneling to a Kerberos-authenticated server, since libpq derives
+        # the GSSAPI service-principal hostname from `host`, not the actual
+        # TCP target. A libpq connection URI accepts arbitrary keyword=value
+        # query params, so this works for both psycopg2.connect(url) and
+        # SQLAlchemy's create_engine(url).
+        if db_config.get('hostaddr'):
+            url += f"?hostaddr={db_config['hostaddr']}"
+        return url
 
 
     # Default to SQLite for development
