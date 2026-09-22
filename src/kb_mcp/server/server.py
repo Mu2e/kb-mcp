@@ -1,14 +1,14 @@
 """MCP server application with OAuth and HTTPS using FastMCP."""
 
-from dotenv import load_dotenv
 from pathlib import Path
 
-# Load environment variables early
-# Find project root (where .env file is located)
-# Go up from src/kb_mcp/server/server.py to project root
-project_root = Path(__file__).parent.parent.parent.parent
-env_path = project_root / ".env"
-load_dotenv(env_path)
+# Load environment variables early -- this MUST stay above the kb_mcp.config
+# import below, because config reads os.environ at import time (see
+# _server_config further down). Resolution order and the --env-file/KB_ENV_FILE
+# flags are documented in kb_mcp.env.
+from ..env import load_env, env_file_from_argv
+
+load_env(env_file_from_argv())
 
 import contextlib
 import logging
@@ -325,6 +325,16 @@ def main():
         action="store_true",
         help="Run only the web UI (no MCP endpoint).",
     )
+    parser.add_argument(
+        "--env-file",
+        metavar="PATH",
+        help=(
+            "Env file to load before reading configuration. Already applied by "
+            "the time this parser runs (it is resolved at import time); "
+            "declared here so it appears in --help and is validated. "
+            "KB_ENV_FILE is the equivalent for systemd units, which have no argv."
+        ),
+    )
     parser.add_argument("--host", help="Override the MCP bind address (MCP_HOST).")
     parser.add_argument("--port", type=int, help="Override the MCP port (PORT).")
     parser.add_argument("--web-host", help="Override the web UI bind address (WEB_HOST).")
@@ -333,6 +343,13 @@ def main():
 
     run_mcp = not args.only_web
     run_web = not args.only_mcp
+
+    # Loaded at import time; log it so a deployment reading the wrong file (or
+    # none at all) is obvious from the first line of the journal.
+    from ..env import resolve_env_file
+
+    _resolved = resolve_env_file(args.env_file)
+    logger.info("Configuration env file: %s", _resolved or "<none found>")
 
     mcp_host = args.host or MCP_HOST
     mcp_port = args.port or PORT

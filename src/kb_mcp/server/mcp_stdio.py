@@ -7,13 +7,12 @@ Or CLI:
     kb-server-stdio
 """
 
-from dotenv import load_dotenv
-from pathlib import Path
+# Load environment variables early, before anything imports kb_mcp.config
+# (which reads os.environ at import time). See kb_mcp.env for the resolution
+# order; --env-file works here too, and KB_ENV_FILE is the no-argv equivalent.
+from ..env import load_env, env_file_from_argv
 
-# Load environment variables early
-project_root = Path(__file__).parent.parent.parent.parent
-env_path = project_root / ".env"
-load_dotenv(env_path)
+load_env(env_file_from_argv())
 
 import logging
 from mcp.server.mcpserver import MCPServer
