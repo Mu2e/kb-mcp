@@ -15,6 +15,7 @@ from ..config import (
     get_api_keys_file,
     get_mikey_keys_file,
 )
+from ..secure_file import ensure_private_dir, harden_file, write_private_json
 
 logger = logging.getLogger(__name__)
 
@@ -33,9 +34,11 @@ class SessionStore:
 
         # File storage setup - path determined from collection name
         # Use DATA_DIR env var if set (e.g., /data for Cloud Storage mount), otherwise "data/"
-        data_dir = get_data_dir()
+        data_dir = ensure_private_dir(get_data_dir())
         self.persistence_file = Path(data_dir) / f"{collection_name}.json"
-        self.persistence_file.parent.mkdir(parents=True, exist_ok=True)
+        # Repair a store written by an older release, which used the process
+        # umask and so left live session tokens world-readable.
+        harden_file(self.persistence_file)
 
         # For disk storage: in-memory cache (loaded at startup)
         # For Firestore: not used (direct Firestore queries)
@@ -84,8 +87,9 @@ class SessionStore:
         The default=str is kept as a fallback for any edge cases.
         """
         try:
-            with open(self.persistence_file, "w") as f:
-                json.dump(data, f, indent=2, default=str)
+            # Session records are bearer credentials, so this goes through the
+            # same owner-only atomic write as the API keys file.
+            write_private_json(self.persistence_file, data, indent=2, default=str)
             logger.debug(f"Saved data to {self.persistence_file}")
         except Exception as e:
             logger.error(f"Error saving to {self.persistence_file}: {e}")

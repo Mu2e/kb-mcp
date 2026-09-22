@@ -164,7 +164,11 @@ case "$data_dir" in
   /*) : ;;
   *) echo "ERROR: --data-dir must be an absolute path (got: $data_dir)" >&2; exit 1 ;;
 esac
+# 0700: this directory holds api_keys.json and the session stores, which are
+# bearer credentials, plus copies of every ingested source document. On a
+# shared filesystem the default 0755 would expose all of it.
 mkdir -p "$data_dir"
+chmod 700 "$data_dir"
 
 # Non-secret settings ship with the package; fall back to naming the file
 # even if this release predates it, so the error is explicit.

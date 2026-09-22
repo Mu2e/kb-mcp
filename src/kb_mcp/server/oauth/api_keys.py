@@ -6,6 +6,8 @@ import json
 import secrets
 from datetime import datetime
 from pathlib import Path
+
+from ...secure_file import ensure_private_dir, harden_file, write_private_json
 from typing import TypedDict
 
 
@@ -27,9 +29,13 @@ class ApiKeyManager:
             keys_file: Path to JSON file storing API keys
         """
         self.keys_file = Path(keys_file)
-        self.keys_file.parent.mkdir(parents=True, exist_ok=True)
+        ensure_private_dir(self.keys_file.parent)
         if not self.keys_file.exists():
-            self.keys_file.write_text("{}")
+            write_private_json(self.keys_file, {})
+        else:
+            # Repair a file created by an older release, which wrote with the
+            # process umask and so was typically world-readable.
+            harden_file(self.keys_file)
 
     def _load_keys(self) -> dict[str, ApiKeyInfo]:
         """Load API keys from file."""
@@ -37,9 +43,8 @@ class ApiKeyManager:
             return json.load(f)
 
     def _save_keys(self, keys: dict[str, ApiKeyInfo]) -> None:
-        """Save API keys to file."""
-        with open(self.keys_file, "w") as f:
-            json.dump(keys, f, indent=2)
+        """Save API keys to file, owner-readable only and atomically."""
+        write_private_json(self.keys_file, keys, indent=2)
 
     @staticmethod
     def _generate_key() -> str:

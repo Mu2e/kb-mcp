@@ -500,6 +500,29 @@ Linger must be enabled once per account so the service survives logout:
 loginctl enable-linger
 ```
 
+### File permissions
+
+`DATA_DIR` holds bearer credentials -- `api_keys.json` and the session stores
+-- alongside copies of every ingested source document, so on a shared
+filesystem it must not be readable by other accounts.
+
+`kb-mcp-install-unit.sh` creates it `0700`, and the code writes both
+credential files `0600` through an atomic temporary-file rename, so they are
+never briefly visible at a permissive mode. A file left `0644` by an older
+release is tightened on startup, with a warning naming it.
+
+Worth confirming once after the first start, since a directory created by hand
+beforehand keeps whatever mode it had:
+
+```bash
+stat -c '%A %U %n' <data-dir> <data-dir>/api_keys.json
+# drwx------ mu2eai ...
+# -rw------- mu2eai ...
+```
+
+The shared mikey keys file is owned and mode-600 by the same account; check it
+the same way if tokens are being managed there.
+
 ### Verify
 
 There is no `/status` route on this service -- that endpoint belongs to the
