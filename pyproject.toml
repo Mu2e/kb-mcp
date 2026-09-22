@@ -9,43 +9,77 @@ description = "Mu2e knowledge base and retrieval system with MCP interface"
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
-# Core dependencies - includes everything needed for server, KB, parsing, LLM, chunking, embedding, and imports
+# Core dependencies -- exactly what is needed to SERVE the knowledge base
+# (MCP endpoint + web UI + search/graph reads). Ingestion, parsing and local
+# embedding models are optional extras below, so a deployment that only serves
+# an already-populated KB does not pull torch, libmagic or the parser stack.
+#
+# Every entry here is imported by the serve path, either at import time or on
+# the first search; see the extras below for what was moved out.
 dependencies = [
     "python-dotenv>=1.0.0",
+    "anyio>=4.0.0",          # kb_mcp.config imports anyio.Path at module level
 
     # Server dependencies
     "mcp>=2.0.0", # 2.x makes the Host checking added in 1.23 disablable (TransportSecuritySettings), which is what kept us pinned below it.
     "uvicorn>=0.27.0",
+    "starlette>=0.37.0",     # imported directly in ~10 modules; do not rely on mcp pulling it
     "httpx>=0.27.0",
 
     # KB dependencies (database)
     "sqlalchemy>=2.0.0",
     "psycopg2-binary>=2.9.0",
+    "pgvector>=0.2.0",  # PostgreSQL vector extension support
 
-    # Parser dependencies
-    "PyPDF2>=3.0.0",
-    "python-docx>=1.1.0",
-    "beautifulsoup4>=4.12.0",
-    "python-magic>=0.4.27",
-    "python-pptx>=0.6.0",
-    "openpyxl>=3.1.0",
-    "pillow>=10.0.0",
-
-    # LLM dependencies
+    # LLM dependencies (agent tools, OpenAI-compatible embedding provider)
     "openai>=1.0.0",
 
     # Chunking dependencies
     "tiktoken>=0.5.0",
 
-    # Plotting dependencies
-    "matplotlib>=3.7.0",
-
-    # Embedding dependencies
-    "sentence-transformers>=2.2.0",
-    "pgvector>=0.2.0",  # PostgreSQL vector extension support
+    # Search/graph runtime -- numpy backs the in-Python cosine-similarity
+    # fallback in kb.search.search_fallback, tqdm is imported at module level
+    # by kb.graph.extraction. Both used to arrive transitively via
+    # sentence-transformers; they are direct dependencies, so declare them.
+    "numpy>=1.24.0",
+    "tqdm>=4.65.0",
 ]
 
 [project.optional-dependencies]
+# Document ingestion: parsing, format handling and external importers.
+# Needed by `kb-import`, `kb-parse` and `kb tools ingest` -- NOT by the servers.
+# python-magic additionally needs the libmagic system library.
+ingest = [
+    "PyPDF2>=3.0.0",
+    "python-docx>=1.1.0",
+    "python-pptx>=0.6.0",
+    "openpyxl>=3.1.0",
+    "pillow>=10.0.0",
+    "python-magic>=0.4.27",
+    "beautifulsoup4>=4.12.0",
+    "requests>=2.31.0",
+]
+
+# Local embedding models via sentence-transformers (pulls torch, multi-GB).
+# Required whenever the embeddings being queried were generated with the
+# `st` provider -- which is the default (EMBEDDING_PROVIDER, DEFAULT_PROVIDER
+# = "st", BAAI/bge-small-en-v1.5). A deployment can skip this ONLY if the
+# indexed embeddings come from an OpenAI-compatible endpoint, because the
+# query must be embedded in the same vector space as the stored chunks.
+local-embed = [
+    "sentence-transformers>=2.2.0",
+]
+
+# Plotting for the scripts under analysis/ (not imported by the package).
+analysis = [
+    "matplotlib>=3.7.0",
+]
+
+# Everything needed to both serve and ingest with local embeddings.
+all = [
+    "kb-mcp[ingest,local-embed]",
+]
+
 # Google Cloud Platform integration (Firestore for session storage)
 gcp = [
     "google-cloud-firestore>=2.14.0",
@@ -108,4 +142,4 @@ kb-parse = "kb_mcp.parser.cli:main"
 kb-agent = "kb_mcp.agents.cli:main"
 
 [project.urls]
-Repository = "https://github.com/corrodis/kb-mcp"
+Repository = "https://github.com/Mu2e/kb-mcp"

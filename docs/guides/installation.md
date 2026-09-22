@@ -23,14 +23,48 @@ source .venv/bin/activate  # On Windows: .venv\Scripts\activate
 
 ### Install Core Dependencies
 
+The core install contains exactly what is needed to **serve** an existing
+knowledge base -- the MCP endpoint, the web UI, and search/graph reads:
+
 ```bash
-# Install all core dependencies
+# Serve-only install (~150 MB, no torch, no parser stack)
 pip install -e .
 ```
+
+### Ingestion and embedding extras
+
+Adding documents to the knowledge base, and generating embeddings locally,
+are optional extras. Most developers working on the full pipeline want both:
+
+```bash
+# Everything: serving + ingestion + local embedding models
+pip install -e ".[all]"
+```
+
+Individually:
+
+```bash
+# Parsing and importing documents (kb-import, kb-parse, kb tools ingest).
+# Note: python-magic also needs the libmagic system library.
+pip install -e ".[ingest]"
+
+# Local embedding models via sentence-transformers (pulls torch, multi-GB)
+pip install -e ".[local-embed]"
+```
+
+**`local-embed` is required whenever the embeddings you are querying were
+generated with the `st` provider** -- which is the default
+(`EMBEDDING_PROVIDER`, `BAAI/bge-small-en-v1.5`). A query has to be embedded
+in the same vector space as the stored chunks, so a serve-only deployment can
+skip it *only* if the index was built through an OpenAI-compatible embedding
+endpoint.
 
 ### Optional Dependencies
 
 ```bash
+# Plotting for the scripts under analysis/
+pip install -e ".[analysis]"
+
 # Add Google Cloud Platform support (for Firestore session storage)
 pip install -e ".[gcp]"
 
