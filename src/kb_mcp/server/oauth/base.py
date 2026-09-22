@@ -62,7 +62,15 @@ class BaseOAuthProvider(
 
         if not self._is_oauth_enabled:
             logger.info("OAuth credentials not provided - operating in API-key-only mode")
-            logger.info("To enable OAuth, set {self.provider_name.upper()}_CLIENT_ID and {self.provider_name.upper()}_CLIENT_SECRET")
+            # Name the providers explicitly rather than deriving them from
+            # provider_name: this branch runs when no provider is configured,
+            # and in that state provider_name is "api-key" (see the property
+            # below), which would advertise an API-KEY_CLIENT_ID variable that
+            # does not exist. Wording matches config.py's conflict message.
+            logger.info(
+                "To enable OAuth, set GITHUB_CLIENT_ID/GITHUB_CLIENT_SECRET or "
+                "GLOBUS_CLIENT_ID/GLOBUS_CLIENT_SECRET (configure exactly one provider)"
+            )
 
         # API key authentication - always enabled
         api_keys_file = get_api_keys_file()
