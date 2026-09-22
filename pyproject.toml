@@ -12,13 +12,26 @@ description = "Mu2e knowledge base and retrieval system with MCP interface"
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
-# Core dependencies -- exactly what is needed to SERVE the knowledge base
-# (MCP endpoint + web UI + search/graph reads). Ingestion, parsing and local
-# embedding models are optional extras below, so a deployment that only serves
-# an already-populated KB does not pull torch, libmagic or the parser stack.
+# Core dependencies -- everything needed to SERVE the knowledge base with the
+# default configuration: the MCP endpoint, the web UI, search/graph reads, and
+# embedding the query itself.
 #
-# Every entry here is imported by the serve path, either at import time or on
-# the first search; see the extras below for what was moved out.
+# sentence-transformers is core rather than an extra because the default
+# embedding provider IS sentence-transformers (EMBEDDING_PROVIDER defaults to
+# "st", BAAI/bge-small-en-v1.5 -- see kb.embedding.utils.DEFAULT_PROVIDER). A
+# plain install that could not run its own default configuration would fail on
+# the first search, so the install and the defaults have to agree.
+#
+# NOTE: on Linux this resolves torch to the CUDA build from PyPI, which is
+# several GB. Embedding one query at a time is CPU work, so deployments should
+# install the +cpu wheel first:
+#     pip install --index-url https://download.pytorch.org/whl/cpu torch
+#     pip install kb-mcp
+# scripts/deploy-mu2e.sh does exactly this.
+#
+# Parsing and importing documents are a separate activity from serving and stay
+# in the [ingest] extra -- the serve path never imports kb_mcp.parser or
+# kb_mcp.imports, and [ingest] is what needs the libmagic system library.
 dependencies = [
     "python-dotenv>=1.0.0",
     "anyio>=4.0.0",          # kb_mcp.config imports anyio.Path at module level
@@ -46,6 +59,9 @@ dependencies = [
     # sentence-transformers; they are direct dependencies, so declare them.
     "numpy>=1.24.0",
     "tqdm>=4.65.0",
+
+    # Embedding: the default provider. See the note above about torch's size.
+    "sentence-transformers>=2.2.0",
 ]
 
 [project.optional-dependencies]
@@ -63,24 +79,14 @@ ingest = [
     "requests>=2.31.0",
 ]
 
-# Local embedding models via sentence-transformers (pulls torch, multi-GB).
-# Required whenever the embeddings being queried were generated with the
-# `st` provider -- which is the default (EMBEDDING_PROVIDER, DEFAULT_PROVIDER
-# = "st", BAAI/bge-small-en-v1.5). A deployment can skip this ONLY if the
-# indexed embeddings come from an OpenAI-compatible endpoint, because the
-# query must be embedded in the same vector space as the stored chunks.
-local-embed = [
-    "sentence-transformers>=2.2.0",
-]
-
 # Plotting for the scripts under analysis/ (not imported by the package).
 analysis = [
     "matplotlib>=3.7.0",
 ]
 
-# Everything needed to both serve and ingest with local embeddings.
+# Everything needed to both serve and ingest.
 all = [
-    "kb-mcp[ingest,local-embed]",
+    "kb-mcp[ingest]",
 ]
 
 # Google Cloud Platform integration (Firestore for session storage)

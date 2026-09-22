@@ -9,12 +9,12 @@ from kb_mcp.kb.db_models import Base
 # Some chunking tests need the embedding model's real token window, which is
 # only knowable with a loadable sentence-transformers model: without one the
 # code falls back to a 256-token window and produces a different (valid but
-# different) chunking. CI installs no torch on purpose -- the whole point of
-# the serve-only core -- so those tests skip there and run wherever the
-# [local-embed] extra is present.
+# different) chunking. sentence-transformers is a core dependency, so these
+# normally run; the guard is for environments deliberately built without it
+# (e.g. a --no-deps install).
 requires_embedder = pytest.mark.skipif(
     importlib.util.find_spec("sentence_transformers") is None,
-    reason="needs sentence-transformers (install the kb-mcp[local-embed] extra)",
+    reason="needs sentence-transformers (a core dependency; install is incomplete)",
 )
 
 # Default to SQLite file for easier testing and sharing across sessions

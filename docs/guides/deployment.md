@@ -368,15 +368,19 @@ mu2einit && slc uv
 ```
 
 This creates `<deploy-root>/releases/<ref>/.venv`, points
-`<deploy-root>/current` at it, and installs `kb-mcp[local-embed]` from the
-pinned ref. No source tree is copied -- `uv` fetches the ref itself, so a
-checkout is only needed for this one script.
+`<deploy-root>/current` at it, and installs `kb-mcp` from the pinned ref. No
+source tree is copied -- `uv` fetches the ref itself, so a checkout is only
+needed for this one script.
 
-CPU-only torch is installed first, on purpose: `sentence-transformers` would
-otherwise resolve torch to the CUDA build from PyPI, which is several GB and
-useless here (embedding one query at a time is CPU work). Expect roughly
-1.3 GB per release with `local-embed`, or ~165 MB without it, so prune old
-releases rather than letting them accumulate.
+CPU-only torch is installed first, on purpose. `sentence-transformers` is a
+core dependency (it is the default embedding provider), and its torch
+dependency would otherwise resolve to the CUDA build from PyPI -- several GB,
+and useless here, since embedding one query at a time is CPU work. Expect
+roughly 1.3 GB per release, so prune old releases rather than letting them
+accumulate.
+
+Pass `KB_MCP_EXTRAS=ingest` if this host should also run ingestion; a
+query-only server does not need the parser stack.
 
 ### Configure
 

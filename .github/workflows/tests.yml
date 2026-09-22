@@ -32,16 +32,26 @@ jobs:
       - name: Create environment
         run: uv venv --python ${{ matrix.python-version }}
 
+      # The embedding model's weights (~130 MB) are downloaded on first use.
+      # Cache them so the chunking tests that need a real token window run
+      # without re-fetching from the Hub on every job.
+      - name: Cache Hugging Face model weights
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-${{ runner.os }}-bge-small-en-v1.5
+
+      - name: Install CPU-only torch
+        # sentence-transformers is a core dependency (it is the default
+        # embedding provider), and on Linux torch resolves to the CUDA build
+        # from PyPI -- several GB of NVIDIA wheels that CI has no use for.
+        # Installing the +cpu build first leaves torch already satisfied.
+        run: uv pip install --index-url https://download.pytorch.org/whl/cpu torch
+
       - name: Install kb_mcp and unit-test dependencies
-        # A plain install is enough now that the core dependencies are
-        # serve-only: sentence-transformers, torch and the CUDA wheels moved
-        # to the [local-embed] extra, and the parser stack to [ingest]. This
-        # replaces the hand-maintained requirements-unit-tests.txt, which
-        # existed solely to keep those multi-GB wheels out of CI.
-        #
-        # [ingest] is needed because tests/unit exercises the parsers. The
-        # four tests that need a real embedding model are marked
-        # requires_embedder (tests/conftest.py) and skip here.
+        # Replaces the hand-maintained requirements-unit-tests.txt: the extras
+        # in pyproject now describe this, so the two cannot drift. [ingest] is
+        # needed because tests/unit exercises the parsers.
         run: uv pip install -e ".[ingest,test]"
 
       - name: Run unit tests

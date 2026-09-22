@@ -23,41 +23,45 @@ source .venv/bin/activate  # On Windows: .venv\Scripts\activate
 
 ### Install Core Dependencies
 
-The core install contains exactly what is needed to **serve** an existing
-knowledge base -- the MCP endpoint, the web UI, and search/graph reads:
+The core install contains everything needed to **serve** a knowledge base
+with the default configuration -- the MCP endpoint, the web UI, search/graph
+reads, and embedding the query:
 
 ```bash
-# Serve-only install (~150 MB, no torch, no parser stack)
 pip install -e .
 ```
 
-### Ingestion and embedding extras
+This includes `sentence-transformers`, because the default embedding provider
+is `st` (`BAAI/bge-small-en-v1.5`). A query has to be embedded in the same
+vector space as the stored chunks, so the default install has to be able to
+run the default configuration.
 
-Adding documents to the knowledge base, and generating embeddings locally,
-are optional extras. Most developers working on the full pipeline want both:
+!!! note "Install CPU-only torch first on a server"
+    On Linux, `sentence-transformers` resolves `torch` to the CUDA build from
+    PyPI -- several GB of NVIDIA wheels. Embedding one query at a time is CPU
+    work, so for any deployment (and most laptops) install the `+cpu` wheel
+    first and the rest follows:
+
+    ```bash
+    pip install --index-url https://download.pytorch.org/whl/cpu torch
+    pip install -e .
+    ```
+
+    That brings a full environment to roughly 1.3 GB instead of several GB.
+    `scripts/deploy-mu2e.sh` does this automatically.
+
+### Ingestion extra
+
+Adding documents to the knowledge base -- `kb-import`, `kb-parse`,
+`kb tools ingest` -- needs the parser stack, which serving never imports:
 
 ```bash
-# Everything: serving + ingestion + local embedding models
-pip install -e ".[all]"
+pip install -e ".[ingest]"      # or ".[all]", which is the same plus nothing else
 ```
 
-Individually:
-
-```bash
-# Parsing and importing documents (kb-import, kb-parse, kb tools ingest).
-# Note: python-magic also needs the libmagic system library.
-pip install -e ".[ingest]"
-
-# Local embedding models via sentence-transformers (pulls torch, multi-GB)
-pip install -e ".[local-embed]"
-```
-
-**`local-embed` is required whenever the embeddings you are querying were
-generated with the `st` provider** -- which is the default
-(`EMBEDDING_PROVIDER`, `BAAI/bge-small-en-v1.5`). A query has to be embedded
-in the same vector space as the stored chunks, so a serve-only deployment can
-skip it *only* if the index was built through an OpenAI-compatible embedding
-endpoint.
+`python-magic` in this extra also needs the `libmagic` system library. A
+server that only answers queries against an already-populated knowledge base
+does not need any of it.
 
 ### Optional Dependencies
 

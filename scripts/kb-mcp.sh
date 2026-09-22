@@ -85,13 +85,14 @@ provider = emb.get("provider")
 print(f"ok    embedding provider: {provider} (model: {emb.get('model') or 'default'})")
 
 # The query must be embedded in the same vector space as the stored chunks, so
-# a missing local-embed extra is a hard failure at first search, not a warning.
+# a missing sentence-transformers is a hard failure at first search, not a
+# warning. It is a core dependency, so this only trips on a broken install.
 if provider in ("st", "sentence-transformers", "sentence_transformers"):
     try:
         import sentence_transformers  # noqa: F401
     except ImportError:
         print("FAIL  provider needs sentence-transformers, which is not installed.")
-        print("      Reinstall with the [local-embed] extra.")
+        print("      It is a core dependency -- the install is incomplete.")
         failed = True
     else:
         print(f"ok    sentence-transformers present")
