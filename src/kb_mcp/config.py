@@ -24,6 +24,20 @@ local_env_path = Path(env_path).with_name(".env.local") if env_path else None
 if local_env_path:
     load_dotenv(dotenv_path=local_env_path, override=True)
 
+# KB_ENV_FILE names an explicit configuration file and wins over everything
+# above. Loading it here rather than only in the server entry points means
+# every CLI (kb, kb-import, kb-parse, kb-agent) honours it too -- otherwise
+# running `kb` on a deployment host would silently ignore the deployed
+# configuration and fall back to the default SQLite path.
+#
+# It is also what makes the deployed service safe from a stray .env: the
+# load_dotenv(override=True) above would otherwise beat the settings the
+# systemd unit supplies. Loading KB_ENV_FILE afterwards restores the intended
+# precedence.
+_kb_env_file = os.environ.get("KB_ENV_FILE")
+if _kb_env_file:
+    load_dotenv(dotenv_path=_kb_env_file, override=True)
+
 
 def get_env_local_path() -> Optional[str]:
     """Path to the user-specific `.env.local` override file, if resolvable."""

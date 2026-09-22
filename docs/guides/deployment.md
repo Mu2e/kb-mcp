@@ -390,7 +390,7 @@ Configuration is split across three places, deliberately:
 |---|---|---|
 | `deploy/mu2e.env` (in git, shipped to `<release>/.venv/share/kb-mcp/mu2e.env`) | host-independent policy: ports, bind addresses, auth mode, embedding provider, log levels | commit + new release |
 | the systemd unit | deployment paths: `DATA_DIR`, `HF_HOME`, `MIKEY_KEYS_FILE` | re-running `kb-mcp-install-unit.sh` |
-| `KB_ENV_FILE` (mode 600, outside git) | secrets only | editing that file |
+| `KB_ENV_FILE` (mode 600, outside git) | secrets **and site topology** -- database host/name/user, LLM endpoint | editing that file |
 
 They load in that order and `kb_mcp.env` reads `KB_ENV_FILE` last with
 `override=True`, so a secret always beats a default. Nothing in the running
@@ -405,9 +405,11 @@ arrangement the `memory` MCP server uses. If you connect through a tunnel, set
 `DB_HOSTADDR` too: libpq derives the GSSAPI principal from `DB_HOST`, not from
 the TCP target.
 
-That leaves `OPENAI_API_KEY` and `ADMIN_PASSWORD` as the only secrets. Create
-the file **as the service account** -- a mode-600 file owned by anyone else is
-one the service cannot read:
+The database coordinates and the LLM endpoint are *not* secrets, but they do
+describe internal infrastructure, and this repository is public -- so they live
+in this file rather than in `deploy/mu2e.env`. Create it **as the service
+account**; a mode-600 file owned by anyone else is one the service cannot
+read:
 
 ```bash
 f=/exp/mu2e/app/users/mu2eai/mcp/kb/config/kb-mcp.env
@@ -419,6 +421,33 @@ that is mode 600 *from the moment it exists*, rather than `touch` + `chmod`,
 which leaves it world-readable under a 022 umask until the chmod lands. The
 `[ -e ]` guard matters because `install` truncates an existing file -- without
 it, re-running this step wipes the credentials.
+
+Then fill it in -- these keys and no others; everything else has a value in
+`deploy/mu2e.env` already:
+
+```bash
+# Database. No DB_PASSWORD: Kerberos/GSSAPI supplies the credential.
+DB_HOST=
+DB_PORT=
+DB_NAME=
+DB_USER=
+DB_SCHEMA=public
+# DB_HOSTADDR=          # only when connecting through a tunnel
+
+# LLM endpoint
+OPENAI_BASE_URL=
+OPENAI_API_KEY=
+
+# Web UI write/admin pages (uploads, delete, re-chunk, key management).
+# Browsing and search stay open; the UI is loopback-only regardless.
+ADMIN_PASSWORD=
+```
+
+`EMBEDDING_MODEL` is set in `deploy/mu2e.env` and **must match what the
+indexed chunks were embedded with** -- the query is embedded at read time and
+compared in the same vector space, so a mismatch returns plausible-looking
+nonsense rather than an error. Check it against the `EmbeddingConfig` rows in
+the database before first start.
 
 Check the install before enabling anything. This reports the resolved env
 file, the bind target, the embedding provider, and whether the local embedder

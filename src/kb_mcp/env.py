@@ -85,6 +85,12 @@ def load_env(explicit: Optional[str] = None) -> Optional[Path]:
         return None
 
     load_dotenv(dotenv_path=str(env_file), override=True)
+
+    # Publish the resolved path so kb_mcp.config reloads it after its own
+    # dotenv handling (see the KB_ENV_FILE block there). Without this a
+    # --env-file passed on the command line would be silently overridden by
+    # a .env that config.py happens to find.
+    os.environ[ENV_FILE_VAR] = str(env_file)
     return env_file
 
 
