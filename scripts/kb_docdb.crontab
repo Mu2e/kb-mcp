@@ -1,0 +1,10 @@
+# kb-mcp: incremental Mu2e DocDB update, twice daily (06:00 and 18:00 local
+# America/Chicago). See scripts/cron_docdb_update.sh for what a run does; it
+# writes its own log under $KB_DATA_DIR/logs/ and flock-skips if the previous
+# run is still going. Installed on mu2egpvm02 only (crontab is per-node).
+SHELL=/bin/bash
+# uv lives on /exp (not the NAS home area) and is not on cron's default PATH.
+PATH=/exp/mu2e/data/users/scorrodi/kb-mcp-data/bin:/usr/local/bin:/usr/bin:/bin
+# Run output already goes to a log file; don't generate cron mail.
+MAILTO=""
+0 6,18 * * * /exp/mu2e/app/users/scorrodi/kb-mcp/scripts/cron_docdb_update.sh

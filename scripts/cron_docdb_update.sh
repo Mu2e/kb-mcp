@@ -123,12 +123,50 @@ stdbuf -oL -eL kb-import docdb --days "$DAYS" --skip-existing --delay 1 --max-em
 rc=$?
 end=$(date +%s)
 
+# 4. Failure detection.
+#
+# kb-import cannot report failure through its exit status: auto-summarize and
+# auto-embed catch their own exceptions and only log them (see the
+# `Error during auto-...` handlers in imports/base.py), after which
+# imports/cli.py sets `exit_code = 0` unconditionally. So a run whose database
+# is unreachable still exits 0 having imported nothing — observed for real on
+# the 2026-09-20 18:00 tick, which logged a failed DB check, errors from both
+# auto steps, "Successfully processed 0 document(s)", and exit code 0.
+#
+# With MAILTO="" in the crontab that failure mode is completely silent, so
+# until the CLI propagates failures itself, detect them here by scanning this
+# run's own log. Checked in severity order; a failed *database* check is fatal
+# because nothing can be stored without it, whereas the other connection
+# checks are informational (a dead ALCF endpoint only degrades image
+# descriptions, which the token-refresh step above already warns about).
+failure_reason=""
+if grep -qaE "ERROR - Error during auto-(summarize|embed)" "$LOG"; then
+    failure_reason="auto-summarize/auto-embed raised — see the traceback in the log"
+elif grep -qaE "^[[:space:]]*FAIL[[:space:]]+database" "$LOG"; then
+    failure_reason="database connection check failed"
+fi
+
+if [ -n "$failure_reason" ] && [ "$rc" -eq 0 ]; then
+    # Distinguish "the tool failed" (rc from kb-import) from "the tool claimed
+    # success but the log says otherwise" (rc 1 from here).
+    rc=1
+fi
+
 {
     echo "---"
     echo "finished  : $(date -Is)"
     echo "elapsed   : $(( (end-start)/60 )) min"
+    if [ -n "$failure_reason" ]; then
+        echo "FAILURE   : $failure_reason"
+    fi
     echo "exit code : $rc"
     tail -5 "$LOG"
 } >> "$LOG" 2>&1
+
+# Also on stderr: invisible under MAILTO="", but makes a manual run and any
+# future mail-enabled or wrapper-driven invocation say why it failed.
+if [ -n "$failure_reason" ]; then
+    echo "$(date -Is): docdb update FAILED — $failure_reason (log: $LOG)" >&2
+fi
 
 exit $rc
