@@ -131,17 +131,37 @@ source "$LOCAL_ENV_DIR/bin/activate"
 # Install (or top up) the project every time, not just on first creation:
 # a venv built before an extra was added here would otherwise stay stale, and
 # a missing parser backend fails silently — parse just returns empty text.
+#
+# ingest carries the parser stack and the importers' own dependencies (bs4 and
+# requests for DocDB, python-magic, PyPDF2, python-docx/pptx, openpyxl,
+# pillow). It is an extra rather than a core dependency because a server that
+# only answers queries never imports any of it — but this environment DOES:
+# `kb-import docdb` in cron_docdb_update.sh fails at import without it.
 # docling is the default parser for PDF/PPTX/DOCX/HTML, so it is not optional
 # in practice; test carries pytest so the suite runs without a second install.
 # alcf carries globus_sdk, which inference_auth_token.py imports: without it
 # the unattended ALCF token refresh in cron_docdb_update.sh dies with
 # ModuleNotFoundError and every image description silently degrades to
 # placeholder text.
+#
+# torch comes first and from the CPU index: sentence-transformers is a core
+# dependency (it is the default embedding provider), and on Linux its torch
+# would otherwise resolve to the CUDA build — several GB of NVIDIA wheels into
+# a venv that lives on local scratch, for work that is CPU-bound anyway. The
+# deployment installer does the same thing, so dev and production agree.
+echo "Installing CPU-only torch..."
+if ! uv pip install --index-url https://download.pytorch.org/whl/cpu torch; then
+    kb_setup_fail "installing CPU-only torch failed. Without it the next step
+  pulls the multi-GB CUDA build into $LOCAL_ENV_DIR."
+    return 1 2>/dev/null || exit 1
+fi
+
 echo "Installing project requirements from $SOURCE_CODE_DIR..."
-if ! uv pip install -e "$SOURCE_CODE_DIR[docling,test,alcf]"; then
+if ! uv pip install -e "$SOURCE_CODE_DIR[ingest,docling,test,alcf]"; then
     kb_setup_fail "uv pip install failed — the venv at $LOCAL_ENV_DIR may be
-  missing docling, and a missing parser backend fails silently at run time
-  (parse returns empty text). Fix the install before parsing anything."
+  missing ingest or docling. Without ingest, kb-import/kb-parse fail at import;
+  without docling a missing parser backend fails silently at run time (parse
+  returns empty text). Fix the install before parsing anything."
     return 1 2>/dev/null || exit 1
 fi
 
