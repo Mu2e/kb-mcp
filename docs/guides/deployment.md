@@ -426,20 +426,26 @@ Then fill it in -- these keys and no others; everything else has a value in
 `deploy/mu2e.env` already:
 
 ```bash
-# Database. No DB_PASSWORD: Kerberos/GSSAPI supplies the credential.
+# Database. No DB_PASSWORD: Kerberos/GSSAPI supplies the credential, which is
+# why DB_USER must be the service account's own principal -- copying a
+# developer's username here would authenticate as the wrong identity, or not
+# at all. That role needs to exist in Postgres with rights on DB_SCHEMA before
+# the service starts.
 DB_HOST=
 DB_PORT=
 DB_NAME=
-DB_USER=
-DB_SCHEMA=public
-# DB_HOSTADDR=          # only when connecting through a tunnel
+DB_USER=              # the service account, not a developer's username
+DB_SCHEMA=            # not necessarily "public" -- check the existing database
+# DB_HOSTADDR=        # only when connecting through a tunnel
 
 # LLM endpoint
 OPENAI_BASE_URL=
 OPENAI_API_KEY=
 
 # Web UI write/admin pages (uploads, delete, re-chunk, key management).
-# Browsing and search stay open; the UI is loopback-only regardless.
+# Browsing stays open in public mode, so this is what protects writes --
+# generate a fresh one for the deployment rather than reusing a personal
+# password.
 ADMIN_PASSWORD=
 ```
 
