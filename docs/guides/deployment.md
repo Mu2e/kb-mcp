@@ -385,11 +385,21 @@ query-only server does not need the parser stack.
 ### Configure
 
 Put database credentials, `OPENAI_BASE_URL`/`OPENAI_API_KEY` and auth settings
-in a file outside the release tree, mode 600, owned by the service account:
+in a file outside the release tree, mode 600, owned by the service account.
+
+Run this **as the service account** -- a mode-600 file owned by anyone else is
+one the service cannot read:
 
 ```bash
-install -m 600 /dev/null /exp/mu2e/app/home/mu2eai/mcp/config/kb-mcp.env
+f=/exp/mu2e/app/home/mu2eai/mcp/config/kb-mcp.env
+[ -e "$f" ] || install -D -m 600 /dev/null "$f"
 ```
+
+`install -D -m 600 /dev/null` creates the parent directories and an empty file
+that is mode 600 *from the moment it exists*, rather than `touch` + `chmod`,
+which leaves it world-readable under a 022 umask until the chmod lands. The
+`[ -e ]` guard matters because `install` truncates an existing file -- without
+it, re-running this step wipes the credentials.
 
 Check the install before enabling anything. This reports the resolved env
 file, the bind target, the embedding provider, and whether the local embedder
