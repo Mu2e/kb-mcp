@@ -141,5 +141,14 @@ kb-parse = "kb_mcp.parser.cli:main"
 # Agent module CLI commands
 kb-agent = "kb_mcp.agents.cli:main"
 
+# Ship the deployment launcher and unit installer into the venv's bin/, next
+# to the kb-server entry point. This is what lets the systemd ExecStart be a
+# single self-contained path and lets the unit be re-rendered later without a
+# checkout. Note that an editable install (pip install -e .) does NOT process
+# these, so they only appear in a real install -- which is what deployments use.
+[tool.hatch.build.targets.wheel.shared-scripts]
+"scripts/kb-mcp.sh" = "kb-mcp.sh"
+"scripts/kb-mcp-install-unit.sh" = "kb-mcp-install-unit.sh"
+
 [project.urls]
 Repository = "https://github.com/Mu2e/kb-mcp"

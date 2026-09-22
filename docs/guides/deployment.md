@@ -346,6 +346,108 @@ https://mcp.scorrodi.dev/oauth/callback
 
 **Note**: This single callback URL handles both MCP OAuth (for Claude Desktop, Cline) and admin web interface login. The server automatically routes based on the OAuth state parameter.
 
+## Mu2e Deployment (systemd --user)
+
+Deploys the MCP endpoint on a Mu2e interactive node as a persistent
+`systemd --user` service, following the pattern used by the other Mu2e MCP
+servers (see [Mu2e/aitools](https://github.com/Mu2e/aitools) `mcp/registry/README.md`).
+Unlike the Docker and Cloud Run deployments above there is no container: the
+package is installed straight from a pinned git ref into a versioned venv.
+
+Run everything as the account that will own the service (e.g. `mu2eai`), and
+get `uv` first:
+
+```bash
+mu2einit && slc uv
+```
+
+### Install
+
+```bash
+./scripts/deploy-mu2e.sh /exp/mu2e/app/home/mu2eai/mcp/deploy/kb v0.2.0
+```
+
+This creates `<deploy-root>/releases/<ref>/.venv`, points
+`<deploy-root>/current` at it, and installs `kb-mcp[local-embed]` from the
+pinned ref. No source tree is copied -- `uv` fetches the ref itself, so a
+checkout is only needed for this one script.
+
+CPU-only torch is installed first, on purpose: `sentence-transformers` would
+otherwise resolve torch to the CUDA build from PyPI, which is several GB and
+useless here (embedding one query at a time is CPU work). Expect roughly
+1.3 GB per release with `local-embed`, or ~165 MB without it, so prune old
+releases rather than letting them accumulate.
+
+### Configure
+
+Put database credentials, `OPENAI_BASE_URL`/`OPENAI_API_KEY` and auth settings
+in a file outside the release tree, mode 600, owned by the service account:
+
+```bash
+install -m 600 /dev/null /exp/mu2e/app/home/mu2eai/mcp/config/kb-mcp.env
+```
+
+Check the install before enabling anything. This reports the resolved env
+file, the bind target, the embedding provider, and whether the local embedder
+is actually installed:
+
+```bash
+<deploy-root>/current/.venv/bin/kb-mcp.sh --check \
+  --env-file /exp/mu2e/app/home/mu2eai/mcp/config/kb-mcp.env
+```
+
+### Enable the service
+
+```bash
+<deploy-root>/current/.venv/bin/kb-mcp-install-unit.sh \
+  --port 8008 \
+  --env-file /exp/mu2e/app/home/mu2eai/mcp/config/kb-mcp.env \
+  --hf-home  /exp/mu2e/app/home/mu2eai/mcp/cache/huggingface
+```
+
+This renders the unit into *this release's* `share/kb-mcp/kb-mcp.service` and
+registers it with `systemctl --user link`, so `~/.config` holds only a symlink
+and the unit content stays versioned with the code. `ExecStart` points at
+`<deploy-root>/current`, so rolling back is repointing that symlink and
+restarting -- no re-render.
+
+Set `--hf-home` to something persistent and shared across releases: the
+embedding model (`BAAI/bge-small-en-v1.5`, ~130 MB) downloads on first use,
+and without this every redeploy re-downloads it.
+
+Linger must be enabled once per account so the service survives logout:
+
+```bash
+loginctl enable-linger
+```
+
+### Verify
+
+There is no `/status` route on this service -- that endpoint belongs to the
+web UI, which `--only-mcp` does not start. Use the smoke test:
+
+```bash
+<deploy-root>/current/.venv/bin/python scripts/smoke_test_http.py \
+  http://127.0.0.1:8008 --query "tracker alignment"
+```
+
+`--query` matters: the server starts happily with an unreachable database,
+because the connection and the embedder are both resolved lazily on the first
+search. Note that `kb_search` reports a broken database as
+`{"message": "No results found", "results": []}` rather than as an error, so
+the smoke test treats an empty result as a failure (pass `--allow-empty` if
+the knowledge base really is empty).
+
+### Notes
+
+- Port 8008 by convention; Mu2e reserves 8000-8009 for MCP servers, and the
+  entry belongs in `mcp/registry/config/ports.json` in the aitools repo.
+- The web UI is not started. Run a second unit with `--only-web` bound to
+  loopback, reached over an ssh tunnel, if it is wanted.
+- `KB_ENV_FILE` rather than `EnvironmentFile=`: `kb_mcp.config` calls
+  `load_dotenv(override=True)`, so a stray `.env` found relative to the
+  working directory would otherwise silently beat the unit's settings.
+
 ## Storage Options
 
 ### File-based Storage (Default)

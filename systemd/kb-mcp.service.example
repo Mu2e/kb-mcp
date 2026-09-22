@@ -1,0 +1,57 @@
+# Reference template only. `kb-mcp-install-unit.sh` (installed into the venv's
+# bin/ alongside kb-server) renders a fully resolved copy -- with real paths
+# for your deploy -- into that release's own share/kb-mcp/kb-mcp.service and
+# registers it with `systemctl --user link`. Prefer that over hand-editing
+# this file; see `kb-mcp-install-unit.sh --help`.
+#
+# Manual alternative, if you really want it:
+#   mkdir -p ~/.config/systemd/user
+#   cp kb-mcp.service.example ~/.config/systemd/user/kb-mcp.service   # edit paths first
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now kb-mcp
+#
+# Requires linger enabled for this account so the service survives logout:
+#   loginctl enable-linger        # or: sudo loginctl enable-linger <account>
+
+[Unit]
+Description=kb-mcp (Mu2e knowledge base MCP server, Postgres-backed)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# KB_ENV_FILE names the authoritative configuration file: database
+# credentials, OPENAI_BASE_URL/OPENAI_API_KEY, auth settings.
+#
+# It is set here rather than using EnvironmentFile= because kb_mcp.config
+# calls load_dotenv(override=True): values from a .env file beat variables
+# already present in the environment. If the service resolved a stray .env
+# (find_dotenv walks up from the working directory), that file would silently
+# win over anything set with Environment=/EnvironmentFile=. Naming the file
+# explicitly pins which one is authoritative.
+#
+# The path itself is not a secret -- the file's permissions are the
+# protection. Keep it mode 600, owned by the service account.
+Environment=KB_ENV_FILE=__ENV_FILE__
+
+# Hugging Face cache for the local embedding model (BAAI/bge-small-en-v1.5,
+# ~130 MB, downloaded on first use). Point this somewhere persistent and
+# SHARED ACROSS RELEASES -- if it defaults under a release directory, every
+# redeploy re-downloads the weights and abandons the previous copy.
+Environment=HF_HOME=__HF_HOME__
+
+# Once the cache above is populated, uncommenting this makes a cold cache or
+# an unreachable Hub fail immediately instead of hanging at startup.
+#Environment=HF_HUB_OFFLINE=1
+
+# kb-mcp.sh is the setup hook and launcher; it execs `kb-server --only-mcp`,
+# so this unit serves the MCP endpoint only. Run a second unit with
+# --only-web bound to loopback if the web UI is wanted.
+ExecStart=__DEPLOY_ROOT__/current/.venv/bin/kb-mcp.sh --host=0.0.0.0 --port=8008
+
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
