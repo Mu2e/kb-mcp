@@ -17,6 +17,7 @@ load_env(env_file_from_argv())
 import logging
 from mcp.server.mcpserver import MCPServer
 
+from .. import __version__
 from . import mcp as mcp_tools
 from .mcp_prompts import get_server_instructions
 
@@ -30,7 +31,9 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Create MCPServer instance (no auth for stdio)
-mcp = MCPServer("kb-mcp-stdio", instructions=get_server_instructions())
+mcp = MCPServer(
+    "kb-mcp-stdio", instructions=get_server_instructions(), version=__version__
+)
 
 # Register tools and prompts (no resources for stdio - they need server context)
 mcp_tools.register_tools(mcp)

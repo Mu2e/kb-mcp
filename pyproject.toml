@@ -4,7 +4,10 @@ build-backend = "hatchling.build"
 
 [project]
 name = "kb-mcp"
-version = "0.2.0"
+# Single source of truth is kb_mcp.__version__ (see [tool.hatch.version]
+# below), so the version reported over MCP cannot drift from the released
+# artifact. Release: bump __version__, commit, then tag v<version>.
+dynamic = ["version"]
 description = "Mu2e knowledge base and retrieval system with MCP interface"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -146,6 +149,9 @@ kb-agent = "kb_mcp.agents.cli:main"
 # single self-contained path and lets the unit be re-rendered later without a
 # checkout. Note that an editable install (pip install -e .) does NOT process
 # these, so they only appear in a real install -- which is what deployments use.
+[tool.hatch.version]
+path = "src/kb_mcp/__init__.py"
+
 [tool.hatch.build.targets.wheel.shared-scripts]
 "scripts/kb-mcp.sh" = "kb-mcp.sh"
 "scripts/kb-mcp-install-unit.sh" = "kb-mcp-install-unit.sh"

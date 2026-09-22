@@ -20,6 +20,7 @@ from .oauth import GitHubOAuthProvider, GlobusOAuthProvider, BaseOAuthProvider
 from .web import html_templates
 from . import audit
 from . import mcp as mcp_tools
+from .. import __version__
 from ..config import get_server_config, get_github_oauth_config, get_globus_oauth_config, get_auth_config
 
 # Configure logging
@@ -103,6 +104,7 @@ from .mcp_prompts import get_server_instructions
 if MCP_REQUIRE_API_KEY:
     mcp = MCPServer(
         "kb-mcp",
+        version=__version__,
         instructions=get_server_instructions(),
         auth=AuthSettings(
             issuer_url=BASE_URL,
@@ -114,6 +116,7 @@ if MCP_REQUIRE_API_KEY:
 else:
     # Create MCPServer without OAuth if authentication is disabled
     mcp = MCPServer("kb-mcp",
+        version=__version__,
         instructions=get_server_instructions(),
         auth=None, # no auth needed if authentication is disabled
     )
