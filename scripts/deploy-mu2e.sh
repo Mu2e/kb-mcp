@@ -46,7 +46,7 @@ Environment overrides:
                       (only sensible if torch is already present)
 
 Examples:
-  ./scripts/deploy-mu2e.sh /exp/mu2e/app/home/mu2eai/mcp/deploy/kb v0.2.0
+  ./scripts/deploy-mu2e.sh /exp/mu2e/app/users/mu2eai/mcp/kb v0.2.0
   KB_MCP_EXTRAS=ingest ./scripts/deploy-mu2e.sh /path/to/deploy/kb main
 
 Notes:

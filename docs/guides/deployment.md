@@ -364,7 +364,7 @@ mu2einit && slc uv
 ### Install
 
 ```bash
-./scripts/deploy-mu2e.sh /exp/mu2e/app/home/mu2eai/mcp/deploy/kb v0.2.0
+./scripts/deploy-mu2e.sh /exp/mu2e/app/users/mu2eai/mcp/kb v0.2.0
 ```
 
 This creates `<deploy-root>/releases/<ref>/.venv`, points
@@ -384,14 +384,33 @@ query-only server does not need the parser stack.
 
 ### Configure
 
-Put database credentials, `OPENAI_BASE_URL`/`OPENAI_API_KEY` and auth settings
-in a file outside the release tree, mode 600, owned by the service account.
+Configuration is split across three places, deliberately:
 
-Run this **as the service account** -- a mode-600 file owned by anyone else is
+| where | holds | changed by |
+|---|---|---|
+| `deploy/mu2e.env` (in git, shipped to `<release>/.venv/share/kb-mcp/mu2e.env`) | host-independent policy: ports, bind addresses, auth mode, embedding provider, log levels | commit + new release |
+| the systemd unit | deployment paths: `DATA_DIR`, `HF_HOME`, `MIKEY_KEYS_FILE` | re-running `kb-mcp-install-unit.sh` |
+| `KB_ENV_FILE` (mode 600, outside git) | secrets only | editing that file |
+
+They load in that order and `kb_mcp.env` reads `KB_ENV_FILE` last with
+`override=True`, so a secret always beats a default. Nothing in the running
+service reads from a working checkout, where an edit would take effect with no
+review gate.
+
+**There is no database password.** The connection authenticates with
+Kerberos/GSSAPI from the service account's ambient credentials --
+`get_database_url()` builds a password-less URL when `DB_PASSWORD` is unset --
+so no database credential exists in any file or environment variable, the same
+arrangement the `memory` MCP server uses. If you connect through a tunnel, set
+`DB_HOSTADDR` too: libpq derives the GSSAPI principal from `DB_HOST`, not from
+the TCP target.
+
+That leaves `OPENAI_API_KEY` and `ADMIN_PASSWORD` as the only secrets. Create
+the file **as the service account** -- a mode-600 file owned by anyone else is
 one the service cannot read:
 
 ```bash
-f=/exp/mu2e/app/home/mu2eai/mcp/config/kb-mcp.env
+f=/exp/mu2e/app/users/mu2eai/mcp/kb/config/kb-mcp.env
 [ -e "$f" ] || install -D -m 600 /dev/null "$f"
 ```
 
@@ -407,7 +426,7 @@ is actually installed:
 
 ```bash
 <deploy-root>/current/.venv/bin/kb-mcp.sh --check \
-  --env-file /exp/mu2e/app/home/mu2eai/mcp/config/kb-mcp.env
+  --env-file /exp/mu2e/app/users/mu2eai/mcp/kb/config/kb-mcp.env
 ```
 
 ### Enable the service
@@ -415,9 +434,17 @@ is actually installed:
 ```bash
 <deploy-root>/current/.venv/bin/kb-mcp-install-unit.sh \
   --port 8008 \
-  --env-file /exp/mu2e/app/home/mu2eai/mcp/config/kb-mcp.env \
-  --hf-home  /exp/mu2e/app/home/mu2eai/mcp/cache/huggingface
+  --env-file   /exp/mu2e/app/users/mu2eai/mcp/kb/config/kb-mcp.env \
+  --hf-home    /exp/mu2e/app/users/mu2eai/mcp/kb/cache/huggingface \
+  --mikey-keys /exp/mu2e/app/users/mu2eai/mcp/kb/config/mikey-keys.json
 ```
+
+`--data-dir` defaults to `<deploy-root>/data` -- beside `releases/`, so the
+API keys and session stores survive a redeploy. It must be absolute, and the
+unit also pins `WorkingDirectory` to it: `DATA_DIR` otherwise defaults to the
+*relative* `"data"`, and a `systemd --user` service inherits the account's
+home as its working directory, so the service would quietly write its state
+into `~/data/` on the NAS home area.
 
 This renders the unit into *this release's* `share/kb-mcp/kb-mcp.service` and
 registers it with `systemctl --user link`, so `~/.config` holds only a symlink

@@ -158,6 +158,12 @@ kb-agent = "kb_mcp.agents.cli:main"
 [tool.hatch.version]
 path = "src/kb_mcp/__init__.py"
 
+# Non-secret deployment defaults, shipped into the venv as
+# share/kb-mcp/mu2e.env so the running service reads settings that are
+# versioned with the release rather than from a working checkout.
+[tool.hatch.build.targets.wheel.shared-data]
+"deploy/mu2e.env" = "share/kb-mcp/mu2e.env"
+
 [tool.hatch.build.targets.wheel.shared-scripts]
 "scripts/kb-mcp.sh" = "kb-mcp.sh"
 "scripts/kb-mcp-install-unit.sh" = "kb-mcp-install-unit.sh"

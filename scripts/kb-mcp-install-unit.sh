@@ -23,6 +23,15 @@ Options:
   --hf-home <path>    Persistent Hugging Face cache shared across releases.
                       Strongly recommended: without it each redeploy
                       re-downloads ~130 MB of model weights.
+  --data-dir <path>   Writable state: API keys, web/OAuth session stores.
+                      Defaults to <deploy-root>/data, i.e. beside releases/
+                      so it survives a redeploy. MUST be absolute -- see
+                      "Why DATA_DIR" below.
+  --mikey-keys <path> Shared mikey key file for bearer-token auth. Optional;
+                      without it mikey auth stays off.
+  --defaults <path>   Non-secret settings file, as systemd EnvironmentFile.
+                      Defaults to this release's own
+                      share/kb-mcp/mu2e.env (shipped with the package).
   --host <addr>       Bind address (default: 0.0.0.0).
   --deploy-root <p>   Deploy root holding releases/ and the `current` symlink.
                       Auto-detected from this script's location; override only
@@ -33,7 +42,16 @@ Options:
   --no-enable         Render and link, but do not enable/start.
   --dry-run           Print the unit that would be written, then exit.
 
-Why KB_ENV_FILE rather than EnvironmentFile=:
+Why DATA_DIR is set explicitly:
+  DATA_DIR defaults to the relative path "data", and a `systemd --user`
+  service inherits the user's HOME as its working directory (systemd.exec:
+  "the respective user's home directory if run as user"). Left alone, the
+  service would write api_keys.json and the session stores into
+  ~/data/ on the NAS home area -- silently, and on a filesystem that an
+  unattended service should not depend on. WorkingDirectory= is pinned for
+  the same reason.
+
+Why KB_ENV_FILE rather than EnvironmentFile= for secrets:
   kb_mcp.config calls load_dotenv(override=True), so values from a .env file
   beat variables already in the environment. If the service ever resolves a
   stray .env (find_dotenv walks up from the working directory), that file
@@ -47,8 +65,8 @@ Requires linger so the service survives logout (once per account, permanent):
 
 Example:
   kb-mcp-install-unit.sh --port 8008 \
-    --env-file /exp/mu2e/app/home/mu2eai/mcp/config/kb-mcp.env \
-    --hf-home  /exp/mu2e/app/home/mu2eai/mcp/cache/huggingface
+    --env-file /exp/mu2e/app/users/mu2eai/mcp/kb/config/kb-mcp.env \
+    --hf-home  /exp/mu2e/app/users/mu2eai/mcp/kb/cache/huggingface
 USAGE
   exit 2
 }
@@ -56,6 +74,9 @@ USAGE
 port=""
 env_file=""
 hf_home=""
+data_dir=""
+mikey_keys=""
+defaults_file=""
 host="0.0.0.0"
 deploy_root=""
 description="kb-mcp (Mu2e knowledge base MCP server, Postgres-backed)"
@@ -67,6 +88,9 @@ while [[ $# -gt 0 ]]; do
     --port)        port="${2:-}"; shift 2 ;;
     --env-file)    env_file="${2:-}"; shift 2 ;;
     --hf-home)     hf_home="${2:-}"; shift 2 ;;
+    --data-dir)    data_dir="${2:-}"; shift 2 ;;
+    --mikey-keys)  mikey_keys="${2:-}"; shift 2 ;;
+    --defaults)    defaults_file="${2:-}"; shift 2 ;;
     --host)        host="${2:-}"; shift 2 ;;
     --deploy-root) deploy_root="${2:-}"; shift 2 ;;
     --description) description="${2:-}"; shift 2 ;;
@@ -117,6 +141,38 @@ else
   echo "NOTE: no deploy-root layout detected; ExecStart pinned to this venv." >&2
 fi
 
+# Writable state lives beside releases/, not inside one, so a redeploy does
+# not strand the API keys and session stores in an old release directory.
+if [[ -z "$data_dir" ]]; then
+  if [[ -n "$deploy_root" ]]; then
+    data_dir="$deploy_root/data"
+  else
+    echo "ERROR: --data-dir is required when no deploy-root layout is detected." >&2
+    exit 1
+  fi
+fi
+case "$data_dir" in
+  /*) : ;;
+  *) echo "ERROR: --data-dir must be an absolute path (got: $data_dir)" >&2; exit 1 ;;
+esac
+mkdir -p "$data_dir"
+
+# Non-secret settings ship with the package; fall back to naming the file
+# even if this release predates it, so the error is explicit.
+if [[ -z "$defaults_file" ]]; then
+  defaults_file="$venv_dir/share/kb-mcp/mu2e.env"
+fi
+if [[ ! -f "$defaults_file" ]]; then
+  echo "ERROR: defaults file not found: $defaults_file" >&2
+  echo "       Pass --defaults, or install a release that ships it." >&2
+  exit 1
+fi
+
+if [[ -n "$mikey_keys" && ! -f "$mikey_keys" ]]; then
+  echo "ERROR: mikey keys file not found: $mikey_keys" >&2
+  exit 1
+fi
+
 # Resolve the env file now: being pointed at a file that does not exist is a
 # deployment failure that is much cheaper to catch here than in the journal.
 if [[ ! -f "$env_file" ]]; then
@@ -133,9 +189,20 @@ else
   hf_line="# Environment=HF_HOME=...   # NOT SET: each redeploy re-downloads model weights"
 fi
 
+if [[ -n "$mikey_keys" ]]; then
+  mikey_keys="$(cd "$(dirname "$mikey_keys")" && pwd -P)/$(basename "$mikey_keys")"
+  mikey_line="Environment=MIKEY_KEYS_FILE=$mikey_keys"
+else
+  mikey_line="# Environment=MIKEY_KEYS_FILE=...   # NOT SET: mikey token auth is off"
+fi
+
 share_dir="$venv_dir/share/kb-mcp"
 unit_path="$share_dir/kb-mcp.service"
 
+# NOTE: this heredoc is deliberately unquoted so the $variables below expand.
+# That also makes backticks and $(...) run as commands, so keep both out of
+# the unit text -- a backquoted `export KEY=VALUE` in a comment here silently
+# rendered as an empty string before this note existed.
 unit_content="$(cat <<UNIT
 # Generated by kb-mcp-install-unit.sh -- do not hand-edit.
 # Re-run that script to regenerate (safe to re-run at any time).
@@ -151,10 +218,24 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-# Names the authoritative configuration file. kb_mcp.config loads it with
+# Pinned so nothing resolves a relative path against the account's home
+# directory, which is what a systemd --user service would otherwise use.
+WorkingDirectory=$data_dir
+
+# Non-secret settings, versioned with this release. systemd parses this as
+# plain KEY=VALUE lines -- an "export " prefix will NOT work.
+EnvironmentFile=$defaults_file
+
+# Writable state: API keys and the web/OAuth session stores. DATA_DIR
+# defaults to the relative "data", which would land in the account's home.
+Environment=DATA_DIR=$data_dir
+
+# Names the authoritative secrets file. kb_mcp.config loads it with
 # override=True, so this must be set explicitly rather than relying on a .env
-# being found relative to the working directory.
+# being found relative to the working directory. It is loaded last, so a
+# secret beats any default from EnvironmentFile above.
 Environment=KB_ENV_FILE=$env_file
+$mikey_line
 $hf_line
 # Fail fast instead of hanging if the model cache is cold and the Hub is
 # unreachable. Comment out for the first start, which must populate the cache.
