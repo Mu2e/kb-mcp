@@ -599,11 +599,12 @@ def add_document(
     actual_file_path = file_path
     if copy_to_kb:
         from ...config import get_data_dir
+        from ...secure_file import ensure_private_dir
 
         # Create destination directory: data/sources/{source_id}/
         data_dir = Path(get_data_dir())
         dest_dir = data_dir / "sources" / source_id
-        dest_dir.mkdir(parents=True, exist_ok=True)
+        ensure_private_dir(dest_dir)
 
         # Create standardized filename: {source_id}-{doc_id}.{ext}
         # Sanitize doc_id so slashes don't create subdirectories

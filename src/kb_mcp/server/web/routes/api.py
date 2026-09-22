@@ -43,11 +43,11 @@ def parse_metadata_query_params(metadata_params):
 def setup_api_routes(app, session_manager: WebSessionManager):
     """Setup API routes for knowledge base operations."""
     from ....config import get_data_dir
+    from ....secure_file import ensure_private_dir
 
     # Get upload directory (needed for serving uploaded files)
     data_dir = get_data_dir()
-    upload_dir = Path(data_dir) / "uploads"
-    upload_dir.mkdir(parents=True, exist_ok=True)
+    upload_dir = ensure_private_dir(Path(data_dir) / "uploads")
 
     async def api_get(request: Request):
         """JSON API endpoint for getting documents with filters."""

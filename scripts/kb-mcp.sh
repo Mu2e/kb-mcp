@@ -7,14 +7,17 @@
 # ExecStart is a single self-contained line and any server-side environment
 # setup has one obvious place to live.
 #
-# It execs plain `kb-server`, which serves BOTH surfaces from one process: the
-# MCP endpoint on the network and the web UI on loopback, on separate ports.
+# It forwards everything to `kb-server`, so the systemd unit decides which
+# surface to run: kb-mcp.service passes --only-mcp, kb-web.service passes
+# --only-web. They are separate units so the web UI can be restarted, or can
+# fail, without dropping the MCP sessions agents are holding.
 #
-# They are deliberately not split into two units. Either surface instantiates
-# SessionStore("web_sessions") at import time, and SessionStore persists with a
-# plain open(path, "w") -- no lock, no atomic rename -- so two processes
-# sharing one DATA_DIR would race on the same JSON file. `kb-server` starting
-# both surfaces together is also its default behaviour.
+# Both units share one DATA_DIR, which is shared state rather than per-service
+# scratch: api_keys.json, the session stores, and copies of every ingested
+# document under sources/ and uploads/. That is safe because the credential
+# files are written through an atomic rename (see kb_mcp.secure_file), and
+# because the two surfaces touch different session stores -- a --only-mcp
+# process mounts no web routes, so it never writes web_sessions.json.
 #
 set -euo pipefail
 
@@ -37,7 +40,8 @@ Usage:
 
 Everything else is passed straight through to `kb-server`, e.g.:
 
-  kb-mcp.sh --port 8008 --web-port 8108 --env-file /path/to/kb-mcp.env
+  kb-mcp.sh --only-mcp --host 0.0.0.0 --port 8008
+  kb-mcp.sh --only-web --web-host 127.0.0.1 --web-port 8108
 USAGE
   exit 2
 }

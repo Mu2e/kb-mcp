@@ -477,12 +477,34 @@ tokens minted for the other servers silently fail here while operators
 maintain two stores. Check an existing unit for the exact path rather than
 guessing; it is mode 600 and owned by the service account.
 
-`--data-dir` defaults to `<deploy-root>/data` -- beside `releases/`, so the
-API keys and session stores survive a redeploy. It must be absolute, and the
-unit also pins `WorkingDirectory` to it: `DATA_DIR` otherwise defaults to the
-*relative* `"data"`, and a `systemd --user` service inherits the account's
+`--data-dir` is required and must be absolute. It belongs under
+`/exp/mu2e/data`, not beside the code in `/exp/mu2e/app`: it holds the API
+keys, the session stores, and copies of every ingested document. There is no
+default because it cannot be derived from the deploy root.
+
+The unit also pins `WorkingDirectory` to it. `DATA_DIR` otherwise defaults to
+the *relative* `"data"`, and a `systemd --user` service inherits the account's
 home as its working directory, so the service would quietly write its state
 into `~/data/` on the NAS home area.
+
+Run the installer **once per surface**, with the same `--data-dir`:
+
+```bash
+U=<deploy-root>/current/.venv/bin/kb-mcp-install-unit.sh
+D=/exp/mu2e/data/users/mu2eai/kb
+
+$U --surface mcp --data-dir "$D" --port 8008 \
+   --env-file   /exp/mu2e/app/users/mu2eai/mcp/kb/config/kb-mcp.env \
+   --hf-home    "$D/cache/huggingface" \
+   --mikey-keys <the shared mikey keys file>
+
+$U --surface web --data-dir "$D" --web-port 8108 \
+   --env-file   /exp/mu2e/app/users/mu2eai/mcp/kb/config/kb-mcp.env \
+   --hf-home    "$D/cache/huggingface"
+```
+
+That gives `kb-mcp.service` on `0.0.0.0:8008` and `kb-web.service` on
+`127.0.0.1:8108`.
 
 This renders the unit into *this release's* `share/kb-mcp/kb-mcp.service` and
 registers it with `systemctl --user link`, so `~/.config` holds only a symlink
@@ -544,18 +566,23 @@ the knowledge base really is empty).
 
 - Port 8008 by convention; Mu2e reserves 8000-8009 for MCP servers, and the
   entry belongs in `mcp/registry/config/ports.json` in the aitools repo.
-- Both surfaces run in **one** unit and one process: the MCP endpoint on
-  `0.0.0.0:8008` and the web UI on `127.0.0.1:8108` (8008 + 100, so the web
-  port is readable off the MCP port and stays outside the reserved
-  8000-8009 range). Reach the UI with
-  `ssh -L 8108:localhost:8108 <host>`.
+- The two surfaces run as **separate units**, `kb-mcp.service` on
+  `0.0.0.0:8008` and `kb-web.service` on `127.0.0.1:8108` (8008 + 100, so the
+  web port is readable off the MCP port and stays outside the reserved
+  8000-8009 range). Reach the UI with `ssh -L 8108:localhost:8108 <host>`.
 
-  They are not split into two units on purpose. Either surface instantiates
-  `SessionStore("web_sessions")` at import, and that store persists with a
-  plain `open(path, "w")` -- no lock, no atomic rename -- so two processes
-  sharing one `DATA_DIR` would race on the same file. Serving both from one
-  process is also `kb-server`'s default. The trade-off is that a failure in
-  one surface takes down the other.
+  Separate units so the web UI can be restarted, or can fail, without
+  dropping the MCP sessions agents are holding. The cost is memory: each
+  process loads its own copy of the embedding model, about 530 MB resident
+  once it has served a query (124 MB before that -- the model loads lazily).
+
+  They share one `DATA_DIR`, which is shared state rather than per-service
+  scratch: `api_keys.json`, the session stores, and every ingested document
+  under `sources/` and `uploads/`. Giving them separate data directories
+  would put web uploads where ingestion cannot see them. It is safe to share
+  because the credential files are written through an atomic rename, and
+  because the surfaces touch different session stores -- an `--only-mcp`
+  process mounts no web routes, so it never writes `web_sessions.json`.
 - `KB_ENV_FILE` rather than `EnvironmentFile=`: `kb_mcp.config` calls
   `load_dotenv(override=True)`, so a stray `.env` found relative to the
   working directory would otherwise silently beat the unit's settings.

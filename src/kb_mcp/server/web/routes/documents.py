@@ -266,9 +266,9 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
 
     # Get upload directory
     from ....config import get_data_dir
+    from ....secure_file import ensure_private_dir
     data_dir = get_data_dir()
-    upload_dir = Path(data_dir) / "uploads"
-    upload_dir.mkdir(parents=True, exist_ok=True)
+    upload_dir = ensure_private_dir(Path(data_dir) / "uploads")
     sources_dir = (Path(data_dir) / "sources").resolve()
 
     def uri_to_link(uri: str) -> str:

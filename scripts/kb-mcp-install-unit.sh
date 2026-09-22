@@ -4,9 +4,23 @@ set -euo pipefail
 usage() {
   cat >&2 <<'USAGE'
 Usage:
-  kb-mcp-install-unit.sh --port <port> --env-file <path> [options]
+  kb-mcp-install-unit.sh --surface <mcp|web> --data-dir <path> \
+                         --env-file <path> [options]
 
 Renders a systemd --user unit for this release and registers it.
+
+kb-mcp serves two surfaces, and each gets its own unit so that the web UI can
+be restarted -- or can crash -- without dropping the MCP sessions agents are
+holding:
+
+  --surface mcp   kb-mcp.service   MCP endpoint, 0.0.0.0:8008 by default
+  --surface web   kb-web.service   web UI, 127.0.0.1:8108 by default
+
+Run this once per surface. Both must be given the SAME --data-dir: it holds
+api_keys.json, the session stores, and copies of every ingested source
+document under sources/ and uploads/, so it is shared state, not per-service
+scratch. Each process loads its own copy of the embedding model, roughly
+530 MB resident once it has served a query.
 
 The unit is written into THIS release's own share/kb-mcp/kb-mcp.service and
 registered with `systemctl --user link --force`, which puts a *symlink* in
@@ -15,18 +29,21 @@ stays with the installed code: nothing to hand-edit, nothing to copy, and
 rolling back is repointing <deploy-root>/current and restarting.
 
 Options:
-  --port <port>       Port for the MCP endpoint (required). Mu2e convention
-                      reserves 8000-8009; kb is 8008.
+  --surface <s>       "mcp" or "web" (default: mcp). Selects which unit is
+                      rendered, its name, and which surface it starts.
+  --port <port>       MCP endpoint port (default: 8008). Mu2e convention
+                      reserves 8000-8009 for MCP servers; kb is 8008.
   --env-file <path>   Env file with database credentials and settings
                       (required). Passed as KB_ENV_FILE so it wins over any
                       stray .env -- see "Why KB_ENV_FILE" below.
   --hf-home <path>    Persistent Hugging Face cache shared across releases.
                       Strongly recommended: without it each redeploy
                       re-downloads ~130 MB of model weights.
-  --data-dir <path>   Writable state: API keys, web/OAuth session stores.
-                      Defaults to <deploy-root>/data, i.e. beside releases/
-                      so it survives a redeploy. MUST be absolute -- see
-                      "Why DATA_DIR" below.
+  --data-dir <path>   REQUIRED, absolute. Writable state: API keys, session
+                      stores, and ingested documents. Belongs under
+                      /exp/mu2e/data, not beside the code in /exp/mu2e/app --
+                      it cannot be derived from the deploy root, which is why
+                      there is no default. See "Why DATA_DIR" below.
   --mikey-keys <path> Shared mikey key file for bearer-token auth. Optional;
                       without it mikey auth stays off.
   --defaults <path>   Non-secret settings file, as systemd EnvironmentFile.
@@ -68,25 +85,30 @@ Why KB_ENV_FILE rather than EnvironmentFile= for secrets:
 Requires linger so the service survives logout (once per account, permanent):
   loginctl enable-linger
 
-Example:
-  kb-mcp-install-unit.sh --port 8008 \
+Example (both surfaces, one shared data directory):
+  kb-mcp-install-unit.sh --surface mcp --data-dir /exp/mu2e/data/users/mu2eai/kb \
+    --env-file /exp/mu2e/app/users/mu2eai/mcp/kb/config/kb-mcp.env \
+    --hf-home  /exp/mu2e/data/users/mu2eai/kb/cache/huggingface
+
+  kb-mcp-install-unit.sh --surface web --data-dir /exp/mu2e/data/users/mu2eai/kb \
     --env-file /exp/mu2e/app/users/mu2eai/mcp/kb/config/kb-mcp.env \
     --hf-home  /exp/mu2e/app/users/mu2eai/mcp/kb/cache/huggingface
 USAGE
   exit 2
 }
 
-port=""
+port="8008"
 env_file=""
 hf_home=""
 data_dir=""
+surface="mcp"
 mikey_keys=""
 defaults_file=""
 host="0.0.0.0"
 web_port="8108"
 web_host="127.0.0.1"
 deploy_root=""
-description="kb-mcp (Mu2e knowledge base: MCP endpoint + web UI, Postgres-backed)"
+description=""
 do_enable=1
 dry_run=0
 
@@ -96,6 +118,7 @@ while [[ $# -gt 0 ]]; do
     --env-file)    env_file="${2:-}"; shift 2 ;;
     --hf-home)     hf_home="${2:-}"; shift 2 ;;
     --data-dir)    data_dir="${2:-}"; shift 2 ;;
+    --surface)     surface="${2:-}"; shift 2 ;;
     --mikey-keys)  mikey_keys="${2:-}"; shift 2 ;;
     --defaults)    defaults_file="${2:-}"; shift 2 ;;
     --host)        host="${2:-}"; shift 2 ;;
@@ -110,8 +133,16 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-[[ -n "$port" ]]     || { echo "ERROR: --port is required" >&2; usage; }
+case "$surface" in
+  mcp|web) : ;;
+  *) echo "ERROR: --surface must be 'mcp' or 'web' (got: $surface)" >&2; usage ;;
+esac
 [[ -n "$env_file" ]] || { echo "ERROR: --env-file is required" >&2; usage; }
+[[ -n "$data_dir" ]] || {
+  echo "ERROR: --data-dir is required, and both surfaces must share one." >&2
+  echo "       It belongs under /exp/mu2e/data, not beside the code." >&2
+  usage
+}
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"   # <release>/.venv/bin
 venv_dir="$(dirname "$here")"                              # <release>/.venv
@@ -152,14 +183,6 @@ fi
 
 # Writable state lives beside releases/, not inside one, so a redeploy does
 # not strand the API keys and session stores in an old release directory.
-if [[ -z "$data_dir" ]]; then
-  if [[ -n "$deploy_root" ]]; then
-    data_dir="$deploy_root/data"
-  else
-    echo "ERROR: --data-dir is required when no deploy-root layout is detected." >&2
-    exit 1
-  fi
-fi
 case "$data_dir" in
   /*) : ;;
   *) echo "ERROR: --data-dir must be an absolute path (got: $data_dir)" >&2; exit 1 ;;
@@ -209,8 +232,22 @@ else
   mikey_line="# Environment=MIKEY_KEYS_FILE=...   # NOT SET: mikey token auth is off"
 fi
 
+if [[ "$surface" == "mcp" ]]; then
+  unit_name="kb-mcp"
+  surface_flag="--only-mcp"
+  bind_args="--host=$host --port=$port"
+  bind_desc="$host:$port"
+  : "${description:=kb-mcp (Mu2e knowledge base MCP endpoint, Postgres-backed)}"
+else
+  unit_name="kb-web"
+  surface_flag="--only-web"
+  bind_args="--web-host=$web_host --web-port=$web_port"
+  bind_desc="$web_host:$web_port"
+  : "${description:=kb-web (Mu2e knowledge base web UI, Postgres-backed)}"
+fi
+
 share_dir="$venv_dir/share/kb-mcp"
-unit_path="$share_dir/kb-mcp.service"
+unit_path="$share_dir/$unit_name.service"
 
 # NOTE: this heredoc is deliberately unquoted so the $variables below expand.
 # That also makes backticks and $(...) run as commands, so keep both out of
@@ -253,7 +290,7 @@ $hf_line
 # Fail fast instead of hanging if the model cache is cold and the Hub is
 # unreachable. Comment out for the first start, which must populate the cache.
 #Environment=HF_HUB_OFFLINE=1
-ExecStart=$exec_target --host=$host --port=$port --web-host=$web_host --web-port=$web_port
+ExecStart=$exec_target $surface_flag $bind_args
 Restart=on-failure
 RestartSec=5
 
@@ -279,20 +316,20 @@ fi
 
 systemctl --user link --force "$unit_path"
 systemctl --user daemon-reload
-echo "Linked:   ~/.config/systemd/user/kb-mcp.service -> $unit_path"
+echo "Linked:   ~/.config/systemd/user/$unit_name.service -> $unit_path"
 
 if [[ "$do_enable" == "1" ]]; then
-  systemctl --user enable --now kb-mcp.service
-  echo "Enabled and started kb-mcp.service"
+  systemctl --user enable --now "$unit_name.service"
+  echo "Enabled and started $unit_name.service on $bind_desc"
   echo
-  echo "  systemctl --user status kb-mcp"
-  echo "  journalctl --user -u kb-mcp -f"
+  echo "  systemctl --user status $unit_name"
+  echo "  journalctl --user -u $unit_name -f"
   # Note: no /status route exists on an --only-mcp service; that endpoint is
   # registered on the web app. Use the smoke test to verify the MCP surface.
   echo "  <venv>/bin/python scripts/smoke_test_http.py http://localhost:$port"
 else
   echo "Not enabled (--no-enable). To start:"
-  echo "  systemctl --user enable --now kb-mcp.service"
+  echo "  systemctl --user enable --now $unit_name.service"
 fi
 
 if ! loginctl show-user "$(id -un)" -p Linger 2>/dev/null | grep -q "Linger=yes"; then

@@ -49,10 +49,32 @@ def ensure_private_dir(path: Union[str, Path]) -> Path:
     deliberately -- a deployment might share a data directory with a group --
     and silently tightening it could break a running service. The files inside
     are what carry the secrets, and those are always written 0600.
+
+    Every directory this call *creates* gets ``SECRET_DIR_MODE``, including
+    intermediate ones: ``Path.mkdir(mode=..., parents=True)`` applies the mode
+    only to the final component and leaves parents at the umask default, so a
+    nested ``sources/<source_id>`` would otherwise leave ``sources`` at 0755.
     """
     path = Path(path)
-    if not path.exists():
-        path.mkdir(parents=True, exist_ok=True, mode=SECRET_DIR_MODE)
+    if path.exists():
+        return path
+
+    # Record what is missing before creating anything, so only directories
+    # this call brought into existence are tightened.
+    created = []
+    probe = path
+    while not probe.exists():
+        created.append(probe)
+        if probe.parent == probe:
+            break
+        probe = probe.parent
+
+    path.mkdir(parents=True, exist_ok=True, mode=SECRET_DIR_MODE)
+    for directory in created:
+        try:
+            directory.chmod(SECRET_DIR_MODE)
+        except OSError as exc:
+            logger.warning("Could not set mode on %s: %s", directory, exc)
     return path
 
 
