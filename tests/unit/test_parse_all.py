@@ -23,6 +23,7 @@ from sqlalchemy.orm import sessionmaker
 from kb_mcp.kb import database, tools
 from kb_mcp.kb.db_models import Base, Document, DocumentParserOutput, Parser, RawDocument, Source
 from kb_mcp.kb.embedding.db_models import Chunk
+from kb_mcp.parser.parse import resolve_parser_name
 
 
 @pytest.fixture()
@@ -36,6 +37,11 @@ def db(tmp_path, monkeypatch):
     session = sessionmaker(bind=database.get_engine())()
     session.add(Source(id="src", name="src"))
     session.add(Parser(name="kb-mcp"))
+    # add_document() creates a Parser row for the concrete backend it resolves
+    # to, so a test document stored under that name needs its row to exist too
+    # (parser_id is a foreign key).
+    if _RESOLVED_PARSER_ID != "kb-mcp":
+        session.add(Parser(name=_RESOLVED_PARSER_ID))
     session.commit()
     yield session
     session.close()
@@ -53,6 +59,14 @@ def _raw(source_id="src", doc_id="doc-1", file_path=None, uri=None):
         file_path=file_path,
         uri=uri,
     )
+
+
+# add_document() resolves the "kb-mcp" auto-pick sentinel to the concrete
+# backend before storing it, and parse_all()'s "already parsed" check compares
+# against that resolved value (resolved_parser_id_expr). Tests that need a
+# document to look *already parsed* must therefore store this, not the
+# sentinel. Derived rather than hardcoded so it tracks the real mapping.
+_RESOLVED_PARSER_ID = resolve_parser_name("application/pdf", "kb-mcp")
 
 
 def _doc(source_id="src", doc_id="doc-1", parser_id="kb-mcp", raw_document_id=None,
@@ -116,7 +130,7 @@ class TestForceReparseRowSelection:
         fp = _touch(tmp_path)
         raw = _raw(file_path=fp)
         db.add(raw)
-        db.add(_doc(raw_document_id=raw.id))
+        db.add(_doc(raw_document_id=raw.id, parser_id=_RESOLVED_PARSER_ID))
         db.commit()
 
         result = tools.parse_all(source_id="src")

@@ -127,6 +127,15 @@ def _run_add_document(monkeypatch, tmp_path, *, already_ingested, force_reparse)
             return _Row()
 
     class _Session:
+        # add_document flushes before parsing so raw_doc/parser get IDs, and
+        # only commits when it owns the session -- get_db_session sets
+        # is_local = (session is None), and this stand-in is always the
+        # session add_document created for itself.
+        is_local = True
+
+        def flush(self):
+            pass
+
         def commit(self):
             pass
 
