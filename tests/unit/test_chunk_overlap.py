@@ -14,6 +14,8 @@ import os
 
 import pytest
 
+from conftest import requires_embedder
+
 from kb_mcp.chunking.chunking import (
     DEFAULT_CHUNK_OVERLAP_FRACTION,
     DEFAULT_CHUNK_SIZE,
@@ -118,6 +120,7 @@ def test_empty_chunk_overlap_is_unset_not_zero(clean_env, monkeypatch):
     assert get_embedding_config()["chunk_overlap"] is None
 
 
+@requires_embedder
 def test_resolve_strategy_name_sees_the_env(clean_env, monkeypatch):
     """chunk_and_embed_all predicts the stored name with this; if it ignored
     CHUNK_SIZE it would look for chunks the chunker never wrote."""

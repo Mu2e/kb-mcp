@@ -15,6 +15,8 @@ encoder will actually read).
 
 from types import SimpleNamespace
 
+from conftest import requires_embedder
+
 from kb_mcp.kb.embedding.chunking import chunk_from_docling_json
 
 
@@ -177,6 +179,7 @@ def test_sibling_header_pops_stack():
     assert not any("Calorimeter > Tracker" in (p or "") for p in paths)
 
 
+@requires_embedder
 def test_chunks_do_not_overlap_and_advance_monotonically():
     text = "\n\n".join([
         "# First",
@@ -215,6 +218,7 @@ def test_tiny_fragment_merges_into_next_chunk():
     assert doc_text[chunks[0]["char_start_index"]:chunks[0]["char_end_index"]] == chunks[0]["text"]
 
 
+@requires_embedder
 def test_short_section_merges_forward_under_the_common_ancestor():
     """A short-but-real section (e.g. a one-line 'Overview') must not be
     labelled with the *next* sibling's section_path.
@@ -481,6 +485,7 @@ def test_descending_into_a_subsection_keeps_the_deeper_path():
     assert chunks[0]["section_path"] == "Detector > Calorimeter"
 
 
+@requires_embedder
 def test_merged_chunk_never_claims_a_section_it_only_precedes():
     """The failure mode this labelling exists to prevent: content from an
     earlier section must never be filed under a later sibling."""

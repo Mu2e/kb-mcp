@@ -1,8 +1,21 @@
+import importlib.util
 import os
+
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from kb_mcp.kb.db_models import Base
+
+# Some chunking tests need the embedding model's real token window, which is
+# only knowable with a loadable sentence-transformers model: without one the
+# code falls back to a 256-token window and produces a different (valid but
+# different) chunking. CI installs no torch on purpose -- the whole point of
+# the serve-only core -- so those tests skip there and run wherever the
+# [local-embed] extra is present.
+requires_embedder = pytest.mark.skipif(
+    importlib.util.find_spec("sentence_transformers") is None,
+    reason="needs sentence-transformers (install the kb-mcp[local-embed] extra)",
+)
 
 # Default to SQLite file for easier testing and sharing across sessions
 TEST_DB_URL = os.getenv("TEST_DATABASE_URL", "sqlite:///test_kb.db")

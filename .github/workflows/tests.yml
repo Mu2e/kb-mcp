@@ -33,11 +33,16 @@ jobs:
         run: uv venv --python ${{ matrix.python-version }}
 
       - name: Install kb_mcp and unit-test dependencies
-        # --no-deps keeps sentence-transformers/torch and the CUDA wheels out;
-        # requirements-unit-tests.txt lists what tests/unit actually needs.
-        run: |
-          uv pip install --no-deps -e .
-          uv pip install -r requirements-unit-tests.txt
+        # A plain install is enough now that the core dependencies are
+        # serve-only: sentence-transformers, torch and the CUDA wheels moved
+        # to the [local-embed] extra, and the parser stack to [ingest]. This
+        # replaces the hand-maintained requirements-unit-tests.txt, which
+        # existed solely to keep those multi-GB wheels out of CI.
+        #
+        # [ingest] is needed because tests/unit exercises the parsers. The
+        # four tests that need a real embedding model are marked
+        # requires_embedder (tests/conftest.py) and skip here.
+        run: uv pip install -e ".[ingest,test]"
 
       - name: Run unit tests
         run: uv run pytest tests/unit -v
