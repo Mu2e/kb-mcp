@@ -32,7 +32,12 @@ Options:
   --defaults <path>   Non-secret settings file, as systemd EnvironmentFile.
                       Defaults to this release's own
                       share/kb-mcp/mu2e.env (shipped with the package).
-  --host <addr>       Bind address (default: 0.0.0.0).
+  --host <addr>       MCP bind address (default: 0.0.0.0).
+  --web-port <port>   Web UI port (default: 8108 -- 8008 + 100, deliberately
+                      outside the 8000-8009 MCP range).
+  --web-host <addr>   Web UI bind address (default: 127.0.0.1). Keep it on
+                      loopback and reach it over an ssh tunnel; that is what
+                      makes running the UI without per-user login safe.
   --deploy-root <p>   Deploy root holding releases/ and the `current` symlink.
                       Auto-detected from this script's location; override only
                       for a non-standard layout. ExecStart is written against
@@ -78,8 +83,10 @@ data_dir=""
 mikey_keys=""
 defaults_file=""
 host="0.0.0.0"
+web_port="8108"
+web_host="127.0.0.1"
 deploy_root=""
-description="kb-mcp (Mu2e knowledge base MCP server, Postgres-backed)"
+description="kb-mcp (Mu2e knowledge base: MCP endpoint + web UI, Postgres-backed)"
 do_enable=1
 dry_run=0
 
@@ -92,6 +99,8 @@ while [[ $# -gt 0 ]]; do
     --mikey-keys)  mikey_keys="${2:-}"; shift 2 ;;
     --defaults)    defaults_file="${2:-}"; shift 2 ;;
     --host)        host="${2:-}"; shift 2 ;;
+    --web-port)    web_port="${2:-}"; shift 2 ;;
+    --web-host)    web_host="${2:-}"; shift 2 ;;
     --deploy-root) deploy_root="${2:-}"; shift 2 ;;
     --description) description="${2:-}"; shift 2 ;;
     --no-enable)   do_enable=0; shift ;;
@@ -240,7 +249,7 @@ $hf_line
 # Fail fast instead of hanging if the model cache is cold and the Hub is
 # unreachable. Comment out for the first start, which must populate the cache.
 #Environment=HF_HUB_OFFLINE=1
-ExecStart=$exec_target --host=$host --port=$port
+ExecStart=$exec_target --host=$host --port=$port --web-host=$web_host --web-port=$web_port
 Restart=on-failure
 RestartSec=5
 

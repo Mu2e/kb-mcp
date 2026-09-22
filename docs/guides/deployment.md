@@ -465,8 +465,17 @@ is actually installed:
   --port 8008 \
   --env-file   /exp/mu2e/app/users/mu2eai/mcp/kb/config/kb-mcp.env \
   --hf-home    /exp/mu2e/app/users/mu2eai/mcp/kb/cache/huggingface \
-  --mikey-keys /exp/mu2e/app/users/mu2eai/mcp/kb/config/mikey-keys.json
+  --mikey-keys <the shared mikey keys file>
 ```
+
+`--mikey-keys` must point at the **one shared mikey keys file the other Mu2e
+MCP servers already read** -- the same path their units set `MIKEY_KEYS_FILE`
+to, in the `mcp/mikey/` directory of the service account. Do not give kb-mcp
+its own keys file: mikey has no default path precisely so that each server
+cannot drift into a private key namespace, and a separate file would mean
+tokens minted for the other servers silently fail here while operators
+maintain two stores. Check an existing unit for the exact path rather than
+guessing; it is mode 600 and owned by the service account.
 
 `--data-dir` defaults to `<deploy-root>/data` -- beside `releases/`, so the
 API keys and session stores survive a redeploy. It must be absolute, and the
@@ -512,8 +521,18 @@ the knowledge base really is empty).
 
 - Port 8008 by convention; Mu2e reserves 8000-8009 for MCP servers, and the
   entry belongs in `mcp/registry/config/ports.json` in the aitools repo.
-- The web UI is not started. Run a second unit with `--only-web` bound to
-  loopback, reached over an ssh tunnel, if it is wanted.
+- Both surfaces run in **one** unit and one process: the MCP endpoint on
+  `0.0.0.0:8008` and the web UI on `127.0.0.1:8108` (8008 + 100, so the web
+  port is readable off the MCP port and stays outside the reserved
+  8000-8009 range). Reach the UI with
+  `ssh -L 8108:localhost:8108 <host>`.
+
+  They are not split into two units on purpose. Either surface instantiates
+  `SessionStore("web_sessions")` at import, and that store persists with a
+  plain `open(path, "w")` -- no lock, no atomic rename -- so two processes
+  sharing one `DATA_DIR` would race on the same file. Serving both from one
+  process is also `kb-server`'s default. The trade-off is that a failure in
+  one surface takes down the other.
 - `KB_ENV_FILE` rather than `EnvironmentFile=`: `kb_mcp.config` calls
   `load_dotenv(override=True)`, so a stray `.env` found relative to the
   working directory would otherwise silently beat the unit's settings.

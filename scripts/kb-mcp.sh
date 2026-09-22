@@ -7,9 +7,14 @@
 # ExecStart is a single self-contained line and any server-side environment
 # setup has one obvious place to live.
 #
-# It execs `kb-server --only-mcp`: the web UI is deliberately not started here.
-# One service, one port, matching the other MCPs in the Mu2e deployment. Run a
-# second unit with --only-web bound to loopback if the UI is wanted.
+# It execs plain `kb-server`, which serves BOTH surfaces from one process: the
+# MCP endpoint on the network and the web UI on loopback, on separate ports.
+#
+# They are deliberately not split into two units. Either surface instantiates
+# SessionStore("web_sessions") at import time, and SessionStore persists with a
+# plain open(path, "w") -- no lock, no atomic rename -- so two processes
+# sharing one DATA_DIR would race on the same JSON file. `kb-server` starting
+# both surfaces together is also its default behaviour.
 #
 set -euo pipefail
 
@@ -30,9 +35,9 @@ Usage:
             binding a port or contacting the database. Use this after an
             install, before enabling the unit.
 
-Everything else is passed straight through to `kb-server --only-mcp`, e.g.:
+Everything else is passed straight through to `kb-server`, e.g.:
 
-  kb-mcp.sh --port 8008 --env-file /path/to/kb-mcp.env
+  kb-mcp.sh --port 8008 --web-port 8108 --env-file /path/to/kb-mcp.env
 USAGE
   exit 2
 }
@@ -76,7 +81,10 @@ except Exception as exc:  # noqa: BLE001 - report anything that breaks import
     print(f"FAIL  import kb_mcp.server.server: {exc!r}")
     sys.exit(1)
 print(f"ok    import kb_mcp.server.server")
-print(f"ok    bind target: {srv.MCP_HOST}:{srv.PORT} (MCP endpoint only)")
+print(f"ok    MCP endpoint: {srv.MCP_HOST}:{srv.PORT}")
+print(f"ok    web UI      : {srv.WEB_HOST}:{srv.WEB_PORT}")
+if srv.WEB_HOST not in ("127.0.0.1", "localhost", "::1"):
+    print("      NOTE: the web UI is not bound to loopback.")
 
 from kb_mcp.config import get_server_config, get_embedding_config, get_auth_config
 
@@ -113,4 +121,4 @@ sys.exit(1 if failed else 0)
 PY
 fi
 
-exec "$here/kb-server" --only-mcp "$@"
+exec "$here/kb-server" "$@"
