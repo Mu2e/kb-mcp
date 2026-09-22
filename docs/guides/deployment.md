@@ -522,6 +522,32 @@ Linger must be enabled once per account so the service survives logout:
 loginctl enable-linger
 ```
 
+### Web UI access model
+
+There is no OAuth provider, so `WEB_REQUIRE_AUTH=false`. That alone is not a
+complete configuration: `WEB_PUBLIC_MODE=true` must go with it.
+
+With both off, `/web` redirects to `/login`, and `/login` mints a session
+carrying `has_admin=True` with no password and no check -- so anyone who
+reaches the port gets uploads, deletes, re-chunking and API-key management.
+Public mode instead serves the browsable pages with no session at all and
+sends `/login` to `/admin/login`, leaving the write pages behind
+`ADMIN_PASSWORD`.
+
+Binding to loopback does **not** substitute for that on a shared interactive
+node: any account on the host can reach `127.0.0.1:8108` through an ssh
+tunnel. Loopback keeps the UI off the network; `ADMIN_PASSWORD` is what
+protects writes. Set it.
+
+Expected responses once it is up:
+
+| path | code | meaning |
+|---|---|---|
+| `/status` | 200 | serving |
+| `/web` | 200 | browsing open, database reachable |
+| `/web` | 500 | database unreachable -- `/web` lists documents, so it fails loudly where `kb_search` would quietly return no results |
+| `/login` | 303 to `/admin/login` | public mode active (a 302 to `/login?redirect=` means it is **not**) |
+
 ### File permissions
 
 `DATA_DIR` holds bearer credentials -- `api_keys.json` and the session stores
