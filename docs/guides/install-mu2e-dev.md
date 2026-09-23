@@ -64,6 +64,7 @@ corpus. [All settings](../reference/env.example.md) are documented in
 In `.env.local`, add what applies to you:
 
 ```bash
+ADMIN_PASSWORD=<pick-one>                  # guards the web UI's write pages
 DB_PASSWORD=<dev-database-password>        # dev database only
 MU2E_DOCDB_USERNAME=<services-username>    # DocDB imports only
 MU2E_DOCDB_PASSWORD=<services-password>
