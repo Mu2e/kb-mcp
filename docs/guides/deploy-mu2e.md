@@ -105,7 +105,7 @@ Once per surface, with the **same** `--data-dir`:
 U=/exp/mu2e/app/users/mu2eai/mcp/kb/current/.venv/bin/kb-mcp-install-unit.sh
 D=/exp/mu2e/data/users/mu2eai/kb
 E=/exp/mu2e/app/users/mu2eai/mcp/kb/config/kb-mcp.env
-K=/exp/mu2e/app/users/mu2eai/mcp/mikey/keys   # the SHARED file, see below
+K=/path/to/mikey/keys   # the SHARED keystore -- see the note below
 
 $U --surface mcp --data-dir "$D" --port 8008 \
    --env-file "$E" --hf-home "$D/cache/huggingface" \
@@ -359,11 +359,13 @@ than an error. Check it against the `embedding_configs` rows before first start.
 The service connects as `mu2eai` with GSSAPI and needs read access to the
 schema holding the knowledge base. Run as the schema owner:
 
+Substitute your own `DB_SCHEMA` and `DB_USER` for `<schema>` and `<role>`:
+
 ```sql
-GRANT USAGE ON SCHEMA v1 TO mu2eai;
-GRANT SELECT ON ALL TABLES IN SCHEMA v1 TO mu2eai;
-ALTER DEFAULT PRIVILEGES IN SCHEMA v1 GRANT SELECT ON TABLES TO mu2eai;
-GRANT INSERT ON v1.logs_search TO mu2eai;
+GRANT USAGE ON SCHEMA <schema> TO <role>;
+GRANT SELECT ON ALL TABLES IN SCHEMA <schema> TO <role>;
+ALTER DEFAULT PRIVILEGES IN SCHEMA <schema> GRANT SELECT ON TABLES TO <role>;
+GRANT INSERT ON <schema>.logs_search TO <role>;
 ```
 
 Why each one:
@@ -382,8 +384,8 @@ Why each one:
 `mu2eai` should **not** have `CREATE`. Verify:
 
 ```sql
-SELECT has_schema_privilege('mu2eai','v1','USAGE'),   -- want true
-       has_schema_privilege('mu2eai','v1','CREATE');  -- want false
+SELECT has_schema_privilege('<role>','<schema>','USAGE'),   -- want true
+       has_schema_privilege('<role>','<schema>','CREATE');  -- want false
 ```
 
 ### Kerberos credentials

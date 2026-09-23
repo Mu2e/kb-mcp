@@ -149,7 +149,19 @@ while [[ $# -gt 0 ]]; do
     --hf-home)     hf_home="${2:-}"; shift 2 ;;
     --data-dir)    data_dir="${2:-}"; shift 2 ;;
     --surface)     surface="${2:-}"; shift 2 ;;
-    --mikey-keys)  mikey_keys="${2:-}"; shift 2 ;;
+    --mikey-keys)
+      mikey_keys="${2:-}"
+      # An empty value here almost always means an unquoted or mistyped path
+      # in the caller's shell, not a deliberate choice to run without token
+      # auth -- and silently rendering "MIKEY_KEYS_FILE not set" turns that
+      # into an authentication regression nobody sees until a client 401s.
+      if [[ -z "$mikey_keys" ]]; then
+        echo "ERROR: --mikey-keys was given an empty value." >&2
+        echo "       Pass the shared keys file, or omit the flag entirely to" >&2
+        echo "       run without mikey token auth." >&2
+        exit 2
+      fi
+      shift 2 ;;
     --defaults)    defaults_file="${2:-}"; shift 2 ;;
     --host)        host="${2:-}"; shift 2 ;;
     --web-port)    web_port="${2:-}"; shift 2 ;;
