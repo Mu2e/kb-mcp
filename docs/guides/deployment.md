@@ -540,8 +540,12 @@ That gives `kb-mcp.service` on `0.0.0.0:8008` and `kb-web.service` on
 This renders the unit into *this release's* `share/kb-mcp/kb-mcp.service` and
 registers it with `systemctl --user link`, so `~/.config` holds only a symlink
 and the unit content stays versioned with the code. `ExecStart` points at
-`<deploy-root>/current`, so rolling back is repointing that symlink and
-restarting -- no re-render.
+`<deploy-root>/current`, so rolling back to a release that is still on disk is
+repointing that symlink and restarting -- no re-render.
+
+Deploying a *new* release is not the same operation: the linked unit file
+still lives in the old release until this installer is re-run. See
+[Upgrading to a new release](#upgrading-to-a-new-release).
 
 Set `--hf-home` to something persistent and shared across releases: the
 embedding model (`BAAI/bge-small-en-v1.5`, ~130 MB) downloads on first use,
@@ -618,6 +622,95 @@ search. Note that `kb_search` reports a broken database as
 `{"message": "No results found", "results": []}` rather than as an error, so
 the smoke test treats an empty result as a failure (pass `--allow-empty` if
 the knowledge base really is empty).
+
+### Upgrading to a new release
+
+Cut the release first -- `kb_mcp.__version__` is the single source of truth,
+so bump it, commit, and tag the **tip** of the branch rather than the bump
+commit if anything landed after it:
+
+```bash
+git push mu2e develop
+git tag v0.2.1
+git push mu2e v0.2.1
+```
+
+`uv` fetches the tag from GitHub, so it has to be pushed before the deploy.
+
+Then, as the service account on the deployment host:
+
+```bash
+mu2einit && slc uv
+/path/to/checkout/scripts/deploy-mu2e.sh /exp/mu2e/app/users/mu2eai/mcp/kb v0.2.1
+```
+
+This creates `releases/v0.2.1/` and repoints `current`. It does not restart
+anything: the running process is still executing the old release.
+
+Check the new release before restarting into it, exactly as for a first
+install -- `kb-mcp.sh` resolves its own location with `pwd -P`, so this reads
+*this* release's defaults, not the previous one's:
+
+```bash
+/exp/mu2e/app/users/mu2eai/mcp/kb/current/.venv/bin/kb-mcp.sh --check \
+  --env-file /exp/mu2e/app/users/mu2eai/mcp/kb/config/kb-mcp.env
+```
+
+Then re-run the unit installer, once per surface, with the same arguments as
+the first install. This is easy to skip, because the service does pick up new
+code without it:
+
+```bash
+U=/exp/mu2e/app/users/mu2eai/mcp/kb/current/.venv/bin/kb-mcp-install-unit.sh
+D=/exp/mu2e/data/users/mu2eai/kb
+E=/exp/mu2e/app/users/mu2eai/mcp/kb/config/kb-mcp.env
+K=<the shared mikey keys file>
+
+$U --surface mcp --data-dir "$D" --port 8008 \
+   --env-file "$E" --hf-home "$D/cache/huggingface" --mikey-keys "$K"
+$U --surface web --data-dir "$D" --web-port 8108 \
+   --env-file "$E" --hf-home "$D/cache/huggingface"
+```
+
+Two different things follow `current`, and only one of them follows it by
+itself:
+
+| | where it points | when it updates |
+|---|---|---|
+| `ExecStart` | `<deploy-root>/current/.venv/bin/kb-mcp.sh` | on restart, automatically |
+| the unit file | `~/.config/systemd/user/kb-mcp.service` -> `releases/<ref>/.venv/share/kb-mcp/kb-mcp.service`, resolved to one release | only when `kb-mcp-install-unit.sh` is re-run |
+
+So a restart alone runs the new code under the **old release's unit**, with
+whatever `Environment=` and `EnvironmentFile=` that release rendered -- and
+pruning that release then leaves a dangling unit symlink and a service that
+will not start. Re-running the installer is what moves the unit into the
+release you just deployed.
+
+Restart and confirm:
+
+```bash
+systemctl --user restart kb-mcp.service kb-web.service
+systemctl --user show kb-mcp -p ExecStart -p Environment
+```
+
+`systemctl --user show` is the authoritative answer for what the service is
+actually running with; `--check` reports what it *would* run with.
+
+First start after a deploy is slower if `HF_HOME` is cold: the embedding model
+(~130 MB) downloads on first use. Pointing `--hf-home` at a path outside the
+release is what keeps that a one-time cost.
+
+Finally, prune. Each release venv is roughly 1.3 GB, and `current` must not be
+pointing at what you delete:
+
+```bash
+ls -l /exp/mu2e/app/users/mu2eai/mcp/kb/current
+rm -rf /exp/mu2e/app/users/mu2eai/mcp/kb/releases/<old-ref>
+```
+
+Keep the release you would roll back to. Rolling back *is* repointing
+`current` and restarting -- no re-render -- as long as that release still
+exists and its unit is the one currently linked.
 
 ### Notes
 
