@@ -30,6 +30,7 @@ nav:
   - Home: index.md
   - Guides:
     - Installation: guides/installation.md
+    - Mu2e developer setup: guides/install-mu2e-dev.md
     - MCP:
       - Overview: guides/mcp-setup.md
       - Clients: guides/mcp-clients.md
