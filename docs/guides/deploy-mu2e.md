@@ -155,10 +155,20 @@ A restart alone runs new code under the **old release's unit**, with whatever
 `Environment=` and `EnvironmentFile=` that release rendered — and pruning the
 old release then leaves a dangling symlink and a service that will not start.
 
-Then restart:
+The installer enables and restarts each unit itself. On a release before
+v0.2.3 it only ran `enable --now`, which does nothing to an already-running
+service — so there, restart explicitly:
 
 ```bash
 systemctl --user restart kb-mcp.service kb-web.service
+```
+
+Either way, confirm the running processes are the release you just deployed —
+`systemctl --user status` shows the resolved path, and it will say
+`releases/<ref>/…`:
+
+```bash
+systemctl --user status kb-mcp.service kb-web.service | grep releases/
 ```
 
 ### 4. Verify

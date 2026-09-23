@@ -399,14 +399,24 @@ systemctl --user daemon-reload
 echo "Linked:   ~/.config/systemd/user/$unit_name.service -> $unit_path"
 
 if [[ "$do_enable" == "1" ]]; then
-  systemctl --user enable --now "$unit_name.service"
-  echo "Enabled and started $unit_name.service on $bind_desc"
+  # enable + restart, not `enable --now`: --now starts a stopped unit but does
+  # nothing to a running one. Re-running this script on an upgrade would then
+  # report "started" while the old process kept serving the OLD release's unit
+  # -- including its Environment=, so a newly added variable would silently not
+  # apply. restart starts a stopped unit too, so one path covers both.
+  systemctl --user enable "$unit_name.service"
+  systemctl --user restart "$unit_name.service"
+  echo "Enabled and (re)started $unit_name.service on $bind_desc"
   echo
   echo "  systemctl --user status $unit_name"
   echo "  journalctl --user -u $unit_name -f"
-  # Note: no /status route exists on an --only-mcp service; that endpoint is
-  # registered on the web app. Use the smoke test to verify the MCP surface.
-  echo "  <venv>/bin/python scripts/smoke_test_http.py http://localhost:$port"
+  if [[ "$surface" == "mcp" ]]; then
+    # No /status route exists on an --only-mcp service; that endpoint is
+    # registered on the web app. Use the smoke test, which ships in the venv.
+    echo "  $venv_dir/bin/kb-mcp-smoke-test http://localhost:$port --token <mikey token>"
+  else
+    echo "  curl -s -o /dev/null -w '%{http_code}\n' http://$web_host:$web_port/web   # want 200"
+  fi
 else
   echo "Not enabled (--no-enable). To start:"
   echo "  systemctl --user enable --now $unit_name.service"
