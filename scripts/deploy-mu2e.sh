@@ -95,8 +95,20 @@ uv venv "$venv_dir"
 if [[ "${KB_MCP_SKIP_TORCH:-0}" == "1" ]]; then
   echo "[2/4] Skipping separate torch install"
 else
-  echo "[2/4] Installing CPU-only torch from $torch_index"
-  uv pip install --python "$venv_dir/bin/python" --index-url "$torch_index" torch
+  # torchvision only when extras are requested, and then from the SAME index
+  # as torch. The ingest extra pulls docling-ibm-models, which depends on
+  # torchvision; resolved from PyPI it is built against PyPI's CUDA torch, and
+  # against a +cpu torch its compiled ops never register. The first
+  # `import sentence_transformers` then dies with "operator torchvision::nms
+  # does not exist", which transformers reports as "Could not import module
+  # 'PreTrainedModel'" -- so a query-only server would look fine right up to
+  # the first search. A no-extras install never imports torchvision at all.
+  torch_pkgs=(torch)
+  if [[ -n "$extras" ]]; then
+    torch_pkgs+=(torchvision)
+  fi
+  echo "[2/4] Installing CPU-only ${torch_pkgs[*]} from $torch_index"
+  uv pip install --python "$venv_dir/bin/python" --index-url "$torch_index" "${torch_pkgs[@]}"
 fi
 
 echo "[3/4] Installing ${spec}"

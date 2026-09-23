@@ -149,10 +149,18 @@ source "$LOCAL_ENV_DIR/bin/activate"
 # would otherwise resolve to the CUDA build — several GB of NVIDIA wheels into
 # a venv that lives on local scratch, for work that is CPU-bound anyway. The
 # deployment installer does the same thing, so dev and production agree.
-echo "Installing CPU-only torch..."
-if ! uv pip install --index-url https://download.pytorch.org/whl/cpu torch; then
-    kb_setup_fail "installing CPU-only torch failed. Without it the next step
-  pulls the multi-GB CUDA build into $LOCAL_ENV_DIR."
+# torchvision comes from the same index, and is not optional here: the ingest
+# extra pulls docling-ibm-models, which depends on torchvision, and resolving
+# it from PyPI gets a build linked against PyPI's CUDA torch. Against a +cpu
+# torch its compiled ops never register, and the failure surfaces far from the
+# cause -- `import sentence_transformers` dies with "operator torchvision::nms
+# does not exist", which transformers relabels as the useless "Could not
+# import module 'PreTrainedModel'". Embedding is then impossible in an
+# environment whose packages all look correctly installed.
+echo "Installing CPU-only torch and torchvision..."
+if ! uv pip install --index-url https://download.pytorch.org/whl/cpu torch torchvision; then
+    kb_setup_fail "installing CPU-only torch/torchvision failed. Without them the
+  next step pulls the multi-GB CUDA build into $LOCAL_ENV_DIR."
     return 1 2>/dev/null || exit 1
 fi
 
