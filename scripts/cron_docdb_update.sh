@@ -24,7 +24,8 @@ if ! [[ "$DAYS" =~ ^[1-9][0-9]*$ ]]; then
     exit 2
 fi
 
-LOG_DIR="${KB_DATA_DIR:-/exp/mu2e/data/users/$USER/kb-mcp-data}/logs"
+KB_DATA="${KB_DATA_DIR:-/exp/mu2e/data/users/$USER/kb-mcp-data}"
+LOG_DIR="$KB_DATA/logs"
 mkdir -p "$LOG_DIR"
 STAMP=$(date +%Y%m%d-%H%M%S)
 LOG="$LOG_DIR/docdb-update-${STAMP}.log"
@@ -56,6 +57,29 @@ if ! source scripts/setup_mu2e_uv.sh >> "$LOG" 2>&1; then
     echo "FATAL: environment setup failed — see $LOG" >&2
     tail -20 "$LOG" >&2
     exit 1
+fi
+
+# 1b. Site credentials (optional). Whatever an unattended run needs before it
+# can reach the database — obtaining a ticket, exporting a variable — is
+# site-specific and deliberately kept out of this repo, in a hook that lives
+# beside .env.local (the same place, resolved the same way, as the rest of the
+# user's private settings; git-ignored via *.local.sh). The hook is sourced (so
+# it can export into this run) with its output in the log, and gets
+# KB_ENV_LOCAL (the resolved .env.local path) and KB_DATA; a line starting
+# "CREDENTIALS FAILED" marks the run failed. No hook: nothing happens here,
+# and a missing credential shows up as a failed database check below.
+#
+# Refused unless owned by this user and not group/other-writable: it runs with
+# this account's credentials, so anyone able to edit it would own them.
+KB_ENV_LOCAL="$(python3 -c 'from kb_mcp.config import get_env_local_path; print(get_env_local_path() or "")' 2>>"$LOG")"
+CRED_HOOK="${KB_CRED_HOOK:-${KB_ENV_LOCAL:+$(dirname "$KB_ENV_LOCAL")/credentials.local.sh}}"
+if [ -n "$CRED_HOOK" ] && [ -f "$CRED_HOOK" ]; then
+    if [ ! -O "$CRED_HOOK" ] || [ -n "$(find "$CRED_HOOK" -perm /022)" ]; then
+        echo "CREDENTIALS FAILED: refusing to source $CRED_HOOK (not owned by $USER, or group/other-writable)" >> "$LOG"
+    else
+        # shellcheck source=/dev/null
+        source "$CRED_HOOK" >> "$LOG" 2>&1
+    fi
 fi
 
 # 2. ALCF token: a non-interactive refresh ONLY. kb-import reads the token
@@ -140,7 +164,9 @@ end=$(date +%s)
 # checks are informational (a dead ALCF endpoint only degrades image
 # descriptions, which the token-refresh step above already warns about).
 failure_reason=""
-if grep -qaE "ERROR - Error during auto-(summarize|embed)" "$LOG"; then
+if grep -qaE "^CREDENTIALS FAILED" "$LOG"; then
+    failure_reason="$(grep -aE "^CREDENTIALS FAILED" "$LOG" | head -1)"
+elif grep -qaE "ERROR - Error during auto-(summarize|embed)" "$LOG"; then
     failure_reason="auto-summarize/auto-embed raised — see the traceback in the log"
 elif grep -qaE "^[[:space:]]*FAIL[[:space:]]+database" "$LOG"; then
     failure_reason="database connection check failed"

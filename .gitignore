@@ -3,6 +3,7 @@ certs/
 .env
 .env.local
 .env.local.bak.*
+*.local.sh
 .env.web
 logs/
 data
