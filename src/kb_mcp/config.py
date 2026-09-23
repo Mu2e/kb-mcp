@@ -9,32 +9,49 @@ import json
 from anyio import Path
 from dotenv import load_dotenv, find_dotenv
 
-# Load shared configuration from .env
-# override=True ensures .env values take precedence over shell environment
-# variables. This prevents issues where a shell-level DEFAULT_LLM_MODEL
-# (e.g., set for Claude Desktop) overrides the backend model settings
-# needed for OpenAI API calls (summarization, graph extraction, etc.).
-load_dotenv(override=True)
+# KB_ENV_FILE names the authoritative configuration file. Loading it here
+# rather than only in the server entry points means every CLI (kb, kb-import,
+# kb-parse, kb-agent) honours it too -- otherwise running `kb` on a deployment
+# host would silently ignore the deployed configuration and fall back to the
+# default SQLite path.
+#
+# When it is set -- which is how every deployment runs, via
+# Environment=KB_ENV_FILE in the systemd unit -- no file is discovered by
+# searching the filesystem. That discovery is a convenience for working from a
+# checkout, and it is not safe for a deployment: find_dotenv() walks up from
+# THIS MODULE's directory, not the working directory, so any .env anywhere
+# above the installed package -- including one dropped in the deploy root next
+# to config/ -- would be loaded with override=True and beat the settings the
+# unit supplies with EnvironmentFile= and Environment=.
+#
+# Loading KB_ENV_FILE last does not undo that on its own. It restores only the
+# keys KB_ENV_FILE itself sets; every other key the unit supplies -- the ports,
+# bind addresses, auth mode and embedding model in the EnvironmentFile -- would
+# keep the stray file's value. Observed: a checkout .env with PORT=8443 moved
+# the MCP endpoint off the 8008 the unit had set.
+_kb_env_file = os.environ.get("KB_ENV_FILE")
 
-# Load user-specific overrides from .env.local (takes precedence over .env)
-# This allows users to override settings (e.g., ALCF credentials) without
-# modifying the shared .env file (which may be a symlink on NERSC)
-env_path = find_dotenv()
+if _kb_env_file:
+    env_path = _kb_env_file
+else:
+    # No pinned file: discover one, the way a checkout expects.
+    #
+    # override=True ensures .env values take precedence over shell environment
+    # variables. This prevents issues where a shell-level DEFAULT_LLM_MODEL
+    # (e.g., set for Claude Desktop) overrides the backend model settings
+    # needed for OpenAI API calls (summarization, graph extraction, etc.).
+    load_dotenv(override=True)
+    env_path = find_dotenv()
+
+# User-specific overrides live in .env.local beside the file above, whether
+# that file was pinned or discovered. This allows users to override settings
+# (e.g., ALCF credentials, which alcf_auth rewrites in place) without
+# modifying the shared .env file (which may be a symlink on NERSC).
 local_env_path = Path(env_path).with_name(".env.local") if env_path else None
 if local_env_path:
     load_dotenv(dotenv_path=local_env_path, override=True)
 
-# KB_ENV_FILE names an explicit configuration file and wins over everything
-# above. Loading it here rather than only in the server entry points means
-# every CLI (kb, kb-import, kb-parse, kb-agent) honours it too -- otherwise
-# running `kb` on a deployment host would silently ignore the deployed
-# configuration and fall back to the default SQLite path.
-#
-# It is also what makes the deployed service safe from a stray .env: the
-# load_dotenv(override=True) above would otherwise beat the settings the
-# systemd unit supplies. Loading KB_ENV_FILE afterwards restores the intended
-# precedence.
-_kb_env_file = os.environ.get("KB_ENV_FILE")
+# Last, so the pinned file wins over its own .env.local sibling.
 if _kb_env_file:
     load_dotenv(dotenv_path=_kb_env_file, override=True)
 

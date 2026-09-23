@@ -640,9 +640,13 @@ the knowledge base really is empty).
   because the credential files are written through an atomic rename, and
   because the surfaces touch different session stores -- an `--only-mcp`
   process mounts no web routes, so it never writes `web_sessions.json`.
-- `KB_ENV_FILE` rather than `EnvironmentFile=`: `kb_mcp.config` calls
-  `load_dotenv(override=True)`, so a stray `.env` found relative to the
-  working directory would otherwise silently beat the unit's settings.
+- `KB_ENV_FILE` rather than `EnvironmentFile=`: setting it pins the
+  authoritative file *and*, since 0.2.1, stops `kb_mcp.config` searching for a
+  `.env` at all. That search walked up from the installed module's own
+  directory rather than the working directory, so a `.env` left anywhere above
+  the package -- in the deploy root beside `config/`, say -- was loaded with
+  `override=True` and beat the unit for every key the private file did not
+  itself set, ports and bind addresses included.
 
 ## Storage Options
 

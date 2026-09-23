@@ -74,13 +74,15 @@ Why DATA_DIR is set explicitly:
   the same reason.
 
 Why KB_ENV_FILE rather than EnvironmentFile= for secrets:
-  kb_mcp.config calls load_dotenv(override=True), so values from a .env file
-  beat variables already in the environment. If the service ever resolves a
-  stray .env (find_dotenv walks up from the working directory), that file
-  would silently override anything set with Environment=/EnvironmentFile=.
   Naming the file through KB_ENV_FILE pins exactly which file is
-  authoritative. Secrets live in that file, not in the unit: keep it mode 600
-  and owned by the service account.
+  authoritative, and since 0.2.1 it also switches kb_mcp.config out of
+  discovery entirely: with KB_ENV_FILE set, no .env is searched for. That
+  search walked up from the installed module's own directory -- not the
+  working directory -- so any .env above the package, including one left in
+  the deploy root beside config/, was loaded with override=True and beat
+  everything the unit set with Environment=/EnvironmentFile=. Secrets live in
+  that file, not in the unit: keep it mode 600 and owned by the service
+  account.
 
 Requires linger so the service survives logout (once per account, permanent):
   loginctl enable-linger
@@ -280,10 +282,12 @@ EnvironmentFile=$defaults_file
 # defaults to the relative "data", which would land in the account's home.
 Environment=DATA_DIR=$data_dir
 
-# Names the authoritative secrets file. kb_mcp.config loads it with
-# override=True, so this must be set explicitly rather than relying on a .env
-# being found relative to the working directory. It is loaded last, so a
-# secret beats any default from EnvironmentFile above.
+# Names the authoritative secrets file. Setting it also stops kb_mcp.config
+# searching for a .env of its own, which it did by walking up from the
+# installed module's directory -- a file left anywhere above the package would
+# otherwise beat the EnvironmentFile above for every key this file does not
+# itself set. It is loaded last, so a secret beats any default from
+# EnvironmentFile above.
 Environment=KB_ENV_FILE=$env_file
 $mikey_line
 $hf_line
