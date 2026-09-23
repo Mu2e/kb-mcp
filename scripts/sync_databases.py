@@ -36,7 +36,7 @@ settings into the other. SCHEMA is kept as its own var rather than folded
 into the URL, since it's an app-level policy choice (which search_path to
 target) rather than a raw connection detail.
 
-A URL with no password (e.g. "postgresql://scorrodi@ifdb11:5475/mu2e_docdb_prd")
+A URL with no password (e.g. "postgresql://<user>@<db-host>:<port>/<database>")
 is what lets libpq negotiate GSSAPI (Kerberos) instead of password auth,
 the same branch kb_mcp.kb.database.get_database_url() uses - provided a
 valid ticket exists in the environment (kinit) and the server's
@@ -44,8 +44,8 @@ pg_hba.conf accepts it.
 
 hostaddr (Kerberos-through-a-tunnel gotcha, confirmed necessary against
 the real prod database 2026-09-20): when connecting through an SSH
-local-forward (e.g. `ssh -L 15475:ifdb11:5475 jumphost`, then connecting to
-127.0.0.1:15475), libpq derives the Kerberos service-principal hostname
+local-forward (e.g. `ssh -L 15432:<db-host>:<port> <jumphost>`, then connecting
+to 127.0.0.1:15432), libpq derives the Kerberos service-principal hostname
 from whatever `host` value it's given - which would be "127.0.0.1" or
 "localhost", not the real server name, and GSSAPI auth fails looking for a
 service principal that doesn't exist. The fix is to pass the REAL hostname
@@ -53,7 +53,7 @@ as `host` (for Kerberos/TLS identity) and the tunnel's local endpoint as
 `hostaddr` (the actual TCP target) - libpq connection URIs accept arbitrary
 keyword=value query params, so this is just:
 
-    postgresql://scorrodi@ifdb11:5475/mu2e_docdb_prd?hostaddr=127.0.0.1
+    postgresql://<user>@<db-host>:<port>/<database>?hostaddr=127.0.0.1
 
 Only add ?hostaddr=... when tunneling; omit it for a directly-reachable
 database.
