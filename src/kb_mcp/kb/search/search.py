@@ -121,11 +121,30 @@ def log_search(
             time_fusion=time_fusion,
         )
 
-        session.add(search_log)
-
-        # Only commit if we own the session
+        # The write has to happen inside this try, in both ownership cases.
+        #
+        # session.add() alone only queues the INSERT. When we do not own the
+        # session, it is flushed by the caller at their next commit -- outside
+        # this try/except, so a failure there escapes the "don't fail the
+        # search if logging fails" contract below. Worse, it poisons the
+        # caller's transaction, detaching the very Document instances the
+        # search is about to format, so the visible error becomes a
+        # DetachedInstanceError naming neither the cause nor the fix.
+        #
+        # That is not hypothetical: a service account with SELECT but no
+        # INSERT on logs_search produced exactly it -- a search that found its
+        # results and then returned nothing.
+        #
+        # A SAVEPOINT keeps the failure local. Rolling it back discards the
+        # log row and leaves the caller's transaction, and its loaded objects,
+        # untouched.
         if should_close:
+            session.add(search_log)
             session.commit()
+        else:
+            with session.begin_nested():
+                session.add(search_log)
+                session.flush()
 
     except Exception as e:
         # Don't fail the search if logging fails

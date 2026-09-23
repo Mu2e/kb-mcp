@@ -17,6 +17,8 @@ logger = logging.getLogger(__name__)
 DEFAULT_MAX_RESULTS = 5
 
 
+from sqlalchemy.orm.exc import DetachedInstanceError
+
 # Graph imports
 from ..kb.graph import (
     get_node,
@@ -151,11 +153,26 @@ def _format_search_results(results: List[Dict[str, Any]], context_chars: int = 5
         if not doc:
             continue
 
-        doc_text = doc.text or ""
+        try:
+            doc_text = doc.text or ""
+            # Unique ID for the model to use in subsequent calls
+            doc_identifier = f"{doc.source_id}_{doc.doc_id}"
+            doc_id = doc.id or doc_identifier
+        except DetachedInstanceError as exc:
+            # These are ORM attribute reads, so they lazy-load -- and a
+            # detached instance means the session died after the search
+            # succeeded, typically on an unrelated write in the same
+            # transaction. SQLAlchemy's message names neither the cause nor
+            # the fix, and it is what the operator sees, so replace it.
+            raise RuntimeError(
+                "Search results are detached from their database session, so "
+                "their text cannot be read. The search itself succeeded -- a "
+                "later failure in the same transaction invalidated the "
+                "session. The original error is logged immediately before "
+                "this one; a missing INSERT grant on logs_search is the "
+                "common cause."
+            ) from exc
         doc_text_len = len(doc_text)
-        # Unique ID for the model to use in subsequent calls
-        doc_identifier = f"{doc.source_id}_{doc.doc_id}"
-        doc_id = doc.id or doc_identifier
 
         # Prepare Content Body & Determine Status
         from ..chunking import base_strategy
