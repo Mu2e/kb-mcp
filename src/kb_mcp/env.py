@@ -75,22 +75,29 @@ def load_env(explicit: Optional[str] = None) -> Optional[Path]:
     over a systemd unit's ``Environment=``/``EnvironmentFile=`` settings. Set
     ``KB_ENV_FILE`` explicitly in the unit to pin which file is authoritative.
     """
+    pinned = bool(explicit or os.environ.get(ENV_FILE_VAR))
     env_file = resolve_env_file(explicit)
     if env_file is None:
         return None
 
     if not env_file.is_file():
-        if explicit or os.environ.get(ENV_FILE_VAR):
+        if pinned:
             raise FileNotFoundError(f"env file not found: {env_file}")
         return None
 
     load_dotenv(dotenv_path=str(env_file), override=True)
 
-    # Publish the resolved path so kb_mcp.config reloads it after its own
-    # dotenv handling (see the KB_ENV_FILE block there). Without this a
-    # --env-file passed on the command line would be silently overridden by
-    # a .env that config.py happens to find.
-    os.environ[ENV_FILE_VAR] = str(env_file)
+    # Publish a pinned path so kb_mcp.config reloads it after its own dotenv
+    # handling (see the KB_ENV_FILE block there). Without this a --env-file
+    # passed on the command line would be silently overridden by a .env that
+    # config.py happens to find.
+    #
+    # Only a pinned one: config.py makes a pinned file beat its .env.local
+    # sibling, so publishing a merely *discovered* checkout .env would make
+    # every key it shares with .env.local ignore the .env.local value -- the
+    # opposite of what kb and kb-import do from the same checkout.
+    if pinned:
+        os.environ[ENV_FILE_VAR] = str(env_file)
     return env_file
 
 

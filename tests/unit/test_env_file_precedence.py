@@ -44,7 +44,8 @@ def staged_package(tmp_path_factory):
     )
     # The stray file: what a leftover checkout .env, or one dropped in the
     # deploy root, looks like from the installed package's point of view.
-    (root / ".env").write_text("PORT=8443\nMCP_HOST=127.0.0.1\nKB_STRAY_MARKER=leaked\n")
+    (root / ".env").write_text("PORT=8443\nMCP_HOST=127.0.0.1\nKB_STRAY_MARKER=leaked\nKB_OVERRIDE_PROBE=from-env\n")
+    (root / ".env.local").write_text("KB_OVERRIDE_PROBE=from-local\n")
     return root
 
 
@@ -124,3 +125,22 @@ def test_pinned_env_file_is_not_topped_up_by_module_imports(staged_package, tmp_
 
     out = _run(staged_package, {"KB_ENV_FILE": str(private)}, probe=LEAK_PROBE)
     assert out.splitlines()[-1] == "None", "a module import loaded the stray .env"
+
+
+# The start of every entry point that uses kb_mcp.env (kb-server,
+# kb-server-stdio, kb-agent), followed by the config import.
+ENTRY_POINT_PROBE = textwrap.dedent(
+    """
+    import os
+    from kb_mcp.env import load_env
+    load_env()
+    import kb_mcp.config
+    print(os.environ.get("KB_OVERRIDE_PROBE"))
+    """
+)
+
+
+def test_entry_point_keeps_env_local_overrides_for_a_discovered_env(staged_package):
+    """A discovered .env must not be promoted to pinned, which would beat .env.local."""
+    out = _run(staged_package, {}, probe=ENTRY_POINT_PROBE)
+    assert out.splitlines()[-1] == "from-local"
