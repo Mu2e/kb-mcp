@@ -21,9 +21,7 @@ if _IS_MAIN:
         sys.path.insert(0, str(project_root))
 
 import httpx
-from dotenv import load_dotenv
 
-load_dotenv()
 
 # Use absolute imports when running as script, relative when imported as module
 if _IS_MAIN:

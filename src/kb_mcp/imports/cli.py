@@ -6,8 +6,10 @@ import logging
 import sys
 from pathlib import Path
 
-from dotenv import load_dotenv
-load_dotenv()
+# kb_mcp.config loads the configuration on import (KB_ENV_FILE when set,
+# otherwise the discovered .env, plus .env.local overrides). Import it first so
+# it is in place before any importer reads os.environ.
+from .. import config  # noqa: F401
 
 logger = logging.getLogger(__name__)
 

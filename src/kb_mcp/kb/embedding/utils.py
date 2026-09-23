@@ -3,19 +3,9 @@
 import os
 import logging
 import threading
-from pathlib import Path
 from typing import List, Optional, Type, Dict, Any, Union
 
-from dotenv import load_dotenv
-
 from .embedders import OpenAIEmbedder, SentenceTransformersEmbedder
-
-# Load environment variables from .env file
-# Find project root (where .env file is located)
-# Go up from src/kb_mcp/kb/embedding/utils.py to project root
-project_root = Path(__file__).parent.parent.parent.parent.parent
-env_path = project_root / ".env"
-load_dotenv(env_path)
 
 logger = logging.getLogger(__name__)
 

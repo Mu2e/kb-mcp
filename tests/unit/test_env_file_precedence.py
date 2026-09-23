@@ -44,11 +44,11 @@ def staged_package(tmp_path_factory):
     )
     # The stray file: what a leftover checkout .env, or one dropped in the
     # deploy root, looks like from the installed package's point of view.
-    (root / ".env").write_text("PORT=8443\nMCP_HOST=127.0.0.1\n")
+    (root / ".env").write_text("PORT=8443\nMCP_HOST=127.0.0.1\nKB_STRAY_MARKER=leaked\n")
     return root
 
 
-def _run(staged, env_extra):
+def _run(staged, env_extra, probe=PROBE):
     env = {
         k: v
         for k, v in os.environ.items()
@@ -58,7 +58,7 @@ def _run(staged, env_extra):
     env["PYTHONPATH"] = str(staged / "pkg")
     env.update(env_extra)
     result = subprocess.run(
-        [sys.executable, "-c", PROBE],
+        [sys.executable, "-c", probe],
         capture_output=True,
         text=True,
         cwd=str(staged),
@@ -101,3 +101,26 @@ def test_without_a_pinned_file_discovery_still_works(staged_package):
     """The checkout convenience is unchanged: no KB_ENV_FILE, .env is found."""
     out = _run(staged_package, {"PORT": "8008", "MCP_HOST": "0.0.0.0"})
     assert out == "port=8443 host=127.0.0.1"
+
+
+# Modules that used to call a bare load_dotenv() at import time, which found
+# the stray .env and filled in every key the pinned file left unset.
+LEAK_PROBE = textwrap.dedent(
+    """
+    import os
+    import kb_mcp.kb
+    import kb_mcp.imports.cli
+    import kb_mcp.imports.inspire
+    import kb_mcp.parser.parser_azure
+    print(os.environ.get("KB_STRAY_MARKER"))
+    """
+)
+
+
+def test_pinned_env_file_is_not_topped_up_by_module_imports(staged_package, tmp_path):
+    """Importing the package must not load the stray .env behind KB_ENV_FILE."""
+    private = tmp_path / "kb-mcp.env"
+    private.write_text("DB_HOST=db.example.internal\n")
+
+    out = _run(staged_package, {"KB_ENV_FILE": str(private)}, probe=LEAK_PROBE)
+    assert out.splitlines()[-1] == "None", "a module import loaded the stray .env"

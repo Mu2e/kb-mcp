@@ -5,11 +5,9 @@ import os
 from pathlib import Path
 from typing import List, Tuple, Any
 
-from dotenv import load_dotenv
 
 from .parser_base import BaseParser
 
-load_dotenv()
 
 logger = logging.getLogger(__name__)
 
