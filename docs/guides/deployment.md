@@ -455,14 +455,39 @@ compared in the same vector space, so a mismatch returns plausible-looking
 nonsense rather than an error. Check it against the `EmbeddingConfig` rows in
 the database before first start.
 
-Check the install before enabling anything. This reports the resolved env
-file, the bind target, the embedding provider, and whether the local embedder
-is actually installed:
+Check the install before enabling anything:
 
 ```bash
 <deploy-root>/current/.venv/bin/kb-mcp.sh --check \
   --env-file /exp/mu2e/app/users/mu2eai/mcp/kb/config/kb-mcp.env
 ```
+
+`--check` loads **both** configuration layers, in the unit's order: this
+release's `share/kb-mcp/mu2e.env` first, then the private file above, with the
+private file overriding. That matters, because checking either file on its own
+produces a confident, healthy-looking report of a configuration that will
+never run:
+
+| checked with | what it reports |
+|---|---|
+| `mu2e.env` alone | correct ports and embedding model, no database, no LLM endpoint, no `ADMIN_PASSWORD` -- none of which that file contains |
+| the private file alone | correct secrets, but `127.0.0.1:8443`, `:8444` and an unset embedding model, because those are *code* defaults |
+| both (the default) | what the service will actually do |
+
+Point `--env-file` at the private file, never at `mu2e.env`; `--check` fails
+if you do. Use `--defaults <path>` for a non-standard defaults file, or
+`--no-defaults` to see the bare code defaults.
+
+It reports the resolved files, the bind targets, the embedding provider and
+whether the local embedder actually imports, and it fails when `DB_HOST`,
+`DB_NAME`, `DB_USER` or `OPENAI_BASE_URL` are missing, or when the web UI is
+in public mode with no `ADMIN_PASSWORD` -- that last combination leaves the
+upload, delete, re-chunk and API-key pages reachable with no login at all
+(`is_admin_unlocked()` opens the gate when no password is configured).
+
+It reports `DATA_DIR`, `HF_HOME` and `MIKEY_KEYS_FILE` without failing on
+them: the unit supplies all three with `Environment=`, so they are expected to
+be unset in a manual run.
 
 ### Enable the service
 
