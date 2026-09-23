@@ -167,6 +167,9 @@ path = "src/kb_mcp/__init__.py"
 [tool.hatch.build.targets.wheel.shared-scripts]
 "scripts/kb-mcp.sh" = "kb-mcp.sh"
 "scripts/kb-mcp-install-unit.sh" = "kb-mcp-install-unit.sh"
+# The deployment guide's verify step used to require a checkout on the deploy
+# host, which the install deliberately does not need.
+"scripts/smoke_test_http.py" = "kb-mcp-smoke-test"
 
 [project.urls]
 Repository = "https://github.com/Mu2e/kb-mcp"
