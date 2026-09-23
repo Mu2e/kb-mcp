@@ -24,12 +24,36 @@ Run everything as the service account.
 
 ```bash
 mu2einit && slc uv
+```
+
+`deploy-mu2e.sh` is the only piece that has to come from outside the
+deployment, since it is what creates the venv everything else lives in. Three
+ways to get it, in order of preference:
+
+```bash
+# a. already installed: use the previous release's copy (upgrades)
+/exp/mu2e/app/users/mu2eai/mcp/kb/current/.venv/bin/deploy-mu2e.sh \
+    /exp/mu2e/app/users/mu2eai/mcp/kb v0.2.2
+
+# b. first install, no checkout: fetch that release's copy
+curl -fsSL https://raw.githubusercontent.com/Mu2e/kb-mcp/v0.2.2/scripts/deploy-mu2e.sh \
+    -o /tmp/deploy-mu2e.sh
+bash /tmp/deploy-mu2e.sh /exp/mu2e/app/users/mu2eai/mcp/kb v0.2.2
+
+# c. from a checkout
 ./scripts/deploy-mu2e.sh /exp/mu2e/app/users/mu2eai/mcp/kb v0.2.2
 ```
 
+Pin the URL in (b) to the tag being installed, not `develop`, so the installer
+matches the release. In (a) you are running the *previous* release's installer
+— fine, since it only issues `uv` commands, but a fix to the installer itself
+only takes effect the release after it lands.
+
 Creates `<deploy-root>/releases/<ref>/.venv` and points `<deploy-root>/current`
-at it. `uv` fetches the ref from GitHub, so **the tag must be pushed first**; a
-checkout is needed only for this one script.
+at it. `uv` fetches the ref from GitHub, so **the tag must be pushed first**. No
+source tree is copied, and after this the deploy root is self-contained:
+`kb-mcp.sh`, `kb-mcp-install-unit.sh`, `kb-mcp-smoke-test` and `deploy-mu2e.sh`
+all live in `<release>/.venv/bin/`.
 
 CPU-only torch is installed first, on purpose: `sentence-transformers` is a
 core dependency and its torch would otherwise resolve to the CUDA build —
@@ -296,7 +320,7 @@ Tag the **tip**, not the version-bump commit, if anything landed after it.
 Then, as the service account:
 
 ```bash
-./scripts/deploy-mu2e.sh /exp/mu2e/app/users/mu2eai/mcp/kb v0.2.2
+<...>/current/.venv/bin/deploy-mu2e.sh /exp/mu2e/app/users/mu2eai/mcp/kb v0.2.2
 <...>/current/.venv/bin/kb-mcp.sh --check --env-file <...>/config/kb-mcp.env
 # re-run BOTH install-unit commands from step 6
 systemctl --user restart kb-mcp.service kb-web.service
