@@ -53,11 +53,37 @@ class WebSessionManager:
         self.public_mode = auth_config['web_public_mode']
 
         self.require_auth = auth_config['web_require_auth']
-        if not self.require_auth:
+        # Three distinct postures hide behind require_auth=False, and they have
+        # very different consequences, so they get three different messages. A
+        # blanket "authentication disabled" warning fires on every start of a
+        # correctly configured public-mode deployment, which teaches operators
+        # to ignore the one case that matters.
+        if self.require_auth:
+            pass
+        elif not self.public_mode:
             logger.warning(
-                "WEB AUTHENTICATION DISABLED - the web UI performs no login checks. "
-                "Only safe while it is bound to localhost (WEB_HOST=127.0.0.1). "
-                "Set WEB_REQUIRE_AUTH=true before exposing it on a network interface."
+                "WEB AUTHENTICATION DISABLED - /login mints a session carrying "
+                "admin rights with no password and no check, so anyone who can "
+                "reach the port gets uploads, deletes, re-chunking and API-key "
+                "management. Binding to loopback does not prevent this on a "
+                "shared host: any account there can forward a tunnel. Set "
+                "WEB_PUBLIC_MODE=true (browsing open, writes behind "
+                "ADMIN_PASSWORD) or WEB_REQUIRE_AUTH=true."
+            )
+        elif not self.admin_password_configured:
+            logger.warning(
+                "WEB WRITE PAGES UNPROTECTED - public mode is on, but "
+                "ADMIN_PASSWORD is not set and is_admin_unlocked() opens the "
+                "gate when no password is configured. Uploads, deletes, "
+                "re-chunking and API-key management are reachable by anyone who "
+                "can reach the port, including through an ssh tunnel to "
+                "loopback on a shared host. Set ADMIN_PASSWORD."
+            )
+        else:
+            logger.info(
+                "Web UI in public mode: browsing needs no session; uploads, "
+                "deletes, re-chunking and API-key management are behind "
+                "ADMIN_PASSWORD."
             )
         #logger.info(
         #    f"Web session timeout: {self.session_timeout} seconds "
@@ -288,10 +314,10 @@ class WebSessionManager:
     def get_auth_warning_html(self) -> str:
         """Banner shown when the site is genuinely running without protection.
 
-        In public mode the browsable pages are meant to be open and the
-        administrative ones are behind the admin password, so there is nothing
-        to warn about - the banner only appears when nothing is protecting the
-        write pages either.
+        In public mode with a password the browsable pages are meant to be open
+        and the administrative ones are behind ADMIN_PASSWORD, so there is
+        nothing to warn about. Every other combination leaves the write pages
+        reachable without a credential, and says so.
         """
         if self.require_auth:
             return ""
@@ -301,13 +327,15 @@ class WebSessionManager:
                 # Browsing is meant to be open and the write pages are behind
                 # the password, so there is nothing to warn about.
                 return ""
-            # Public mode without a password: nobody can reach the write pages
-            # at all, because there is no way to obtain an admin session.
+            # Public mode without a password. is_admin_unlocked() returns True
+            # when no password is configured, so require_admin() lets every
+            # write route through -- the pages are unprotected, not unreachable.
             return """
-            <div style="background: #fff3cd; border: 1px solid #ffc107; padding: 15px; margin-bottom: 20px; border-radius: 4px;">
+            <div style="background: #f8d7da; border: 1px solid #dc3545; padding: 15px; margin-bottom: 20px; border-radius: 4px;">
                 <strong>No admin password set:</strong> the administrative pages
-                (upload, delete, statistics, logs, evaluations) cannot be reached.
-                Set <code>ADMIN_PASSWORD</code> to enable them.
+                (upload, delete, re-chunk, statistics, logs, evaluations, API keys)
+                are reachable by anyone who can open this page, with no login.
+                Set <code>ADMIN_PASSWORD</code> to put them behind a password.
             </div>
             """
 
