@@ -12,9 +12,27 @@ from kb_mcp.kb.db_models import Base
 # different) chunking. sentence-transformers is a core dependency, so these
 # normally run; the guard is for environments deliberately built without it
 # (e.g. a --no-deps install).
+def _embedder_unusable():
+    """Why sentence-transformers cannot be used here, or None if it is fine.
+
+    find_spec() is not enough. A transformers version that does not match
+    sentence-transformers leaves the package installed but unimportable, so
+    the spec is found, the skip does not fire, and these tests run against the
+    256-token fallback window -- failing with a chunking difference that looks
+    like a regression in the chunker rather than a broken environment.
+    """
+    try:
+        import sentence_transformers  # noqa: F401
+    except Exception as exc:  # noqa: BLE001 - any failure makes it unusable
+        return f"{type(exc).__name__}: {exc}"
+    return None
+
+
+_EMBEDDER_UNUSABLE = _embedder_unusable()
+
 requires_embedder = pytest.mark.skipif(
-    importlib.util.find_spec("sentence_transformers") is None,
-    reason="needs sentence-transformers (a core dependency; install is incomplete)",
+    _EMBEDDER_UNUSABLE is not None,
+    reason=f"needs a working sentence-transformers ({_EMBEDDER_UNUSABLE})",
 )
 
 # Default to SQLite file for easier testing and sharing across sessions
