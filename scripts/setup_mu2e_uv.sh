@@ -6,14 +6,17 @@
 
 # This script keeps three concerns in three separate places:
 #   - code:        wherever this repo is checked out (detected below)
-#   - environment: disposable, fast local scratch (/tmp) — venv + package
-#                  cache, safe to delete and rebuild at any time
+#   - environment: disposable, fast local scratch (/tmp by default) — venv +
+#                  package cache, safe to delete and rebuild at any time
 #   - data:        persistent storage (/exp) — anything expensive to
 #                  regenerate (e.g. downloaded model weights), so it
 #                  survives /tmp cleanup and isn't tied to one node
 #
 # Override any of the three locations via KB_ENV_DIR / UV_CACHE_DIR /
-# KB_DATA_DIR in the environment before running this script.
+# KB_DATA_DIR in the environment before running this script. To move the whole
+# environment (venv + cache) at once, set KB_SCRATCH_DIR instead, or pass
+# --scratch for /scratch/$USER:
+#   source scripts/setup_mu2e_uv.sh --scratch
 
 # Dynamically set the project directory based on where this script is located
 # (this script lives in scripts/, so the project root is one level up).
@@ -42,12 +45,50 @@ if [ ! -f "$SOURCE_CODE_DIR/pyproject.toml" ]; then
     return 1 2>/dev/null || exit 1
 fi
 
+# Base directory for the disposable environment (venv + uv cache). Defaults to
+# /tmp/$USER; point it at another local disk with KB_SCRATCH_DIR=/some/path,
+# or use the shorthand flag:
+#   source scripts/setup_mu2e_uv.sh --scratch    # -> /scratch/$USER
+#
+# Only our own flags are acted on and everything else is ignored: when this
+# file is sourced without arguments, bash hands it the *caller's* positional
+# parameters (e.g. cron_docdb_update.sh's own options), which are not ours.
+#
+# The choice goes into kb_scratch_dir, never back into KB_SCRATCH_DIR: this
+# file is sourced, so anything it assigns outlives it in the caller's shell,
+# and a later plain `source` would read a leftover /scratch as a user override.
+kb_scratch_dir="${KB_SCRATCH_DIR:-/tmp/$USER}"
+for kb_arg in "$@"; do
+    case "$kb_arg" in
+        --scratch) kb_scratch_dir="/scratch/$USER" ;;
+        --tmp)     kb_scratch_dir="/tmp/$USER" ;;
+    esac
+done
+unset kb_arg
+#
+# Created up front so an unwritable base (e.g. /scratch is root-owned on some
+# nodes) fails here with a clear message instead of deep inside uv.
+if ! mkdir -p "$kb_scratch_dir" 2>/dev/null || [ ! -w "$kb_scratch_dir" ]; then
+    kb_setup_fail "scratch directory $kb_scratch_dir is not writable. Pick another
+  location (default /tmp/$USER), or ask for a per-user directory to be created there."
+    return 1 2>/dev/null || exit 1
+fi
+
 # Where to put the venv. Override with: KB_ENV_DIR=/some/path ./setup_mu2e_uv.sh
-LOCAL_ENV_DIR="${KB_ENV_DIR:-/tmp/$USER/kb-env-uv}"
+LOCAL_ENV_DIR="${KB_ENV_DIR:-$kb_scratch_dir/kb-env-uv}"
 
 # uv's package cache defaults to $HOME/.cache/uv, which can blow past small
 # home-directory quotas. Keep it on local scratch next to the venv instead.
-export UV_CACHE_DIR="${UV_CACHE_DIR:-/tmp/$USER/uv-cache}"
+#
+# UV_CACHE_DIR has to be exported for uv, so it does survive in the caller's
+# shell. KB_SETUP_UV_CACHE_DIR records the value this script chose, so a
+# re-source can tell its own leftover (recompute it) from a real user override
+# (keep it).
+if [ -z "$UV_CACHE_DIR" ] || [ "$UV_CACHE_DIR" = "$KB_SETUP_UV_CACHE_DIR" ]; then
+    export UV_CACHE_DIR="$kb_scratch_dir/uv-cache"
+    KB_SETUP_UV_CACHE_DIR="$UV_CACHE_DIR"
+fi
+unset kb_scratch_dir
 
 # Persistent data (model weights, etc.) lives separately from both the code
 # and the disposable local-scratch environment, so it survives /tmp cleanup
@@ -179,5 +220,6 @@ export HF_HOME="$DATA_DIR/huggingface_cache"
 
 echo "Environment activated."
 echo "Project path: $SOURCE_CODE_DIR"
+echo "Env path:     $LOCAL_ENV_DIR"
 echo "Data path:    $DATA_DIR"
 echo "Python location: $(which python)"
