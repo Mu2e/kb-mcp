@@ -22,9 +22,19 @@ def _embedder_unusable():
     like a regression in the chunker rather than a broken environment.
     """
     try:
-        import sentence_transformers  # noqa: F401
+        from sentence_transformers import SentenceTransformer
     except Exception as exc:  # noqa: BLE001 - any failure makes it unusable
         return f"{type(exc).__name__}: {exc}"
+
+    # Importing is not enough. These tests need the model's real 512-token
+    # window; without a loadable model the chunker falls back to 256 and they
+    # fail with a chunking difference that reads as a regression in the
+    # chunker. The usual cause is HF_HOME pointing at a cache that has never
+    # been populated and a Hub that cannot be reached.
+    try:
+        SentenceTransformer("BAAI/bge-small-en-v1.5")
+    except Exception as exc:  # noqa: BLE001 - unreachable Hub, cold cache, ...
+        return f"model will not load ({type(exc).__name__}: {exc})"
     return None
 
 
