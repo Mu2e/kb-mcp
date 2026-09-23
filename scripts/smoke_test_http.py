@@ -23,11 +23,15 @@ a populated knowledge base an empty result IS the failure signal, and --query
 treats it as one. Use --allow-empty if the knowledge base really is empty.
 
 Usage:
-  smoke_test_http.py <base-url> [--token TOKEN] [--query TEXT] [--timeout S]
+  kb-mcp-smoke-test <base-url> [--token TOKEN] [--query TEXT] [--timeout S]
+
+Installed into the deployment's venv as `kb-mcp-smoke-test`, so verifying a
+deploy needs no checkout on the host; also runnable from a checkout as
+scripts/smoke_test_http.py.
 
 Examples:
-  smoke_test_http.py http://127.0.0.1:8008
-  smoke_test_http.py http://mu2eaigpvm01:8008 --token mikey_xxx --query "tracker alignment"
+  kb-mcp-smoke-test http://127.0.0.1:8008
+  kb-mcp-smoke-test http://mu2eaigpvm01:8008 --token mikey_xxx --query "tracker alignment"
 
 Exits non-zero on the first failure, so it is usable as a deployment gate.
 """
@@ -47,8 +51,9 @@ try:
     from mcp.client.streamable_http import streamable_http_client
 except ImportError as exc:  # pragma: no cover - environment problem, not logic
     print(f"FAIL  missing client dependency: {exc}", file=sys.stderr)
-    print("      Run this with the deployment's own python:", file=sys.stderr)
-    print("      <deploy-root>/current/.venv/bin/python scripts/smoke_test_http.py ...", file=sys.stderr)
+    print("      Run the copy installed in the deployment, which carries a", file=sys.stderr)
+    print("      shebang pointing at that release's own interpreter:", file=sys.stderr)
+    print("      <deploy-root>/current/.venv/bin/kb-mcp-smoke-test <base-url> ...", file=sys.stderr)
     sys.exit(2)
 
 
