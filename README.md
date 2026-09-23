@@ -103,7 +103,8 @@ mkdocs serve
 - [Adding Documents](docs/guides/adding-documents.md) — Importing documents and code
 - [Evaluation](docs/guides/evaluation.md) — Measuring retrieval quality
 - [Database Schema](docs/guides/database.md) — Data models
-- [Deployment](docs/guides/deployment.md) — Docker and Cloud Run deployment
+- [Deployment](docs/guides/deployment.md) — Docker, NERSC and Cloud Run deployment
+- [Mu2e Deployment](docs/guides/deploy-mu2e.md) — systemd services on a Mu2e node
 - [Extending kb-mcp](docs/guides/extending-kb.md) — Custom chunking, embedders, importers
 
 ### API Reference

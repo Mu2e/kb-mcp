@@ -42,6 +42,7 @@ nav:
     - Database Schema: guides/database.md
     - Deployment:
       - Deployment: guides/deployment.md
+      - Mu2e: guides/deploy-mu2e.md
       - Authentication: guides/authentication.md
   - API Reference:
     - Configuration: reference/config.md

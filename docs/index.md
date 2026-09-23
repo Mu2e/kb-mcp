@@ -36,7 +36,8 @@ The system ingests Mu2e content from four sources:
 - [CLI Usage](guides/cli.md) — Command-line tools
 - [Evaluation Workflows](guides/evaluation.md) — Measuring retrieval quality
 - [Database Schema](guides/database.md) — Understanding the data models
-- [Deployment](guides/deployment.md) — Docker and Cloud Run deployment
+- [Deployment](guides/deployment.md) — Docker, NERSC and Cloud Run deployment
+- [Mu2e Deployment](guides/deploy-mu2e.md) — systemd services on a Mu2e node
 - [Extending kb-mcp](guides/extending-kb.md) — Custom chunking, embedders, importers
 - [NERSC](guides/nersc.md) — NERSC-specific instructions
 
