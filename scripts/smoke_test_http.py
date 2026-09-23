@@ -57,6 +57,24 @@ except ImportError as exc:  # pragma: no cover - environment problem, not logic
     sys.exit(2)
 
 
+def _looks_like_timeout(exc: BaseException) -> bool:
+    """True if a timeout is anywhere inside a (possibly nested) exception."""
+    seen = []
+    stack = [exc]
+    while stack:
+        e = stack.pop()
+        if e is None or id(e) in seen:
+            continue
+        seen.append(id(e))
+        if isinstance(e, (httpx.TimeoutException, TimeoutError)):
+            return True
+        if "SSE stream ended without a response" in str(e):
+            return True
+        stack.extend(getattr(e, "exceptions", []) or [])
+        stack.extend(x for x in (e.__cause__, e.__context__) if x is not None)
+    return False
+
+
 def _ok(msg: str) -> None:
     print(f"ok    {msg}")
 
@@ -87,7 +105,19 @@ async def run(
         return 1
 
     # 2-4. the MCP surface
-    http_client = httpx2.AsyncClient(headers=headers) if headers else None
+    #
+    # The timeout has to go on this client: streamable_http_client takes no
+    # timeout of its own, so without one httpx's 5-second default governs the
+    # SSE stream. The first query after a restart loads the embedding model,
+    # which takes far longer than that -- the stream was then abandoned
+    # mid-call and reported as "SSE stream ended without a response", which
+    # reads like a server fault rather than a client timeout.
+    #
+    # Always construct the client, even with no token, so the timeout applies
+    # either way.
+    http_client = httpx2.AsyncClient(
+        headers=headers, timeout=httpx2.Timeout(timeout)
+    )
     try:
         async with streamable_http_client(
             f"{base_url}/mcp", http_client=http_client
@@ -157,6 +187,16 @@ async def run(
                 _ok(f"kb_search({query!r}) -> {count} result(s)")
                 return 0
     except Exception as exc:  # noqa: BLE001
+        # A timeout arrives wrapped in TaskGroup ExceptionGroups, and the
+        # innermost message ("SSE stream ended without a response") describes
+        # the symptom rather than the cause. Name the cause.
+        if _looks_like_timeout(exc):
+            _fail(f"MCP session timed out after {timeout:g}s")
+            print("      The first query after a restart loads the embedding")
+            print("      model, which can take a minute. Retry, or raise")
+            print("      --timeout. The server log will show whether it was")
+            print("      still working when the client gave up.")
+            return 1
         _fail(f"MCP session: {exc!r}")
         if not token:
             print("      If the server requires an API key, pass --token.", file=sys.stderr)
@@ -179,7 +219,10 @@ def main() -> int:
         action="store_true",
         help="Treat 0 search results as success (only for a genuinely empty KB).",
     )
-    parser.add_argument("--timeout", type=float, default=30.0, help="Seconds (default: 30).")
+    # 120s, not 30: now that the timeout actually reaches the transport, it has
+    # to cover the first query after a restart, which loads the embedding model.
+    parser.add_argument("--timeout", type=float, default=120.0,
+                        help="Seconds (default: 120, enough for a cold start).")
     args = parser.parse_args()
 
     return asyncio.run(

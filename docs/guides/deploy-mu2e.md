@@ -155,20 +155,18 @@ A restart alone runs new code under the **old release's unit**, with whatever
 `Environment=` and `EnvironmentFile=` that release rendered — and pruning the
 old release then leaves a dangling symlink and a service that will not start.
 
-The installer enables and restarts each unit itself. On a release before
-v0.2.3 it only ran `enable --now`, which does nothing to an already-running
-service — so there, restart explicitly:
-
-```bash
-systemctl --user restart kb-mcp.service kb-web.service
-```
-
-Either way, confirm the running processes are the release you just deployed —
-`systemctl --user status` shows the resolved path, and it will say
-`releases/<ref>/…`:
+The installer enables and restarts each unit. Confirm the running processes are
+the release you just deployed — `systemctl --user status` shows the resolved
+path:
 
 ```bash
 systemctl --user status kb-mcp.service kb-web.service | grep releases/
+```
+
+If that still shows the previous release, restart explicitly:
+
+```bash
+systemctl --user restart kb-mcp.service kb-web.service
 ```
 
 ### 4. Verify
@@ -193,7 +191,10 @@ search, and `kb_search` reports a broken database as
 smoke test therefore treats an empty result as failure (`--allow-empty` if the
 knowledge base really is empty).
 
-First query is slow — ~50 s while the model loads — then a few seconds.
+The first query after a restart loads the embedding model and takes roughly a
+minute; later ones take a few seconds. The default `--timeout` (120 s) covers
+that — if it does trip, the smoke test says it timed out rather than reporting
+a stream error, and the server is usually still working.
 
 Auth, from another host:
 
