@@ -4,6 +4,7 @@ import logging
 import os
 from contextlib import contextmanager
 from typing import Generator
+from urllib.parse import quote
 
 from sqlalchemy import create_engine, event, text
 from sqlalchemy.engine import Engine
@@ -32,10 +33,15 @@ def get_database_url() -> str:
 
     # Check for PostgreSQL components
     if db_config['user'] and db_config['name']:
+        # Percent-encode the credentials: a password containing @ : / # or %
+        # otherwise produces a URL that fails to parse, or silently points at
+        # a different host.
+        user = quote(db_config['user'], safe='')
         if db_config['password']:
-            url = f"postgresql://{db_config['user']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/{db_config['name']}"
+            password = quote(db_config['password'], safe='')
+            url = f"postgresql://{user}:{password}@{db_config['host']}:{db_config['port']}/{db_config['name']}"
         else:
-            url = f"postgresql://{db_config['user']}@{db_config['host']}:{db_config['port']}/{db_config['name']}"
+            url = f"postgresql://{user}@{db_config['host']}:{db_config['port']}/{db_config['name']}"
         # hostaddr: see get_database_config()'s docstring — needed when
         # tunneling to a Kerberos-authenticated server, since libpq derives
         # the GSSAPI service-principal hostname from `host`, not the actual
