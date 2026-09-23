@@ -105,7 +105,7 @@ Once per surface, with the **same** `--data-dir`:
 U=/exp/mu2e/app/users/mu2eai/mcp/kb/current/.venv/bin/kb-mcp-install-unit.sh
 D=/exp/mu2e/data/users/mu2eai/kb
 E=/exp/mu2e/app/users/mu2eai/mcp/kb/config/kb-mcp.env
-K=<the shared mikey keys file>
+K=/exp/mu2e/app/users/mu2eai/mcp/mikey/keys   # the SHARED file, see below
 
 $U --surface mcp --data-dir "$D" --port 8008 \
    --env-file "$E" --hf-home "$D/cache/huggingface" \
@@ -132,7 +132,9 @@ loginctl enable-linger      # once per account, or the services die at logout
   and the two surfaces touch different session stores.
 - **`--mikey-keys` is the one shared keys file** the other Mu2e MCP servers
   read — check an existing unit rather than guessing. mikey has no default path
-  precisely so servers cannot drift into private key namespaces.
+  precisely so servers cannot drift into private key namespaces. Passing an
+  empty value disables mikey auth silently, so confirm it landed:
+  `systemctl --user show kb-mcp -p Environment | tr ' ' '\n' | grep MIKEY`.
 - **`--hf-home` must be outside the release.** The embedding model
   (`BAAI/bge-small-en-v1.5`, ~130 MB) downloads on first use; without this,
   every redeploy re-downloads it.
