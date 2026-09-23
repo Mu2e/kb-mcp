@@ -267,6 +267,37 @@ if present("DB_PASSWORD"):
     note("NOTE: DB_PASSWORD is set. This deployment authenticates with",
          "Kerberos/GSSAPI from the service account, and get_database_url()",
          "only builds a password-less URL when DB_PASSWORD is unset.")
+else:
+    # No password means get_database_url() builds a password-less URL and the
+    # connection authenticates with GSSAPI. That needs a ticket -- and it needs
+    # one in the cache the SERVICE reads, which is not this one by default.
+    import shutil
+    import subprocess
+
+    ccname = os.environ.get("KRB5CCNAME")
+    print(f"ok    Kerberos cache (this shell): {ccname or '<unset: libkrb5 default>'}")
+
+    klist = shutil.which("klist")
+    if klist is None:
+        note("NOTE: klist not on PATH; cannot check the ticket.")
+    elif subprocess.run([klist, "-s"]).returncode == 0:
+        print("ok    Kerberos ticket: valid in this shell")
+    else:
+        fail("Kerberos ticket: no valid ticket in this shell's cache")
+        note("There is no DB_PASSWORD, so the database connection",
+             "authenticates with GSSAPI and cannot succeed without one.")
+
+    # This is the part the check cannot verify for you, so it says so rather
+    # than implying the service is in the same state.
+    note("A systemd --user service does NOT inherit this KRB5CCNAME. Unless",
+         "the unit sets it -- kb-mcp-install-unit.sh --krb5-ccname -- the",
+         "service reads libkrb5's default /tmp/krb5cc_<uid>, which commonly",
+         "holds a stale ticket while the renewed one lives in a differently",
+         "named cache. The service then starts cleanly and fails only on its",
+         "first database call, where kb_search reports it as",
+         '{"message": "No results found"} rather than as an error.',
+         "What the service actually sees:",
+         "  systemd-run --user --pipe --wait klist")
 
 if present("OPENAI_BASE_URL"):
     print("ok    LLM endpoint: OPENAI_BASE_URL set")

@@ -60,6 +60,12 @@ Options:
                       for a non-standard layout. ExecStart is written against
                       <deploy-root>/current so that rolling back is repointing
                       that symlink and restarting -- no re-render needed.
+  --krb5-ccname <s>   Kerberos credential cache for the service, as a
+                      KRB5CCNAME spec (e.g. FILE:/tmp/krb5cc_1234_auto).
+                      Defaults to $KRB5CCNAME from the installing shell.
+                      Required in practice whenever the database connection
+                      authenticates with GSSAPI -- see "Why KRB5CCNAME" below.
+  --no-krb5-ccname    Do not set it (a deployment using DB_PASSWORD).
   --description <s>   Override the unit Description.
   --no-enable         Render and link, but do not enable/start.
   --dry-run           Print the unit that would be written, then exit.
@@ -83,6 +89,22 @@ Why KB_ENV_FILE rather than EnvironmentFile= for secrets:
   everything the unit set with Environment=/EnvironmentFile=. Secrets live in
   that file, not in the unit: keep it mode 600 and owned by the service
   account.
+
+Why KRB5CCNAME has to be set explicitly:
+  With no DB_PASSWORD the database connection authenticates with GSSAPI from
+  the service account's ticket, and a `systemd --user` service does NOT inherit
+  the KRB5CCNAME of the shell that installed it. It falls back to libkrb5's
+  default cache, /tmp/krb5cc_<uid> -- while the renewed ticket usually lives
+  somewhere else, such as /tmp/krb5cc_<uid>_auto. Both caches exist and both
+  hold the same principal, so the failure is not "no credentials cache" but
+  "Ticket expired", from whatever stale ticket the default cache still holds.
+
+  The service then starts cleanly, serves, authenticates MCP clients, and
+  fails only on the first database call -- where kb_search reports it as
+  {"message": "No results found"} rather than as an error. Compare:
+
+    klist                                   # the installing shell
+    systemd-run --user --pipe --wait klist  # what the service actually sees
 
 Requires linger so the service survives logout (once per account, permanent):
   loginctl enable-linger
@@ -113,6 +135,12 @@ deploy_root=""
 description=""
 do_enable=1
 dry_run=0
+# Default to the credential cache this shell is using. That is correct exactly
+# when the installer is run from a session whose ticket works, which is the
+# normal case -- and it is the only way the value can be discovered, since the
+# service cannot find it on its own. Empty is allowed: a deployment with a
+# database password needs no ticket at all.
+krb5_ccname="${KRB5CCNAME-}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -128,6 +156,8 @@ while [[ $# -gt 0 ]]; do
     --web-host)    web_host="${2:-}"; shift 2 ;;
     --deploy-root) deploy_root="${2:-}"; shift 2 ;;
     --description) description="${2:-}"; shift 2 ;;
+    --krb5-ccname) krb5_ccname="${2:-}"; shift 2 ;;
+    --no-krb5-ccname) krb5_ccname=""; shift ;;
     --no-enable)   do_enable=0; shift ;;
     --dry-run)     dry_run=1; shift ;;
     --help|-h)     usage ;;
@@ -192,8 +222,13 @@ esac
 # 0700: this directory holds api_keys.json and the session stores, which are
 # bearer credentials, plus copies of every ingested source document. On a
 # shared filesystem the default 0755 would expose all of it.
-mkdir -p "$data_dir"
-chmod 700 "$data_dir"
+#
+# Not under --dry-run: a flag documented as "print the unit, then exit" has no
+# business creating directories.
+if [[ "$dry_run" != "1" ]]; then
+  mkdir -p "$data_dir"
+  chmod 700 "$data_dir"
+fi
 
 # Non-secret settings ship with the package; fall back to naming the file
 # even if this release predates it, so the error is explicit.
@@ -220,8 +255,17 @@ fi
 env_file="$(cd "$(dirname "$env_file")" && pwd -P)/$(basename "$env_file")"
 
 if [[ -n "$hf_home" ]]; then
-  mkdir -p "$hf_home"
-  hf_home="$(cd "$hf_home" && pwd -P)"
+  if [[ "$dry_run" != "1" ]]; then
+    mkdir -p "$hf_home"
+  fi
+  if [[ -d "$hf_home" ]]; then
+    hf_home="$(cd "$hf_home" && pwd -P)"
+  else
+    # Dry run against a path that does not exist yet. readlink -m canonicalises
+    # without creating anything, so the printed unit still matches what a real
+    # run would write.
+    hf_home="$(readlink -m "$hf_home")"
+  fi
   hf_line="Environment=HF_HOME=$hf_home"
 else
   hf_line="# Environment=HF_HOME=...   # NOT SET: each redeploy re-downloads model weights"
@@ -232,6 +276,32 @@ if [[ -n "$mikey_keys" ]]; then
   mikey_line="Environment=MIKEY_KEYS_FILE=$mikey_keys"
 else
   mikey_line="# Environment=MIKEY_KEYS_FILE=...   # NOT SET: mikey token auth is off"
+fi
+
+if [[ -n "$krb5_ccname" ]]; then
+  krb5_line="Environment=KRB5CCNAME=$krb5_ccname"
+  echo "Kerberos cache for the service: $krb5_ccname" >&2
+  # Warn rather than fail: the cache lives in /tmp and is recreated by whatever
+  # renews the ticket, so it can legitimately be absent at install time. A
+  # typo, however, is silent until the first database call.
+  case "$krb5_ccname" in
+    FILE:*)
+      krb5_path="${krb5_ccname#FILE:}"
+      if [[ ! -e "$krb5_path" ]]; then
+        echo "WARNING: $krb5_path does not exist yet." >&2
+        echo "         If that is not where the renewed ticket lands, the" >&2
+        echo "         service will fail its first database call with" >&2
+        echo "         'Ticket expired'." >&2
+      fi
+      ;;
+  esac
+else
+  krb5_line="# Environment=KRB5CCNAME=...   # NOT SET: GSSAPI will use /tmp/krb5cc_<uid>"
+  echo "NOTE: KRB5CCNAME is not set for this unit." >&2
+  echo "      If the database connection uses GSSAPI (no DB_PASSWORD), the" >&2
+  echo "      service will read libkrb5's default cache rather than the one" >&2
+  echo "      your shell uses, and fail with 'Ticket expired'. Pass" >&2
+  echo "      --krb5-ccname, or --no-krb5-ccname to silence this." >&2
 fi
 
 if [[ "$surface" == "mcp" ]]; then
@@ -291,6 +361,12 @@ Environment=DATA_DIR=$data_dir
 Environment=KB_ENV_FILE=$env_file
 $mikey_line
 $hf_line
+# Kerberos credential cache. A systemd --user service does not inherit the
+# installing shell's KRB5CCNAME; without this it reads libkrb5's default
+# /tmp/krb5cc_<uid>, which commonly holds a stale ticket while the renewed one
+# lives in a differently-named cache. The symptom is a clean startup and
+# "Ticket expired" on the first database call.
+$krb5_line
 # Fail fast instead of hanging if the model cache is cold and the Hub is
 # unreachable. Comment out for the first start, which must populate the cache.
 #Environment=HF_HUB_OFFLINE=1

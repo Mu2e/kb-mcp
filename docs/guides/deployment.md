@@ -525,9 +525,10 @@ U=<deploy-root>/current/.venv/bin/kb-mcp-install-unit.sh
 D=/exp/mu2e/data/users/mu2eai/kb
 
 $U --surface mcp --data-dir "$D" --port 8008 \
-   --env-file   /exp/mu2e/app/users/mu2eai/mcp/kb/config/kb-mcp.env \
-   --hf-home    "$D/cache/huggingface" \
-   --mikey-keys <the shared mikey keys file>
+   --env-file    /exp/mu2e/app/users/mu2eai/mcp/kb/config/kb-mcp.env \
+   --hf-home     "$D/cache/huggingface" \
+   --mikey-keys  <the shared mikey keys file> \
+   --krb5-ccname "$KRB5CCNAME"
 
 $U --surface web --data-dir "$D" --web-port 8108 \
    --env-file   /exp/mu2e/app/users/mu2eai/mcp/kb/config/kb-mcp.env \
@@ -556,6 +557,49 @@ Linger must be enabled once per account so the service survives logout:
 ```bash
 loginctl enable-linger
 ```
+
+### Kerberos credentials
+
+With no `DB_PASSWORD` the database connection authenticates with GSSAPI, which
+needs a ticket -- in the cache the **service** reads. A `systemd --user`
+service does not inherit the `KRB5CCNAME` of the shell that installed it. It
+falls back to libkrb5's default, `/tmp/krb5cc_<uid>`, while the renewed ticket
+commonly lives somewhere else, such as `/tmp/krb5cc_<uid>_auto`.
+
+Both caches exist, and both hold the same principal, so the failure is not
+"no credentials cache" but:
+
+```
+connection to server at "ifdb11" (...), port 5475 failed:
+  could not initiate GSSAPI security context: ... Ticket expired
+```
+
+Nothing else looks wrong. The service starts, binds, serves `/status`, and
+authenticates MCP clients. Only the first database call fails -- and
+`kb_search` reports that as `{"message": "No results found", "results": []}`
+rather than as an error, so agents get quietly worse answers instead of a
+failure.
+
+`kb-mcp-install-unit.sh --krb5-ccname` writes it into the unit, defaulting to
+`$KRB5CCNAME` from the installing shell:
+
+```
+Environment=KRB5CCNAME=FILE:/tmp/krb5cc_18199_auto
+```
+
+Confirm the two contexts differ before and agree after:
+
+```bash
+klist                                     # the installing shell
+systemd-run --user --pipe --wait klist    # what the service sees
+```
+
+`--check` reports this shell's cache and whether its ticket is valid, but it
+cannot see the service's -- so it says so rather than implying they match.
+
+Note that the ticket is *renewed*, not permanent. Whatever refreshes
+`/tmp/krb5cc_<uid>_auto` -- typically a cron job holding a keytab -- has to
+keep running, or the service fails the same way once the ticket lapses.
 
 ### Web UI access model
 
