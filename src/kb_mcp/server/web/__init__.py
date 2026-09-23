@@ -37,6 +37,9 @@ def setup_web_routes(app, oauth_provider, session_manager: WebSessionManager):
     # Setup evaluation routes
     setup_eval_routes(app, session_manager, require_auth_html)
 
+    # Now that we know this process serves the web UI, say how it is guarded.
+    session_manager.log_auth_posture()
+
     # Setup logs routes
     setup_logs_routes(app, session_manager, require_auth_html)
 

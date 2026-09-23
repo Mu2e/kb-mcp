@@ -27,7 +27,9 @@ def posture(monkeypatch):
             monkeypatch.setenv("ADMIN_PASSWORD", admin_password)
         else:
             monkeypatch.delenv("ADMIN_PASSWORD", raising=False)
-        return WebSessionManager(oauth_provider=None)
+        manager = WebSessionManager(oauth_provider=None)
+        manager.log_auth_posture()
+        return manager
 
     return _build
 
@@ -69,6 +71,26 @@ def test_public_mode_without_password_says_the_write_pages_are_open(posture, cap
     warnings = [r for r in _records(caplog) if r.levelno >= logging.WARNING]
     assert len(warnings) == 1
     assert "ADMIN_PASSWORD" in warnings[0].message
+
+
+def test_construction_alone_says_nothing(monkeypatch, caplog):
+    """A --only-mcp process must not announce the web UI's auth posture.
+
+    The manager is built at import time, before the surface is known, so the
+    posture is reported by setup_web_routes() instead -- which only runs in a
+    process that actually serves the web UI.
+    """
+    monkeypatch.setenv("WEB_REQUIRE_AUTH", "false")
+    monkeypatch.setenv("WEB_PUBLIC_MODE", "false")
+    monkeypatch.delenv("ADMIN_PASSWORD", raising=False)
+    monkeypatch.delenv("ADMIN_PASSWORD_HASH", raising=False)
+
+    with caplog.at_level(logging.INFO):
+        WebSessionManager(oauth_provider=None)
+
+    assert _records(caplog) == [], (
+        "constructing the manager must not log the web auth posture"
+    )
 
 
 @pytest.mark.asyncio

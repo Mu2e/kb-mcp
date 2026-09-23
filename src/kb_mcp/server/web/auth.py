@@ -53,6 +53,14 @@ class WebSessionManager:
         self.public_mode = auth_config['web_public_mode']
 
         self.require_auth = auth_config['web_require_auth']
+
+    def log_auth_posture(self) -> None:
+        """Report how the web UI is protected. Called when its routes mount.
+
+        Not from __init__: the manager is constructed at import time, before
+        --only-mcp/--only-web is known, so a process serving no web routes at
+        all would otherwise announce the web UI's auth posture on every start.
+        """
         # Three distinct postures hide behind require_auth=False, and they have
         # very different consequences, so they get three different messages. A
         # blanket "authentication disabled" warning fires on every start of a
