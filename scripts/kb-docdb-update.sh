@@ -1,6 +1,5 @@
 #!/bin/bash
-# Incremental Mu2e DocDB update, meant to run unattended (systemd timer or
-# cron). Installed into a release's .venv/bin; in a checkout it is run through
+# Incremental Mu2e DocDB update, meant to run unattended from cron. Installed into a release's .venv/bin; in a checkout it is run through
 # scripts/cron_docdb_update.sh, which builds the environment first.
 #
 # Configuration comes from the same places as every other kb-mcp command:
@@ -51,7 +50,7 @@ fi
 
 KB_DATA="${KB_DATA_DIR:-/exp/mu2e/data/users/$USER/kb-mcp-data}"
 # A release has no setup script to point caches away from $HOME, so do it here
-# (the timer sets the same values; this keeps a by-hand run identical).
+# (so cron and a by-hand run behave the same).
 if [ -n "${KB_ENV_FILE:-}" ]; then
     export HF_HOME="${HF_HOME:-$KB_DATA/huggingface_cache}"
     export KB_ALCF_HOME="${KB_ALCF_HOME:-$KB_DATA/alcf}"

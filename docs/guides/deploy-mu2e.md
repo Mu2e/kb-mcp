@@ -234,9 +234,9 @@ restarting — no re-render.
 
 ## Scheduled DocDB import
 
-The incremental DocDB import runs from a release, twice a day, under a
-`systemd --user` timer or cron (see below). It runs as a user, not the service
-account: DocDB has no service login, so login is only possible as a user.
+The incremental DocDB import runs from a release, twice a day, from cron. It
+runs as a user, not the service account: DocDB has no service login, so login
+is only possible as a user.
 
 Same layout as the servers: deploy root `/exp/mu2e/app/users/<you>/mcp/kb`,
 data (logs, model cache, ALCF login) in `/exp/mu2e/data/users/<you>/kb-mcp-data`.
@@ -246,11 +246,11 @@ Files in `<deploy-root>/config/`, all mode 600:
 |---|---|---|
 | `kb-mcp.env` | database, LLM routing, parser settings | `.env.mu2e.example`, keeping only the database, LLM and parser keys |
 | `.env.local` | `MU2E_DOCDB_USERNAME`, `MU2E_DOCDB_PASSWORD` | by hand; each run adds the ALCF token |
-| `inference_auth_token.py` | ALCF login helper | downloaded, see the installer's output |
+| `inference_auth_token.py` | ALCF login helper | downloaded, see below |
 | `credentials.local.sh` | optional, sourced before each run | your own |
 
-`kb-mcp.env` wins over `.env.local`, so no key may be in both; the installer
-and every run warn if one is.
+`kb-mcp.env` wins over `.env.local`, so no key may be in both; every run warns
+if one is.
 
 Install the release with the ingest extras:
 
@@ -267,17 +267,23 @@ handy for trying a change before tagging it. The release directory is named
 after the ref.
 
 Create the config files above (`mkdir -m 700 $ROOT/config`; `install -m 600`
-for each). For the ALCF login, either follow the installer's output below, or
-reuse an existing one by copying
+for each). The ALCF login is kept under the data dir rather than `$HOME`.
+Either reuse an existing one by copying
 `~/.globus/app/58fdd3bc-e1c3-4ce5-80ea-8d6b87cfb944/inference_app/tokens.json`
-to the same path under `/exp/mu2e/data/users/$USER/kb-mcp-data/alcf/`.
+to the same path under `/exp/mu2e/data/users/$USER/kb-mcp-data/alcf/`, or log in
+once:
+
+```bash
+cd $ROOT/config
+curl -O https://raw.githubusercontent.com/argonne-lcf/inference-endpoints/refs/heads/main/inference_auth_token.py
+HOME=/exp/mu2e/data/users/$USER/kb-mcp-data/alcf $ROOT/current/.venv/bin/python inference_auth_token.py authenticate
+```
 
 Check, then do one run by hand:
 
 ```bash
 $ROOT/current/.venv/bin/kb-mcp.sh --check --env-file $ROOT/config/kb-mcp.env
 KB_ENV_FILE=$ROOT/config/kb-mcp.env $ROOT/current/.venv/bin/kb-import --check-connections
-$ROOT/current/.venv/bin/kb-docdb-install-timer.sh --env-file $ROOT/config/kb-mcp.env --dry-run
 KB_ENV_FILE=$ROOT/config/kb-mcp.env $ROOT/current/.venv/bin/kb-docdb-update.sh; echo rc=$?
 ```
 
@@ -285,21 +291,13 @@ KB_ENV_FILE=$ROOT/config/kb-mcp.env $ROOT/current/.venv/bin/kb-docdb-update.sh; 
 apply here, and `OPENAI_BASE_URL` is only set once a run has refreshed the ALCF
 token. A manual run with `DAYS=<n>` catches up after missed days.
 
-Then schedule it on the node that should run it. **systemd timer**, if your
-home directory exists on that node (user units live in `~/.config/systemd/user`):
-
-```bash
-loginctl enable-linger      # once, or the timer stops at logout
-$ROOT/current/.venv/bin/kb-docdb-install-timer.sh --env-file $ROOT/config/kb-mcp.env
-systemctl --user list-timers kb-docdb-update.timer
-```
-
-**cron**, where it does not (e.g. mu2eaigpvm01, which does not mount
-`/nashome`): install `scripts/kb_docdb.crontab` from the repository, with your paths. Its `HOME=`
+Then install the crontab on the node that should run it:
+`scripts/kb_docdb.crontab` from the repository, with your paths. Its `HOME=`
 line points cron at the data directory, since cron changes to `$HOME` before
-each job. `crontab <file>` replaces the node's whole crontab.
+each job and the account may have no home directory on the node (mu2eaigpvm01
+does not mount `/nashome`). `crontab <file>` replaces the node's whole crontab.
 
-Either way, check the newest log after the first scheduled run:
+After the first scheduled run, check the newest log:
 
 ```bash
 ls -t /exp/mu2e/data/users/$USER/kb-mcp-data/logs/docdb-update-*.log | head -1
@@ -307,8 +305,7 @@ ls -t /exp/mu2e/data/users/$USER/kb-mcp-data/logs/docdb-update-*.log | head -1
 
 A failed run exits non-zero and its log ends with a `FAILURE :` line; every
 run also appears in `kb logs imports`. Upgrading is the normal release loop:
-timer and crontab both run `<deploy-root>/current`, so re-run the installer
-only when a release changes the units themselves.
+the crontab runs `<deploy-root>/current`, so deploying a new release is enough.
 
 ## Reference
 

@@ -1,8 +1,6 @@
 # kb-mcp: incremental Mu2e DocDB import from a release, twice daily (06:00 and
-# 18:00 local). For nodes where the account has no home directory (e.g.
-# mu2eaigpvm01, which does not mount /nashome): systemd --user timers need one,
-# cron does not. Where the home is available, kb-docdb-install-timer.sh is the
-# alternative. See the "Scheduled DocDB import" section of docs/guides/deploy-mu2e.md.
+# 18:00 local). See the "Scheduled DocDB import" section of
+# docs/guides/deploy-mu2e.md.
 #
 # Install on the node (replaces that node's whole crontab; merge by hand if
 # `crontab -l` shows other entries), after replacing the user name:

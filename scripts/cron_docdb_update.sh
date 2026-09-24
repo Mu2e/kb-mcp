@@ -1,8 +1,8 @@
 #!/bin/bash
 # Run the DocDB update job from this checkout (cron, or by hand): build/activate
 # the checkout's environment, then run scripts/kb-docdb-update.sh from the repo
-# root. A release runs kb-docdb-update.sh directly from its venv instead, under
-# the systemd timer installed by kb-docdb-install-timer.sh.
+# root. A release runs kb-docdb-update.sh directly from its venv instead (see
+# scripts/kb_docdb.crontab).
 #
 #   crontab: 0 6,18 * * * /exp/mu2e/app/users/<you>/kb-mcp/scripts/cron_docdb_update.sh
 set -uo pipefail
