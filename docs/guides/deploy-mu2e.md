@@ -238,20 +238,19 @@ The incremental DocDB import runs from a release under a `systemd --user`
 timer (06:00 and 18:00 by default). It runs as a user, not the service
 account: DocDB has no service login, so login is only possible as a user.
 
-Same layout as the servers, in that person's area:
+Same layout as the servers: deploy root `/exp/mu2e/app/users/<you>/mcp/kb`,
+data (logs, model cache, ALCF login) in `/exp/mu2e/data/users/<you>/kb-mcp-data`.
+Files in `<deploy-root>/config/`, all mode 600:
 
-| | |
-|---|---|
-| deploy root | `/exp/mu2e/app/users/<you>/mcp/kb` |
-| `config/kb-mcp.env` | pinned settings (`KB_ENV_FILE`): database, LLM routing, parser settings. Mode 600 |
-| `config/.env.local` | DocDB login; the ALCF token is written here by the job. Mode 600 |
-| data dir | `/exp/mu2e/data/users/<you>/kb-mcp-data`: logs, model cache, ALCF login |
+| file | holds | from |
+|---|---|---|
+| `kb-mcp.env` | database, LLM routing, parser settings | `.env.mu2e.example`, keeping only the database, LLM and parser keys |
+| `.env.local` | `MU2E_DOCDB_USERNAME`, `MU2E_DOCDB_PASSWORD` | by hand; each run adds the ALCF token |
+| `inference_auth_token.py` | ALCF login helper | downloaded, see the installer's output |
+| `credentials.local.sh` | optional, sourced before each run | your own |
 
-`kb-mcp.env` is loaded after `.env.local` and wins, so **no key may be in both**.
-In particular `OPENAI_API_KEY` and `OPENAI_BASE_URL` belong only in
-`.env.local`, where each run writes the refreshed ALCF token. The installer and
-every run warn about shared keys. An optional `credentials.local.sh` beside
-`kb-mcp.env` is sourced before each run for site-specific credential setup.
+`kb-mcp.env` wins over `.env.local`, so no key may be in both; the installer
+and every run warn if one is.
 
 Install the release with the ingest extras, then the timer:
 
