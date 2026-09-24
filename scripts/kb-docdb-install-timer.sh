@@ -42,6 +42,10 @@ Options:
 Requires linger so the timer runs while you are logged out:
   loginctl enable-linger
 
+Requires a home directory on the node: user units can only live under
+~/.config/systemd/user. Where there is none (e.g. /nashome not mounted), use
+cron from the release instead; see scripts/kb_docdb.crontab.
+
 Example:
   kb-docdb-install-timer.sh --env-file /exp/mu2e/app/users/$USER/mcp/kb/config/kb-mcp.env
 USAGE
@@ -77,6 +81,12 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -n "$env_file" ]] || { echo "ERROR: --env-file is required" >&2; usage; }
+if [[ ! -d "$HOME" ]]; then
+  echo "ERROR: home directory $HOME does not exist on this node, and systemd user" >&2
+  echo "       units can only be registered under ~/.config/systemd/user." >&2
+  echo "       Use cron from the release instead; see scripts/kb_docdb.crontab." >&2
+  exit 1
+fi
 [[ -f "$env_file" ]] || { echo "ERROR: env file does not exist: $env_file" >&2; exit 1; }
 env_file="$(cd "$(dirname "$env_file")" && pwd -P)/$(basename "$env_file")"
 config_dir="$(dirname "$env_file")"

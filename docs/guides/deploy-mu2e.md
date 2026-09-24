@@ -234,8 +234,8 @@ restarting — no re-render.
 
 ## Scheduled DocDB import
 
-The incremental DocDB import runs from a release under a `systemd --user`
-timer (06:00 and 18:00 by default). It runs as a user, not the service
+The incremental DocDB import runs from a release, twice a day, under a
+`systemd --user` timer or cron (see below). It runs as a user, not the service
 account: DocDB has no service login, so login is only possible as a user.
 
 Same layout as the servers: deploy root `/exp/mu2e/app/users/<you>/mcp/kb`,
@@ -285,20 +285,30 @@ KB_ENV_FILE=$ROOT/config/kb-mcp.env $ROOT/current/.venv/bin/kb-docdb-update.sh; 
 apply here, and `OPENAI_BASE_URL` is only set once a run has refreshed the ALCF
 token. A manual run with `DAYS=<n>` catches up after missed days.
 
-Then install the timer, on the node that should run it:
+Then schedule it on the node that should run it. **systemd timer**, if your
+home directory exists on that node (user units live in `~/.config/systemd/user`):
 
 ```bash
 loginctl enable-linger      # once, or the timer stops at logout
 $ROOT/current/.venv/bin/kb-docdb-install-timer.sh --env-file $ROOT/config/kb-mcp.env
 systemctl --user list-timers kb-docdb-update.timer
-systemctl --user start kb-docdb-update.service   # optional: one run now, blocks until done
+```
+
+**cron**, where it does not (e.g. mu2eaigpvm01, which does not mount
+`/nashome`): install `scripts/kb_docdb.crontab` from the repository, with your paths. Its `HOME=`
+line points cron at the data directory, since cron changes to `$HOME` before
+each job. `crontab <file>` replaces the node's whole crontab.
+
+Either way, check the newest log after the first scheduled run:
+
+```bash
 ls -t /exp/mu2e/data/users/$USER/kb-mcp-data/logs/docdb-update-*.log | head -1
 ```
 
-A failed run exits non-zero (`systemctl --user status` shows it) and its log
-ends with a `FAILURE :` line. Upgrading is the normal release loop: the units
-run `<deploy-root>/current`, so re-run the installer only when a release
-changes the units themselves.
+A failed run exits non-zero and its log ends with a `FAILURE :` line; every
+run also appears in `kb logs imports`. Upgrading is the normal release loop:
+timer and crontab both run `<deploy-root>/current`, so re-run the installer
+only when a release changes the units themselves.
 
 ## Reference
 
