@@ -18,7 +18,19 @@ from typing import Optional
 
 from .config import get_env_local_path
 
-TOKENS_PATH = Path.home() / ".globus" / "app" / "58fdd3bc-e1c3-4ce5-80ea-8d6b87cfb944" / "inference_app" / "tokens.json"
+# inference_auth_token.py keeps the Globus login under ~/.globus. KB_ALCF_HOME
+# stands in for ~ (for this check and for the script, which is run with HOME
+# set to it), so an unattended job can keep the login off the home area:
+#   HOME=$KB_ALCF_HOME python inference_auth_token.py authenticate   # once
+_TOKENS_RELPATH = Path(".globus") / "app" / "58fdd3bc-e1c3-4ce5-80ea-8d6b87cfb944" / "inference_app" / "tokens.json"
+
+
+def _alcf_home() -> Path:
+    return Path(os.environ.get("KB_ALCF_HOME") or Path.home())
+
+
+def _tokens_path() -> Path:
+    return _alcf_home() / _TOKENS_RELPATH
 
 CLUSTER_BASE_URLS = {
     "sophia": "https://inference-api.alcf.anl.gov/resource_server/sophia/vllm/v1",
@@ -31,9 +43,12 @@ class AlcfAuthError(Exception):
 
 
 def _auth_script_path() -> Path:
-    # setup_alcf.sh downloads this to the repo root / current working directory.
+    # setup_alcf.sh downloads this to the repo root / current working directory;
+    # a release keeps it beside its env files (config/).
+    env_local = get_env_local_path()
     candidates = [
         Path.cwd() / "inference_auth_token.py",
+        *([Path(env_local).parent / "inference_auth_token.py"] if env_local else []),
         Path(__file__).resolve().parents[2] / "inference_auth_token.py",
     ]
     for path in candidates:
@@ -48,7 +63,7 @@ def _auth_script_path() -> Path:
 def get_token_status() -> dict:
     """Report whether a stored ALCF refresh token exists, without refreshing it."""
     return {
-        "has_token_file": TOKENS_PATH.is_file(),
+        "has_token_file": _tokens_path().is_file(),
         "current_base_url": os.getenv("OPENAI_BASE_URL"),
         "current_api_key_set": bool(os.getenv("OPENAI_API_KEY")),
     }
@@ -66,7 +81,7 @@ def refresh_alcf_token(cluster: str = "sophia") -> dict:
     if cluster not in CLUSTER_BASE_URLS:
         raise AlcfAuthError(f"Unknown cluster '{cluster}'. Must be one of {list(CLUSTER_BASE_URLS)}.")
 
-    if not TOKENS_PATH.is_file():
+    if not _tokens_path().is_file():
         raise AlcfAuthError(
             "No stored ALCF login found. Run `./scripts/setup_alcf.sh` in a terminal on "
             "the server to authenticate interactively (this requires opening a browser)."
@@ -76,6 +91,7 @@ def refresh_alcf_token(cluster: str = "sophia") -> dict:
 
     result = subprocess.run(
         [sys.executable, str(script_path), "get_access_token"],
+        env={**os.environ, "HOME": str(_alcf_home())},
         capture_output=True,
         text=True,
         timeout=60,

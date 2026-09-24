@@ -167,6 +167,8 @@ path = "src/kb_mcp/__init__.py"
 [tool.hatch.build.targets.wheel.shared-scripts]
 "scripts/kb-mcp.sh" = "kb-mcp.sh"
 "scripts/kb-mcp-install-unit.sh" = "kb-mcp-install-unit.sh"
+"scripts/kb-docdb-update.sh" = "kb-docdb-update.sh"
+"scripts/kb-docdb-install-timer.sh" = "kb-docdb-install-timer.sh"
 # Shipped so an upgrade can be driven from the previous release, without a
 # checkout on the deploy host. The first install still has to fetch it.
 "scripts/deploy-mu2e.sh" = "deploy-mu2e.sh"

@@ -232,6 +232,51 @@ rm -rf /exp/mu2e/app/users/mu2eai/mcp/kb/releases/<old-ref>
 Rolling back to a release still on disk *is* repointing `current` and
 restarting — no re-render.
 
+## Scheduled DocDB import
+
+The incremental DocDB import runs from a release under a `systemd --user`
+timer (06:00 and 18:00 by default). It runs as a **person, not the service
+account**: DocDB has no service login, so the import uses that person's
+Fermilab Services credentials, and it needs write access to the database.
+
+Same layout as the servers, in that person's area:
+
+| | |
+|---|---|
+| deploy root | `/exp/mu2e/app/users/<you>/mcp/kb` |
+| `config/kb-mcp.env` | pinned settings (`KB_ENV_FILE`): database, LLM routing, parser settings. Mode 600 |
+| `config/.env.local` | DocDB login; the ALCF token is written here by the job. Mode 600 |
+| data dir | `/exp/mu2e/data/users/<you>/kb-mcp-data`: logs, model cache, ALCF login |
+
+`kb-mcp.env` is loaded after `.env.local` and wins, so **no key may be in both**.
+In particular `OPENAI_API_KEY` and `OPENAI_BASE_URL` belong only in
+`.env.local`, where each run writes the refreshed ALCF token. The installer and
+every run warn about shared keys. An optional `credentials.local.sh` beside
+`kb-mcp.env` is sourced before each run for site-specific credential setup.
+
+Install the release with the ingest extras, then the timer:
+
+```bash
+KB_MCP_EXTRAS=ingest,docling,alcf bash /tmp/deploy-mu2e.sh /exp/mu2e/app/users/$USER/mcp/kb $REF
+loginctl enable-linger      # once, or the timer stops at logout
+/exp/mu2e/app/users/$USER/mcp/kb/current/.venv/bin/kb-docdb-install-timer.sh \
+    --env-file /exp/mu2e/app/users/$USER/mcp/kb/config/kb-mcp.env
+```
+
+The installer prints the one-time ALCF login, which is stored under the data
+dir rather than `$HOME`. Then:
+
+```bash
+systemctl --user start kb-docdb-update.service   # one run now, blocks until done
+systemctl --user list-timers kb-docdb-update.timer
+ls -t /exp/mu2e/data/users/$USER/kb-mcp-data/logs/docdb-update-*.log | head -1
+```
+
+A failed run exits non-zero (`systemctl --user status` shows it) and its log
+ends with a `FAILURE :` line. Upgrading is the normal release loop: the units
+run `<deploy-root>/current`, so re-run the installer only when a release
+changes the units themselves.
+
 ## Reference
 
 ### Web UI access model
