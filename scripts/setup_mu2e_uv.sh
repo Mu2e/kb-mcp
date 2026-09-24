@@ -84,7 +84,7 @@ LOCAL_ENV_DIR="${KB_ENV_DIR:-$kb_scratch_dir/kb-env-uv}"
 # shell. KB_SETUP_UV_CACHE_DIR records the value this script chose, so a
 # re-source can tell its own leftover (recompute it) from a real user override
 # (keep it).
-if [ -z "$UV_CACHE_DIR" ] || [ "$UV_CACHE_DIR" = "$KB_SETUP_UV_CACHE_DIR" ]; then
+if [ -z "${UV_CACHE_DIR:-}" ] || [ "${UV_CACHE_DIR:-}" = "${KB_SETUP_UV_CACHE_DIR:-}" ]; then
     export UV_CACHE_DIR="$kb_scratch_dir/uv-cache"
     KB_SETUP_UV_CACHE_DIR="$UV_CACHE_DIR"
 fi
