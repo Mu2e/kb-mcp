@@ -235,9 +235,8 @@ restarting — no re-render.
 ## Scheduled DocDB import
 
 The incremental DocDB import runs from a release under a `systemd --user`
-timer (06:00 and 18:00 by default). It runs as a **person, not the service
-account**: DocDB has no service login, so the import uses that person's
-Fermilab Services credentials, and it needs write access to the database.
+timer (06:00 and 18:00 by default). It runs as a user, not the service
+account: DocDB has no service login, so login is only possible as a user.
 
 Same layout as the servers, in that person's area:
 
