@@ -252,28 +252,46 @@ Files in `<deploy-root>/config/`, all mode 600:
 `kb-mcp.env` wins over `.env.local`, so no key may be in both; the installer
 and every run warn if one is.
 
-Install the release with the ingest extras, then the timer:
+Install the release with the ingest extras:
 
 ```bash
 REF=v0.2.3
+ROOT=/exp/mu2e/app/users/$USER/mcp/kb
 curl -fsSL https://raw.githubusercontent.com/Mu2e/kb-mcp/$REF/scripts/deploy-mu2e.sh \
      -o /tmp/deploy-mu2e.sh
-KB_MCP_EXTRAS=ingest,docling,alcf bash /tmp/deploy-mu2e.sh /exp/mu2e/app/users/$USER/mcp/kb $REF
-loginctl enable-linger      # once, or the timer stops at logout
-/exp/mu2e/app/users/$USER/mcp/kb/current/.venv/bin/kb-docdb-install-timer.sh \
-    --env-file /exp/mu2e/app/users/$USER/mcp/kb/config/kb-mcp.env
+KB_MCP_EXTRAS=ingest,docling,alcf bash /tmp/deploy-mu2e.sh $ROOT $REF
 ```
 
 `REF` can be any pushed git ref, not only a tag: a commit (`REF=7a9340b`) is
 handy for trying a change before tagging it. The release directory is named
 after the ref.
 
-The installer prints the one-time ALCF login, which is stored under the data
-dir rather than `$HOME`. Then:
+Create the config files above (`mkdir -m 700 $ROOT/config`; `install -m 600`
+for each). For the ALCF login, either follow the installer's output below, or
+reuse an existing one by copying
+`~/.globus/app/58fdd3bc-e1c3-4ce5-80ea-8d6b87cfb944/inference_app/tokens.json`
+to the same path under `/exp/mu2e/data/users/$USER/kb-mcp-data/alcf/`.
+
+Check, then do one run by hand:
 
 ```bash
-systemctl --user start kb-docdb-update.service   # one run now, blocks until done
+$ROOT/current/.venv/bin/kb-mcp.sh --check --env-file $ROOT/config/kb-mcp.env
+KB_ENV_FILE=$ROOT/config/kb-mcp.env $ROOT/current/.venv/bin/kb-import --check-connections
+$ROOT/current/.venv/bin/kb-docdb-install-timer.sh --env-file $ROOT/config/kb-mcp.env --dry-run
+KB_ENV_FILE=$ROOT/config/kb-mcp.env $ROOT/current/.venv/bin/kb-docdb-update.sh; echo rc=$?
+```
+
+`kb-mcp.sh --check` is the server's check: its web-UI and mikey findings do not
+apply here, and `OPENAI_BASE_URL` is only set once a run has refreshed the ALCF
+token. A manual run with `DAYS=<n>` catches up after missed days.
+
+Then install the timer, on the node that should run it:
+
+```bash
+loginctl enable-linger      # once, or the timer stops at logout
+$ROOT/current/.venv/bin/kb-docdb-install-timer.sh --env-file $ROOT/config/kb-mcp.env
 systemctl --user list-timers kb-docdb-update.timer
+systemctl --user start kb-docdb-update.service   # optional: one run now, blocks until done
 ls -t /exp/mu2e/data/users/$USER/kb-mcp-data/logs/docdb-update-*.log | head -1
 ```
 
