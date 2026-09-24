@@ -256,11 +256,18 @@ every run warn about shared keys. An optional `credentials.local.sh` beside
 Install the release with the ingest extras, then the timer:
 
 ```bash
+REF=v0.2.3
+curl -fsSL https://raw.githubusercontent.com/Mu2e/kb-mcp/$REF/scripts/deploy-mu2e.sh \
+     -o /tmp/deploy-mu2e.sh
 KB_MCP_EXTRAS=ingest,docling,alcf bash /tmp/deploy-mu2e.sh /exp/mu2e/app/users/$USER/mcp/kb $REF
 loginctl enable-linger      # once, or the timer stops at logout
 /exp/mu2e/app/users/$USER/mcp/kb/current/.venv/bin/kb-docdb-install-timer.sh \
     --env-file /exp/mu2e/app/users/$USER/mcp/kb/config/kb-mcp.env
 ```
+
+`REF` can be any pushed git ref, not only a tag: a commit (`REF=7a9340b`) is
+handy for trying a change before tagging it. The release directory is named
+after the ref.
 
 The installer prints the one-time ALCF login, which is stored under the data
 dir rather than `$HOME`. Then:
