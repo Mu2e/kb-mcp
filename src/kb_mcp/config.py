@@ -516,11 +516,13 @@ def get_search_config() -> dict:
             * `max_chunks_per_doc` (int): Maximum chunks per document in search results (Env: `SEARCH_MAX_CHUNKS_PER_DOC`, default: 10).
             * `initial_limit_multiplier` (int): Multiplier for initial chunk retrieval (Env: `SEARCH_INITIAL_LIMIT_MULTIPLIER`, default: 50).
             * `rrf_k` (int): Reciprocal Rank Fusion constant (Env: `SEARCH_RRF_K`, default: 60).
+            * `ivfflat_probes` (int): IVFFlat lists searched per semantic query (Env: `SEARCH_IVFFLAT_PROBES`, default: 128).
     """
     return {
         'max_chunks_per_doc': _get_int("SEARCH_MAX_CHUNKS_PER_DOC", 10),
         'initial_limit_multiplier': _get_int("SEARCH_INITIAL_LIMIT_MULTIPLIER", 50),
         'rrf_k': _get_int("SEARCH_RRF_K", 60),
+        'ivfflat_probes': _get_int("SEARCH_IVFFLAT_PROBES", 128),
         'router_enabled': _get_bool("ROUTER_ENABLED", False),
     }
 

@@ -67,8 +67,17 @@ def _search_pgvector(
     if max_chunks_per_doc is None:
         max_chunks_per_doc = search_config['max_chunks_per_doc']
 
+    # Nearest neighbours first, per-document diversity second. The ORDER BY
+    # distance LIMIT in `nearest` is what lets the vector index do the work.
+    # Ranking chunks within their document (ROW_NUMBER) before that LIMIT, as
+    # this query once did, forces a distance for every chunk that passes the
+    # filters -- ~390k for doc_type=text -- and never touches the index.
+    #
+    # Ranking inside the top candidates gives the same ranks as ranking all
+    # chunks: every chunk of a document that is closer than a candidate is a
+    # candidate too. So only the index's approximation can change results.
     vector_query = f"""
-        WITH base_candidates AS (
+        WITH nearest AS MATERIALIZED (
             SELECT
                 c.id AS chunk_id,
                 c.document_id,
@@ -78,18 +87,20 @@ def _search_pgvector(
                 c.char_end_index,
                 c.token_length,
                 c.section_path,
-                calc.distance,
-                (1 - calc.distance) AS score,
-                ROW_NUMBER() OVER (PARTITION BY c.document_id ORDER BY calc.distance) AS rank_in_doc
+                (e.embedding <=> CAST(:query_embedding AS vector)) AS distance
             FROM {embedding_table.name} e
             JOIN chunks c ON e.chunk_id = c.id
             JOIN documents d ON c.document_id = d.id
-            CROSS JOIN LATERAL (
-                SELECT (e.embedding <=> CAST(:query_embedding AS vector)) AS distance
-            ) calc
             WHERE {where_clause_sql}
-            ORDER BY calc.distance
+            ORDER BY e.embedding <=> CAST(:query_embedding AS vector)
             LIMIT :initial_limit
+        ),
+        base_candidates AS (
+            SELECT
+                n.*,
+                (1 - n.distance) AS score,
+                ROW_NUMBER() OVER (PARTITION BY n.document_id ORDER BY n.distance) AS rank_in_doc
+            FROM nearest n
         ),
         diverse_chunks AS (
             SELECT *
@@ -119,21 +130,32 @@ def _search_pgvector(
         ORDER BY dc.score DESC
     """
 
-    # Set PostgreSQL session parameters for optimal query performance
-    search_hyperparams = """
-        SET enable_seqscan = OFF;
-        SET plan_cache_mode = force_generic_plan;
-    """
-    session.execute(text(search_hyperparams))
-
-    # Try to set IVFFlat probes (safe to ignore failures)
-    try:
-        session.execute(text("SET ivfflat.probes = 32"))
-    except Exception as e:
-        logger.debug(
-            "Could not set ivfflat.probes (this is OK if not using IVFFlat index): %s",
-            e,
-        )
+    # Planner settings for this query only. SET LOCAL ends with the
+    # transaction; a plain SET would stay on the pooled connection and change
+    # the plans of every later, unrelated query that reuses it.
+    #  - ivfflat.probes: lists searched per query. IVFFlat is approximate;
+    #    measured 2026-09-24 on 40 logged queries against the exact scan, with
+    #    451 lists: 32 probes -> 81% top-20 agreement, 128 -> 98% (0.56 s),
+    #    200 -> identical (1.3 s). SEARCH_IVFFLAT_PROBES.
+    #  - ivfflat.iterative_scan: when filters (doc_type, source, metadata)
+    #    reject candidates, keep reading the index instead of returning fewer
+    #    than LIMIT rows (pgvector >= 0.8). relaxed_order is fine: the ranking
+    #    below recomputes order from the distances.
+    #  - work_mem: room for the sorts, which otherwise spill to disk.
+    for setting in (
+        f"SET LOCAL ivfflat.probes = {int(search_config['ivfflat_probes'])}",
+        "SET LOCAL ivfflat.iterative_scan = relaxed_order",
+        "SET LOCAL work_mem = '64MB'",
+        "SET LOCAL enable_seqscan = off",
+    ):
+        # A savepoint per setting: a failed statement aborts the whole
+        # transaction in Postgres, so without it an older pgvector rejecting
+        # one setting would take the search down with it.
+        try:
+            with session.begin_nested():
+                session.execute(text(setting))
+        except Exception as e:
+            logger.debug("Could not apply %r (older pgvector?): %s", setting, e)
 
     query_params: Dict[str, Any] = {
         "query_embedding": query_vec_str,
