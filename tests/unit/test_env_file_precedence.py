@@ -144,3 +144,21 @@ def test_entry_point_keeps_env_local_overrides_for_a_discovered_env(staged_packa
     """A discovered .env must not be promoted to pinned, which would beat .env.local."""
     out = _run(staged_package, {}, probe=ENTRY_POINT_PROBE)
     assert out.splitlines()[-1] == "from-local"
+
+
+# kb_mcp.config first (it applies .env.local), then an entry point's load_env.
+LATE_LOAD_ENV_PROBE = textwrap.dedent(
+    """
+    import os
+    import kb_mcp.config
+    from kb_mcp.env import load_env
+    load_env()
+    print(os.environ.get("KB_OVERRIDE_PROBE"))
+    """
+)
+
+
+def test_late_load_env_keeps_env_local_overrides(staged_package):
+    """load_env after config was imported must not undo .env.local."""
+    out = _run(staged_package, {}, probe=LATE_LOAD_ENV_PROBE)
+    assert out.splitlines()[-1] == "from-local"

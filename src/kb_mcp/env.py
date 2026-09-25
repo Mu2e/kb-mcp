@@ -98,6 +98,15 @@ def load_env(explicit: Optional[str] = None) -> Optional[Path]:
     # opposite of what kb and kb-import do from the same checkout.
     if pinned:
         os.environ[ENV_FILE_VAR] = str(env_file)
+    else:
+        # A discovered .env keeps its .env.local overrides, as in
+        # kb_mcp.config. Without this, a process that had already imported
+        # kb_mcp.config (which applied .env.local) and then imports the
+        # server module (which calls load_env) would get the plain .env
+        # values back for every key both files set.
+        local = env_file.with_name(".env.local")
+        if local.is_file():
+            load_dotenv(dotenv_path=str(local), override=True)
     return env_file
 
 
