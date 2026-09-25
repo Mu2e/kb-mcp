@@ -68,7 +68,13 @@ def _search_pgvector(
         max_chunks_per_doc = search_config['max_chunks_per_doc']
 
     # Nearest neighbours first, per-document diversity second. The ORDER BY
-    # distance LIMIT in `nearest` is what lets the vector index do the work.
+    # distance LIMIT in `knn` is what lets the vector index do the work. The
+    # filters are a per-row scalar subquery rather than a join on purpose:
+    # with a join the planner may (and at LIMIT 2000 did) pick a plan that
+    # filters documents first and computes every distance. A scalar subquery
+    # cannot be turned into a join, so the index scan is the only way to
+    # satisfy ORDER BY ... LIMIT, and the iterative scan keeps reading it
+    # until enough rows pass the filters.
     # Ranking chunks within their document (ROW_NUMBER) before that LIMIT, as
     # this query once did, forces a distance for every chunk that passes the
     # filters -- ~390k for doc_type=text -- and never touches the index.
@@ -77,7 +83,21 @@ def _search_pgvector(
     # chunks: every chunk of a document that is closer than a candidate is a
     # candidate too. So only the index's approximation can change results.
     vector_query = f"""
-        WITH nearest AS MATERIALIZED (
+        WITH knn AS MATERIALIZED (
+            SELECT
+                e.chunk_id,
+                (e.embedding <=> CAST(:query_embedding AS vector)) AS distance
+            FROM {embedding_table.name} e
+            WHERE (
+                SELECT TRUE
+                FROM chunks c
+                JOIN documents d ON c.document_id = d.id
+                WHERE c.id = e.chunk_id AND {where_clause_sql}
+            )
+            ORDER BY e.embedding <=> CAST(:query_embedding AS vector)
+            LIMIT :initial_limit
+        ),
+        nearest AS (
             SELECT
                 c.id AS chunk_id,
                 c.document_id,
@@ -87,13 +107,9 @@ def _search_pgvector(
                 c.char_end_index,
                 c.token_length,
                 c.section_path,
-                (e.embedding <=> CAST(:query_embedding AS vector)) AS distance
-            FROM {embedding_table.name} e
-            JOIN chunks c ON e.chunk_id = c.id
-            JOIN documents d ON c.document_id = d.id
-            WHERE {where_clause_sql}
-            ORDER BY e.embedding <=> CAST(:query_embedding AS vector)
-            LIMIT :initial_limit
+                k.distance
+            FROM knn k
+            JOIN chunks c ON c.id = k.chunk_id
         ),
         base_candidates AS (
             SELECT
