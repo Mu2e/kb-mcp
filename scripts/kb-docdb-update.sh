@@ -197,6 +197,22 @@ stdbuf -oL -eL kb-import docdb --days "$DAYS" --skip-existing --delay 1 --max-em
 rc=$?
 end=$(date +%s)
 
+# 3b. Database upkeep after the writes: refresh planner statistics and VACUUM
+# this app's tables. VACUUM also merges the full-text index's pending list
+# (new chunks land there unsorted, and every full-text search scans it until
+# it is merged); it was found full on 2026-09-24, four days after autovacuum
+# last touched `chunks`. Upkeep failing does not fail the run: the import
+# itself is what matters, and the next run retries.
+{
+    echo "--- db-maintain ---"
+    m_start=$(date +%s)
+    if kb tools db-maintain --analyze --vacuum; then
+        echo "db-maintain done in $(( $(date +%s) - m_start ))s"
+    else
+        echo "WARNING: db-maintain did not complete (the import is unaffected)"
+    fi
+} >> "$LOG" 2>&1
+
 # 4. Failure detection.
 #
 # kb-import cannot report failure through its exit status: auto-summarize and
