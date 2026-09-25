@@ -147,7 +147,14 @@ async def require_auth_api(
 
 
 def document_to_dict(doc, include_text: bool = True, include_binary: bool = False):
-    """Convert Document object to dictionary for JSON serialization."""
+    """Convert Document object to dictionary for JSON serialization.
+
+    Columns the query deferred (``get(..., defer_content=True)``) are left out
+    rather than read here: reading them would load each document's full text or
+    binary one row at a time, which is exactly what deferring them avoids.
+    """
+    from sqlalchemy import inspect as sa_inspect
+    unloaded = sa_inspect(doc).unloaded
     result = {
         "id": doc.id,
         "source_id": doc.source_id,
@@ -179,7 +186,9 @@ def document_to_dict(doc, include_text: bool = True, include_binary: bool = Fals
         result["update_time"] = _to_utc_iso(doc.update_time)
     
     # Add text content if requested
-    if include_text and doc.text:
+    if "text" in unloaded and not include_text:
+        pass
+    elif include_text and doc.text:
         result["text"] = doc.text
         result["text_preview"] = doc.text[:300] if len(doc.text) > 300 else doc.text
     elif doc.text:
@@ -187,7 +196,9 @@ def document_to_dict(doc, include_text: bool = True, include_binary: bool = Fals
         result["text_length"] = len(doc.text)
     
     # Add binary info if requested
-    if include_binary and doc.binary:
+    if "binary" in unloaded and not include_binary:
+        pass
+    elif include_binary and doc.binary:
         import base64
         result["binary"] = base64.b64encode(doc.binary).decode("utf-8")
         result["binary_size"] = len(doc.binary)

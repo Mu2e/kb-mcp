@@ -108,7 +108,9 @@ def setup_api_routes(app, session_manager: WebSessionManager):
             # This ensures all attributes are loaded before session closes
             with get_db_session() as session:
                 # Get documents with filters and pagination
-                documents_result = get(filter_dict=filter_dict if filter_dict else None, limit=limit, offset=offset, session=session)
+                # The listing shows metadata only; loading every document's full
+                # text here cost ~1 s and 4+ MB for one page of 10.
+                documents_result = get(filter_dict=filter_dict if filter_dict else None, limit=limit, offset=offset, defer_content=not include_text, session=session)
                 if documents_result is None:
                     documents = []
                 elif isinstance(documents_result, list):
@@ -119,6 +121,23 @@ def setup_api_routes(app, session_manager: WebSessionManager):
                 # Convert documents to dictionaries while still in session
                 # This ensures all attributes are accessible
                 documents_data = [document_to_dict(doc, include_text=include_text) for doc in documents]
+
+                # The list shows the first 300 characters of the text where a
+                # document has no summary. Take just that slice in SQL, for the
+                # documents that need it, instead of loading their full text.
+                if not include_text:
+                    need = [d["id"] for d in documents_data if not d.get("summary")]
+                    if need:
+                        from sqlalchemy import func
+                        from ....kb.db_models import Document
+                        previews = dict(
+                            session.query(Document.id, func.substr(Document.text, 1, 300))
+                            .filter(Document.id.in_(need))
+                            .all()
+                        )
+                        for d in documents_data:
+                            if previews.get(d["id"]):
+                                d["text_preview"] = previews[d["id"]]
 
             # Get total count (outside session, doesn't need objects)
             total_count = get_count(filter_dict=filter_dict if filter_dict else None)

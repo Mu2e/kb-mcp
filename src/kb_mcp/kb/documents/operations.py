@@ -877,6 +877,7 @@ def _get(
     limit: int | None = None,
     offset: int | None = None,
     count_only: bool = False,
+    defer_content: bool = False,
     session = None,
 ) -> Document | list[Document] | int | None:
     """Get document(s) by various criteria.
@@ -936,6 +937,10 @@ def _get(
         limit: Maximum number of documents to return (ignored if count_only=True)
         offset: Number of documents to skip (ignored if count_only=True)
         count_only: If True, return count instead of documents
+        defer_content: If True, leave the large ``text`` and ``binary`` columns
+            out of the query; they are loaded only if accessed, while the
+            session is open. For listings that show metadata only: a single
+            document's text can run to megabytes.
         session: Optional database session. If None, creates a new session.
 
     Returns:
@@ -949,6 +954,9 @@ def _get(
 
     with get_db_session(session) as session:
         query = session.query(Document)
+        if defer_content and not count_only:
+            from sqlalchemy.orm import defer
+            query = query.options(defer(Document.text), defer(Document.binary))
 
         # Handle explicit uuid parameter (highest priority)
         if uuid:
@@ -1102,6 +1110,7 @@ def get(
     filter_dict: Dict[str, Any] | None = None,
     limit: int | None = None,
     offset: int | None = None,
+    defer_content: bool = False,
     session = None,
 ) -> Document | list[Document] | None:
     """Get document(s) by various criteria.
@@ -1163,6 +1172,11 @@ def get(
                     - text_contains: Filter documents containing text (case-insensitive)
         limit: Maximum number of documents to return
         offset: Number of documents to skip (for pagination)
+        defer_content: If True, do not load the large ``text`` and ``binary``
+                columns (a single document's text can run to megabytes). They
+                load on first access while the session is open; on a detached
+                document, accessing them raises. Pass a ``session`` if the
+                caller might still touch them.
         session: Optional database session. If provided, documents remain attached to session.
                 If None, creates a new session and detaches documents.
 
@@ -1195,6 +1209,7 @@ def get(
         limit=limit,
         offset=offset,
         count_only=False,
+        defer_content=defer_content,
         session=session,
     )
     # Type narrowing: when count_only=False, result is never int
