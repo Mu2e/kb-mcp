@@ -29,6 +29,13 @@ set -uo pipefail
 SELF_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd -P)"
 if [ -x "$SELF_DIR/python" ]; then
     export PATH="$SELF_DIR:$PATH"
+    # A release has no checkout .env to discover, so without a pinned file the
+    # run would start with no configuration at all and only fail at the
+    # database check.
+    if [ -z "${KB_ENV_FILE:-}" ]; then
+        echo "KB_ENV_FILE is required when running from a release (set it in the crontab)" >&2
+        exit 2
+    fi
 fi
 
 # With a pinned env file, run from its directory: the .env.local and the
