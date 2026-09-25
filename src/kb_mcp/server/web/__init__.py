@@ -9,6 +9,7 @@ from .routes.documents import (
 )
 from .routes.eval import setup_eval_routes
 from .routes.logs import setup_logs_routes
+from .routes.imports import setup_imports_routes
 from .routes.statistics import setup_statistics_routes
 from .routes.admin import setup_admin_routes
 from .routes.api import setup_api_routes
@@ -42,6 +43,9 @@ def setup_web_routes(app, oauth_provider, session_manager: WebSessionManager):
 
     # Setup logs routes
     setup_logs_routes(app, session_manager, require_auth_html)
+
+    # Setup import runs page (/web/imports, admin only)
+    setup_imports_routes(app, session_manager, require_auth_html)
 
     # Setup statistics routes
     setup_statistics_routes(app, session_manager, require_auth_html)

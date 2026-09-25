@@ -507,6 +507,31 @@ def get_eval_config() -> dict:
         'judge_model': _get_str("EVAL_JUDGE_MODEL", get_default_llm_model()),
     }
 
+def get_import_log_dirs() -> list:
+    """Directories the web UI may serve import-job log files from.
+
+    Env: `KB_IMPORT_LOG_DIRS`, colon-separated absolute paths (default: none,
+    so no log file is ever served). The import job writes its logs to
+    `KB_LOG_DIR`; list that directory here on the web server, which must be
+    able to read it (the job runs as a person, the server as the service
+    account). A log is served only if its real path lies inside one of these.
+
+    Returns:
+        list[pathlib.Path]: Resolved, existing directories.
+    """
+    # pathlib, not the module-level `Path` (that one is anyio's async Path).
+    import pathlib
+
+    dirs = []
+    for part in (os.getenv("KB_IMPORT_LOG_DIRS") or "").split(":"):
+        part = part.strip()
+        if not part or not os.path.isabs(part):
+            continue
+        p = pathlib.Path(part).resolve()
+        if p.is_dir():
+            dirs.append(p)
+    return dirs
+
 def get_search_config() -> dict:
     """Search settings.
 

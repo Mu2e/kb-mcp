@@ -12,4 +12,7 @@ MAILTO=""
 HOME=/exp/mu2e/data/users/scorrodi/kb-mcp-data
 KB_ENV_FILE=/exp/mu2e/app/users/scorrodi/mcp/kb/config/kb-mcp.env
 KB_RUN_TRIGGER=cron-release
+# Group-readable (2750), so the web UI's Imports page can show the logs; list
+# the same directory in KB_IMPORT_LOG_DIRS on the web server.
+KB_LOG_DIR=/exp/mu2e/data/users/scorrodi/kb-mcp-logs
 0 6,18 * * * /exp/mu2e/app/users/scorrodi/mcp/kb/current/.venv/bin/kb-docdb-update.sh

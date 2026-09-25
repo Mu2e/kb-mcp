@@ -300,8 +300,19 @@ does not mount `/nashome`). `crontab <file>` replaces the node's whole crontab.
 After the first scheduled run, check the newest log:
 
 ```bash
-ls -t /exp/mu2e/data/users/$USER/kb-mcp-data/logs/docdb-update-*.log | head -1
+ls -t /exp/mu2e/data/users/$USER/kb-mcp-logs/docdb-update-*.log | head -1
 ```
+
+The web UI shows every run and its log on **Imports** (`/web/imports`, admin
+only). The crontab's `KB_LOG_DIR` is created group-readable for this; add it to
+the web server's private config so the server may serve files from it:
+
+```bash
+KB_IMPORT_LOG_DIRS=/exp/mu2e/data/users/<you>/kb-mcp-logs
+```
+
+Runs that stop before the import starts (credentials, configuration) have no
+database record; their logs are listed separately on the same page.
 
 A failed run exits non-zero and its log ends with a `FAILURE :` line; every
 run also appears in `kb logs imports`. Upgrading is the normal release loop:

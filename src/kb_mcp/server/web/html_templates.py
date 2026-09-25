@@ -30,6 +30,7 @@ def get_default_nav_items(is_admin: bool = True) -> list[tuple[str, str]]:
             #("/web/compare", "Parser Compare"),
             ("/web/statistics", "Statistics"),
             ("/web/logs", "Logs"),
+            ("/web/imports", "Imports"),
             ("/web/upload", "Upload"),
             ("/admin", "Admin"),
         ]

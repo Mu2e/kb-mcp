@@ -18,9 +18,10 @@
 # For a one-off catch-up over a longer window, override the look-back:
 #   DAYS=35 kb-docdb-update.sh
 #
-# Other environment: KB_DATA_DIR (logs; default /exp/mu2e/data/users/$USER/
-# kb-mcp-data), KB_ALCF_HOME (where the ALCF/Globus login is stored instead of
-# $HOME), KB_RUN_TRIGGER (recorded in the import-run log).
+# Other environment: KB_DATA_DIR (default /exp/mu2e/data/users/$USER/
+# kb-mcp-data), KB_LOG_DIR (default $KB_DATA_DIR/logs), KB_ALCF_HOME (where
+# the ALCF/Globus login is stored instead of $HOME), KB_RUN_TRIGGER (recorded
+# in the import-run log).
 
 set -uo pipefail
 
@@ -62,8 +63,15 @@ if [ -n "${KB_ENV_FILE:-}" ]; then
     export HF_HOME="${HF_HOME:-$KB_DATA/huggingface_cache}"
     export KB_ALCF_HOME="${KB_ALCF_HOME:-$KB_DATA/alcf}"
 fi
-LOG_DIR="$KB_DATA/logs"
-mkdir -p "$LOG_DIR"
+# Logs go to KB_LOG_DIR when set. The web UI's Imports page can show them if
+# its server can read that directory, which it cannot under KB_DATA (mode
+# 2700: it also holds the ALCF login). A directory the job creates is made
+# readable by the group (2750); the logs themselves hold no secrets.
+LOG_DIR="${KB_LOG_DIR:-$KB_DATA/logs}"
+if [ ! -d "$LOG_DIR" ]; then
+    mkdir -p "$LOG_DIR"
+    [ -n "${KB_LOG_DIR:-}" ] && chmod 2750 "$LOG_DIR"
+fi
 STAMP=$(date +%Y%m%d-%H%M%S)
 LOG="$LOG_DIR/docdb-update-${STAMP}.log"
 
