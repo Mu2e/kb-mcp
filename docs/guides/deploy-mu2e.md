@@ -30,7 +30,7 @@ The repeatable loop: identical for a first install and every upgrade.
 ### 0. Cut the release
 
 ```bash
-git push mu2e develop && git tag v0.2.3 && git push mu2e v0.2.3
+git push mu2e develop && git tag v0.2.4 && git push mu2e v0.2.4
 ```
 
 Tag the **tip**, not the version-bump commit, if anything landed after it.
@@ -40,7 +40,7 @@ Tag the **tip**, not the version-bump commit, if anything landed after it.
 ```bash
 mu2einit && slc uv
 
-REF=v0.2.3
+REF=v0.2.4
 curl -fsSL https://raw.githubusercontent.com/Mu2e/kb-mcp/$REF/scripts/deploy-mu2e.sh \
      -o /tmp/deploy-mu2e.sh
 bash /tmp/deploy-mu2e.sh /exp/mu2e/app/users/mu2eai/mcp/kb $REF
@@ -113,6 +113,7 @@ $U --surface mcp --data-dir "$D" --port 8008 \
 
 $U --surface web --data-dir "$D" --web-port 8108 \
    --env-file "$E" --hf-home "$D/cache/huggingface" \
+   --import-log-dirs /exp/mu2e/data/users/<ingest-user>/kb-mcp-logs \
    --krb5-ccname "$KRB5CCNAME"
 
 loginctl enable-linger      # once per account, or the services die at logout
@@ -255,7 +256,7 @@ if one is.
 Install the release with the ingest extras:
 
 ```bash
-REF=v0.2.3
+REF=v0.2.4
 ROOT=/exp/mu2e/app/users/$USER/mcp/kb
 curl -fsSL https://raw.githubusercontent.com/Mu2e/kb-mcp/$REF/scripts/deploy-mu2e.sh \
      -o /tmp/deploy-mu2e.sh
@@ -304,12 +305,10 @@ ls -t /exp/mu2e/data/users/$USER/kb-mcp-logs/docdb-update-*.log | head -1
 ```
 
 The web UI shows every run and its log on **Imports** (`/web/imports`, admin
-only). The crontab's `KB_LOG_DIR` is created group-readable for this; add it to
-the web server's private config so the server may serve files from it:
-
-```bash
-KB_IMPORT_LOG_DIRS=/exp/mu2e/data/users/<you>/kb-mcp-logs
-```
+only). The crontab's `KB_LOG_DIR` is created group-readable for this. Pass the
+same directory to the web unit, which serves logs only from directories it is
+given: `kb-mcp-install-unit.sh --surface web ... --import-log-dirs
+/exp/mu2e/data/users/<you>/kb-mcp-logs` (step 3 above).
 
 Runs that stop before the import starts (credentials, configuration) have no
 database record; their logs are listed separately on the same page.
@@ -391,7 +390,7 @@ Configuration lives in three places, deliberately:
 | where | holds | changed by |
 |---|---|---|
 | `deploy/mu2e.env` (in git, ships to `<release>/.venv/share/kb-mcp/mu2e.env`) | policy: ports, bind addresses, auth mode, embedding model, `HIDE_GRAPH`, log levels | commit + new release |
-| the systemd unit | paths: `DATA_DIR`, `HF_HOME`, `MIKEY_KEYS_FILE`, `KRB5CCNAME` | re-running `kb-mcp-install-unit.sh` |
+| the systemd unit | paths: `DATA_DIR`, `HF_HOME`, `MIKEY_KEYS_FILE`, `KRB5CCNAME`, `KB_IMPORT_LOG_DIRS` | re-running `kb-mcp-install-unit.sh` |
 | `KB_ENV_FILE` (mode 600, outside git) | secrets **and site topology**: database coordinates, LLM endpoint | editing that file |
 
 They load in that order, and `KB_ENV_FILE` is loaded last with `override=True`,

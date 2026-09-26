@@ -46,6 +46,11 @@ Options:
                       there is no default. See "Why DATA_DIR" below.
   --mikey-keys <path> Shared mikey key file for bearer-token auth. Optional;
                       without it mikey auth stays off.
+  --import-log-dirs <p>
+                      Web surface only: directories (colon-separated) the
+                      Imports page may serve import-job logs from, i.e. the
+                      job's KB_LOG_DIR. This account must be able to read
+                      them. Optional; without it runs are listed without logs.
   --defaults <path>   Non-secret settings file, as systemd EnvironmentFile.
                       Defaults to this release's own
                       share/kb-mcp/mu2e.env (shipped with the package).
@@ -127,6 +132,7 @@ hf_home=""
 data_dir=""
 surface="mcp"
 mikey_keys=""
+import_log_dirs=""
 defaults_file=""
 host="0.0.0.0"
 web_port="8108"
@@ -162,6 +168,7 @@ while [[ $# -gt 0 ]]; do
         exit 2
       fi
       shift 2 ;;
+    --import-log-dirs) import_log_dirs="${2:-}"; shift 2 ;;
     --defaults)    defaults_file="${2:-}"; shift 2 ;;
     --host)        host="${2:-}"; shift 2 ;;
     --web-port)    web_port="${2:-}"; shift 2 ;;
@@ -283,6 +290,27 @@ else
   hf_line="# Environment=HF_HOME=...   # NOT SET: each redeploy re-downloads model weights"
 fi
 
+# Import-job log directories (web surface only). Each must be absolute and
+# readable by this account, or the Imports page silently shows no logs.
+import_logs_line="# Environment=KB_IMPORT_LOG_DIRS=...   # NOT SET: import runs are listed without their logs"
+if [[ -n "$import_log_dirs" ]]; then
+  if [[ "$surface" != "web" ]]; then
+    echo "NOTE: --import-log-dirs only affects the web surface; ignored for --surface $surface." >&2
+  else
+    IFS=':' read -r -a _dirs <<< "$import_log_dirs"
+    for _d in "${_dirs[@]}"; do
+      case "$_d" in
+        /*) : ;;
+        *) echo "ERROR: --import-log-dirs entries must be absolute (got: $_d)" >&2; exit 1 ;;
+      esac
+      if [[ ! -d "$_d" || ! -r "$_d" || ! -x "$_d" ]]; then
+        echo "WARNING: $_d is not a directory this account can read; its logs will not be shown." >&2
+      fi
+    done
+    import_logs_line="Environment=KB_IMPORT_LOG_DIRS=$import_log_dirs"
+  fi
+fi
+
 if [[ -n "$mikey_keys" ]]; then
   mikey_keys="$(cd "$(dirname "$mikey_keys")" && pwd -P)/$(basename "$mikey_keys")"
   mikey_line="Environment=MIKEY_KEYS_FILE=$mikey_keys"
@@ -372,6 +400,7 @@ Environment=DATA_DIR=$data_dir
 # EnvironmentFile above.
 Environment=KB_ENV_FILE=$env_file
 $mikey_line
+$import_logs_line
 $hf_line
 # Kerberos credential cache. A systemd --user service does not inherit the
 # installing shell's KRB5CCNAME; without this it reads libkrb5's default
