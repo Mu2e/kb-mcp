@@ -35,6 +35,21 @@ git push mu2e develop && git tag v0.2.5 && git push mu2e v0.2.5
 
 Tag the **tip**, not the version-bump commit, if anything landed after it.
 
+**Rehearse first.** A release builds a fresh venv with the newest dependencies
+its pins allow, which need not be what any test environment has: v0.2.3 and
+v0.2.4 passed every test and failed in production on a SQLAlchemy release
+published days earlier. Install the commit exactly as step 1 will, from the
+local repository, into a scratch root, with the servers' Python:
+
+```bash
+UV_PYTHON=3.12 bash scripts/deploy-mu2e.sh /tmp/$USER/rehearsal $(git rev-parse HEAD) \
+  "file://$PWD"
+/tmp/$USER/rehearsal/current/.venv/bin/kb-mcp.sh --check --env-file <private env file>
+```
+
+Then start `kb-mcp.sh --only-web` from it on a spare port and check `/web`, a
+search and a filtered search against the real database; tag only if they work.
+
 ### 1. Install
 
 ```bash
@@ -42,8 +57,8 @@ mu2einit && slc uv
 
 REF=v0.2.5
 curl -fsSL https://raw.githubusercontent.com/Mu2e/kb-mcp/$REF/scripts/deploy-mu2e.sh \
-     -o /tmp/deploy-mu2e.sh
-bash /tmp/deploy-mu2e.sh /exp/mu2e/app/users/mu2eai/mcp/kb $REF
+     -o /tmp/$USER-deploy-mu2e.sh
+bash /tmp/$USER-deploy-mu2e.sh /exp/mu2e/app/users/mu2eai/mcp/kb $REF
 ```
 
 Same command for a first install and for every upgrade. `deploy-mu2e.sh` is the
@@ -239,7 +254,15 @@ rm -rf /exp/mu2e/app/users/mu2eai/mcp/kb/releases/<old-ref>
 ```
 
 Rolling back to a release still on disk *is* repointing `current` and
-restarting — no re-render.
+restarting — no re-render:
+
+```bash
+ln -sfn /exp/mu2e/app/users/mu2eai/mcp/kb/releases/<good-ref> /exp/mu2e/app/users/mu2eai/mcp/kb/current
+systemctl --user restart kb-mcp kb-web
+```
+
+So keep the last release that is known to work until the new one has been
+verified in production.
 
 ## Scheduled DocDB import
 
@@ -261,15 +284,27 @@ Files in `<deploy-root>/config/`, all mode 600:
 `kb-mcp.env` wins over `.env.local`, so no key may be in both; every run warns
 if one is.
 
-Install the release with the ingest extras:
+Install the release with the ingest extras. On a node where the account has
+no home directory (mu2eaigpvm01), uv needs its cache and Python locations set,
+or it tries `$HOME` and fails; the `uv` in the data dir is the one the
+checkout's setup script installed. Check `env | grep ^UV_` for leftovers
+pointing into another account's area (a shell used for the servers has
+mu2eai's).
 
 ```bash
+export PATH=/exp/mu2e/data/users/$USER/kb-mcp-data/bin:$PATH
+export UV_CACHE_DIR=/tmp/$USER/uv-cache
+export UV_PYTHON_INSTALL_DIR=/exp/mu2e/data/users/$USER/kb-mcp-data/uv-python
 REF=v0.2.5
 ROOT=/exp/mu2e/app/users/$USER/mcp/kb
 curl -fsSL https://raw.githubusercontent.com/Mu2e/kb-mcp/$REF/scripts/deploy-mu2e.sh \
-     -o /tmp/deploy-mu2e.sh
-KB_MCP_EXTRAS=ingest,docling,alcf bash /tmp/deploy-mu2e.sh $ROOT $REF
+     -o /tmp/$USER-deploy-mu2e.sh
+KB_MCP_EXTRAS=ingest,docling,alcf bash /tmp/$USER-deploy-mu2e.sh $ROOT $REF
 ```
+
+A release with these extras is about 1.5 GB, and the app area's quota is
+tight: `Disk quota exceeded` during the install means pruning old releases
+first (keep the one `current` points at until the new one has run).
 
 `REF` can be any pushed git ref, not only a tag: a commit (`REF=7a9340b`) is
 handy for trying a change before tagging it. The release directory is named
@@ -291,14 +326,29 @@ HOME=/exp/mu2e/data/users/$USER/kb-mcp-data/alcf $ROOT/current/.venv/bin/python 
 Check, then do one run by hand:
 
 ```bash
-$ROOT/current/.venv/bin/kb-mcp.sh --check --env-file $ROOT/config/kb-mcp.env
-KB_ENV_FILE=$ROOT/config/kb-mcp.env $ROOT/current/.venv/bin/kb-import --check-connections
-KB_ENV_FILE=$ROOT/config/kb-mcp.env $ROOT/current/.venv/bin/kb-docdb-update.sh; echo rc=$?
+export KB_ENV_FILE=$ROOT/config/kb-mcp.env
+export KB_ALCF_HOME=/exp/mu2e/data/users/$USER/kb-mcp-data/alcf
+export HF_HOME=/exp/mu2e/data/users/$USER/kb-mcp-data/huggingface_cache
+cd $ROOT/config
+$ROOT/current/.venv/bin/kb-mcp.sh --check --env-file $KB_ENV_FILE
+$ROOT/current/.venv/bin/kb-import --check-connections      # want: All 7 checks passed
+$ROOT/current/.venv/bin/kb-docdb-update.sh; echo rc=$?
 ```
 
 `kb-mcp.sh --check` is the server's check: its web-UI and mikey findings do not
 apply here, and `OPENAI_BASE_URL` is only set once a run has refreshed the ALCF
 token. A manual run with `DAYS=<n>` catches up after missed days.
+
+ALCF periodically demands a fresh interactive login: the `gemma` checks then
+fail with 401 and *"high-assurance timeout"*, and image descriptions degrade
+to placeholders (the import itself carries on). Log out at
+https://app.globus.org/logout, run the `authenticate --force` form of the login
+above (with an accepted identity, e.g. fnal.gov), then refresh the token in
+`.env.local` (each run also does this on its own):
+
+```bash
+$ROOT/current/.venv/bin/python -c "from kb_mcp.alcf_auth import refresh_alcf_token; refresh_alcf_token('sophia')"
+```
 
 Then install the crontab on the node that should run it:
 `scripts/kb_docdb.crontab` from the repository, with your paths. Its `HOME=`
