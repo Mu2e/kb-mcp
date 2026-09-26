@@ -30,7 +30,7 @@ The repeatable loop: identical for a first install and every upgrade.
 ### 0. Cut the release
 
 ```bash
-git push mu2e develop && git tag v0.2.4 && git push mu2e v0.2.4
+git push mu2e develop && git tag v0.2.5 && git push mu2e v0.2.5
 ```
 
 Tag the **tip**, not the version-bump commit, if anything landed after it.
@@ -40,7 +40,7 @@ Tag the **tip**, not the version-bump commit, if anything landed after it.
 ```bash
 mu2einit && slc uv
 
-REF=v0.2.4
+REF=v0.2.5
 curl -fsSL https://raw.githubusercontent.com/Mu2e/kb-mcp/$REF/scripts/deploy-mu2e.sh \
      -o /tmp/deploy-mu2e.sh
 bash /tmp/deploy-mu2e.sh /exp/mu2e/app/users/mu2eai/mcp/kb $REF
@@ -264,7 +264,7 @@ if one is.
 Install the release with the ingest extras:
 
 ```bash
-REF=v0.2.4
+REF=v0.2.5
 ROOT=/exp/mu2e/app/users/$USER/mcp/kb
 curl -fsSL https://raw.githubusercontent.com/Mu2e/kb-mcp/$REF/scripts/deploy-mu2e.sh \
      -o /tmp/deploy-mu2e.sh
