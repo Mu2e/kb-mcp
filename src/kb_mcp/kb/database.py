@@ -98,8 +98,18 @@ def create_engine_with_config() -> Engine:
         schema_parts.append("public")
     search_path = ",".join(schema_parts)
 
+    # Name the driver. A bare postgresql:// lets SQLAlchemy pick its default
+    # DBAPI, and SQLAlchemy 2.1 changed that from psycopg2 to psycopg (3),
+    # which this project does not install: v0.2.3/v0.2.4 resolved 2.1 and
+    # failed every query with "No module named 'psycopg'". The URL string
+    # itself stays plain, because scripts also hand it to psycopg2.connect().
+    from sqlalchemy.engine import make_url
+    engine_url = make_url(database_url)
+    if engine_url.drivername == "postgresql":
+        engine_url = engine_url.set(drivername="postgresql+psycopg2")
+
     engine = create_engine(
-        database_url,
+        engine_url,
         connect_args={
             # Kill sessions idle in transaction for more than 30 minutes.
             # Must be longer than the slowest single document parse (marker on large scanned PDFs).

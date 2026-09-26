@@ -43,7 +43,9 @@ dependencies = [
     "httpx>=0.27.0",
 
     # KB dependencies (database)
-    "sqlalchemy>=2.0.0",
+    # <2.1: 2.1 changed the default PostgreSQL driver (see database.py) and is
+    # untested here; lift the cap once a release has been tested against it.
+    "sqlalchemy>=2.0.0,<2.1",
     "psycopg2-binary>=2.9.0",
     "pgvector>=0.2.0",  # PostgreSQL vector extension support
 
