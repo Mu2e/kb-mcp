@@ -121,24 +121,32 @@ def search_hybrid(
         # search_type= argument in their log_search() calls.
         sub_kwargs = {k: v for k, v in kwargs.items() if k != "search_type"}
 
+        # Each half runs in its own savepoint. They share one session, and in
+        # Postgres a failed statement aborts the whole transaction: without the
+        # savepoint a failing semantic half made the full-text half fail too,
+        # and the search returned nothing instead of an error.
+        errors = []
+
         semantic_start = time.time()
         try:
-            semantic_results = search_semantic(
-                query=query,
-                embedding_name=embedding_name,
-                max_results=max_results * 2,  # Get more to improve fusion
-                source_id=source_id,
-                doc_type=doc_type,
-                chunking_strategy=chunking_strategy,
-                parser_id=parser_id,
-                filter=filter,
-                session=session,
-                explain_analyse=explain_analyse,
-                max_chunks_per_doc=max_chunks_per_doc,
-                **sub_kwargs
-            )
+            with session.begin_nested():
+                semantic_results = search_semantic(
+                    query=query,
+                    embedding_name=embedding_name,
+                    max_results=max_results * 2,  # Get more to improve fusion
+                    source_id=source_id,
+                    doc_type=doc_type,
+                    chunking_strategy=chunking_strategy,
+                    parser_id=parser_id,
+                    filter=filter,
+                    session=session,
+                    explain_analyse=explain_analyse,
+                    max_chunks_per_doc=max_chunks_per_doc,
+                    **sub_kwargs
+                )
         except Exception as e:
-            logger.warning(f"Semantic search failed: {e}")
+            logger.error(f"Semantic search failed: {e}")
+            errors.append(e)
             semantic_results = {"results": [], "metadata": {"total_results": 0}}
 
         semantic_time = time.time() - semantic_start
@@ -149,22 +157,29 @@ def search_hybrid(
         # Run full-text search
         fulltext_start = time.time()
         try:
-            fulltext_results = search_fulltext(
-                query=query,
-                max_results=max_results * 2,  # Get more to improve fusion
-                source_id=source_id,
-                doc_type=doc_type,
-                chunking_strategy=chunking_strategy,
-                parser_id=parser_id,
-                filter=filter,
-                session=session,
-                explain_analyse=explain_analyse,
-                max_chunks_per_doc=max_chunks_per_doc,
-                **sub_kwargs
-            )
+            with session.begin_nested():
+                fulltext_results = search_fulltext(
+                    query=query,
+                    max_results=max_results * 2,  # Get more to improve fusion
+                    source_id=source_id,
+                    doc_type=doc_type,
+                    chunking_strategy=chunking_strategy,
+                    parser_id=parser_id,
+                    filter=filter,
+                    session=session,
+                    explain_analyse=explain_analyse,
+                    max_chunks_per_doc=max_chunks_per_doc,
+                    **sub_kwargs
+                )
         except Exception as e:
-            logger.warning(f"Full-text search failed: {e}")
+            logger.error(f"Full-text search failed: {e}")
+            errors.append(e)
             fulltext_results = {"results": [], "metadata": {"total_results": 0}}
+
+        # One half failing still gives results; both failing is an error, not
+        # an empty result that looks like "nothing matched".
+        if len(errors) == 2:
+            raise errors[0]
 
         fulltext_time = time.time() - fulltext_start
 
