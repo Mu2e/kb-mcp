@@ -52,7 +52,7 @@ def _bind(sql, params):
     stmt = text(f"SELECT 1 FROM documents d WHERE {sql}").bindparams(**params)
     return str(
         stmt.compile(
-            dialect=postgresql.dialect(),
+            dialect=postgresql.psycopg2.dialect(),
             compile_kwargs={"literal_binds": True},
         )
     )
@@ -205,6 +205,18 @@ def test_build_where_clause_merges_filter_with_plain_kwargs(doc_alias):
 
     assert ":source_id" in sql and params["source_id"] == "mu2e-docdb"
     assert "%(" not in sql
+    _bind(sql, params)
+
+
+def test_or_filter_is_parenthesised_against_other_conditions(doc_alias):
+    """AND binds tighter than OR: an unwrapped "a OR b" filter would turn
+    "doc_type AND (a OR b)" into "(doc_type AND a) OR b"."""
+    sql, params = build_where_clause(
+        doc_type="text",
+        filter={"terms": {"source_id": ["mu2e-docdb", "mu2e-wiki"]}},
+    )
+
+    assert sql == "d.doc_type = :doc_type AND (d.source_id = :filter_0 OR d.source_id = :filter_1)"
     _bind(sql, params)
 
 

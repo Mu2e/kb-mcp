@@ -401,8 +401,15 @@ def get_filters_pgvector(
     # paramstyle="named" makes SQLAlchemy render ":meta_1" instead of
     # "%(meta_1)s"; text() only recognises the former, and an unrecognised
     # placeholder reaches PostgreSQL verbatim as `syntax error at or near "%"`.
+    #
+    # The psycopg2 dialect, named explicitly: the generic postgresql.dialect()
+    # is whatever SQLAlchemy's default driver is, and since 2.1 that is
+    # psycopg (3), which renders a cast after each placeholder
+    # (":doc_type_1::VARCHAR"). text() does not take ":name" followed by ":"
+    # as a parameter, so every renamed filter_<n> would go unbound. psycopg2 is
+    # also the driver the engine uses (see database.py).
     compiled = filter_expr.compile(
-        dialect=postgresql.dialect(paramstyle="named"),
+        dialect=postgresql.psycopg2.dialect(paramstyle="named"),
         compile_kwargs={"literal_binds": False},
     )
 
@@ -498,7 +505,10 @@ def build_where_clause(
         doc_alias = aliased(Document, name="d")
         filter_sql, filter_params = get_filters_pgvector(doc_alias, filter)
         if filter_sql:
-            where_parts.append(filter_sql)
+            # Parenthesised: a terms/should filter renders as "a OR b", and
+            # AND binds tighter than OR, so unwrapped it would turn
+            # "doc_type AND (a OR b)" into "(doc_type AND a) OR b".
+            where_parts.append(f"({filter_sql})")
             filter_params_dict.update(filter_params)
 
     # Handle simple kwargs (backward compatibility)

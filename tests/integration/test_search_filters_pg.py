@@ -102,6 +102,30 @@ def test_terms_filter_matches_any_listed_value(query, corpus):
     assert sources <= {corpus["source_id"]}
 
 
+def test_terms_filter_combines_with_other_conditions(query, corpus):
+    """terms over two real sources plus doc_type: every result must satisfy
+    both. An unparenthesised OR let the second source through for any
+    doc_type, and made semantic search's per-row filter subquery return
+    several rows (CardinalityViolation), which hybrid search then reported as
+    zero results."""
+    from kb_mcp.kb import search
+
+    with get_db_session() as session:
+        sources = [r[0] for r in session.query(Document.source_id).distinct().limit(2)]
+    if len(sources) < 2:
+        pytest.skip("needs two sources")
+
+    response = search(
+        query, max_results=10, doc_type=corpus["doc_type"],
+        filter={"terms": {"source_id": sources}},
+    )
+    results = response.get("results", [])
+    assert results
+    for r in results:
+        assert r["document"].doc_type == corpus["doc_type"]
+        assert r["document"].source_id in sources
+
+
 def test_bool_must_combines_predicates(query, corpus):
     from kb_mcp.kb import search
 

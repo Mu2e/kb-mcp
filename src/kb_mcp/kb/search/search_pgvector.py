@@ -93,6 +93,7 @@ def _search_pgvector(
                 FROM chunks c
                 JOIN documents d ON c.document_id = d.id
                 WHERE c.id = e.chunk_id AND {where_clause_sql}
+                LIMIT 1
             )
             ORDER BY e.embedding <=> CAST(:query_embedding AS vector)
             LIMIT :initial_limit
