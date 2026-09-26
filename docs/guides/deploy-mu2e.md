@@ -99,6 +99,13 @@ It cannot see the service's Kerberos cache, only this shell's, and says so.
 
 ### 3. Install the units
 
+On an upgrade, reuse the paths the running units already have:
+
+```bash
+systemctl --user show kb-mcp kb-web -p Environment | tr ' ' '\n' \
+  | grep -E 'DATA_DIR|HF_HOME|MIKEY|KRB5|KB_IMPORT_LOG_DIRS'
+```
+
 Once per surface, with the **same** `--data-dir`:
 
 ```bash
@@ -193,7 +200,7 @@ smoke test therefore treats an empty result as failure (`--allow-empty` if the
 knowledge base really is empty).
 
 The first query after a restart loads the embedding model and takes roughly a
-minute; later ones take a few seconds. The default `--timeout` (120 s) covers
+minute; later ones take well under a second. The default `--timeout` (120 s) covers
 that — if it does trip, the smoke test says it timed out rather than reporting
 a stream error, and the server is usually still working.
 
@@ -212,6 +219,7 @@ Web UI over `ssh -L 8108:localhost:8108 mu2eaigpvm01`:
 | `/web` | 200 | browsing open, database reachable |
 | `/web` | 500 | database unreachable — it lists documents, so it fails loudly |
 | `/login` | 303 → `/admin/login` | public mode active (302 to `/login?redirect=` means it is **not**) |
+| `/web/imports` (logged in as admin) | 200, runs with **log** links | import-log directories readable (no links: check `--import-log-dirs`) |
 
 Permissions, once:
 
