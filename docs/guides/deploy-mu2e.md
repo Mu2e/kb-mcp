@@ -219,6 +219,21 @@ minute; later ones take well under a second. The default `--timeout` (120 s) cov
 that — if it does trip, the smoke test says it timed out rather than reporting
 a stream error, and the server is usually still working.
 
+Search speed over MCP, from any host (the token is prompted for, never passed
+on the command line; `KB_MCP_TOKEN_FILE` points at a mode-600 file instead):
+
+```bash
+/exp/mu2e/app/users/mu2eai/mcp/kb/current/.venv/bin/kb-mcp-bench http://mu2eaigpvm01:8008
+```
+
+It runs a fixed set of searches (phrases, common words, a name, filters,
+full-text, semantic) twice and prints each call's time and result count, with
+the median and maximum per pass. Rerun it after a change or a deployment to
+compare. The first pass is only truly cold after a quiet period: common words
+such as "calorimeter" can then take minutes, as the full-text ranking reads
+every matching chunk from storage. Releases before v0.2.6 lack the script; use
+`scripts/mcp_bench.py` from a checkout with any venv that has kb-mcp installed.
+
 Auth, from another host:
 
 ```bash
