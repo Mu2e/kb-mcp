@@ -30,7 +30,7 @@ The repeatable loop: identical for a first install and every upgrade.
 ### 0. Cut the release
 
 ```bash
-git push mu2e develop && git tag v0.2.5 && git push mu2e v0.2.5
+git push mu2e develop && git tag v0.2.6 && git push mu2e v0.2.6
 ```
 
 Tag the **tip**, not the version-bump commit, if anything landed after it.
@@ -55,7 +55,7 @@ search and a filtered search against the real database; tag only if they work.
 ```bash
 mu2einit && slc uv
 
-REF=v0.2.5
+REF=v0.2.6
 curl -fsSL https://raw.githubusercontent.com/Mu2e/kb-mcp/$REF/scripts/deploy-mu2e.sh \
      -o /tmp/$USER-deploy-mu2e.sh
 bash /tmp/$USER-deploy-mu2e.sh /exp/mu2e/app/users/mu2eai/mcp/kb $REF
@@ -310,7 +310,7 @@ mu2eai's).
 export PATH=/exp/mu2e/data/users/$USER/kb-mcp-data/bin:$PATH
 export UV_CACHE_DIR=/tmp/$USER/uv-cache
 export UV_PYTHON_INSTALL_DIR=/exp/mu2e/data/users/$USER/kb-mcp-data/uv-python
-REF=v0.2.5
+REF=v0.2.6
 ROOT=/exp/mu2e/app/users/$USER/mcp/kb
 curl -fsSL https://raw.githubusercontent.com/Mu2e/kb-mcp/$REF/scripts/deploy-mu2e.sh \
      -o /tmp/$USER-deploy-mu2e.sh
