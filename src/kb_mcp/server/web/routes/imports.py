@@ -29,19 +29,20 @@ def allowed_log_path(path: Optional[str], allowed_dirs: list) -> Optional[Path]:
     """Resolve `path` and return it only if it is a file inside an allowed dir.
 
     Symlinks and `..` are resolved first, so neither can lead outside.
+    Paths outside the allowed directories are rejected before anything touches
+    the filesystem there: older runs point at log directories the web server
+    cannot read, and even asking whether such a file exists raises
+    PermissionError (which made the whole Imports page fail).
     """
     if not path or not allowed_dirs:
         return None
     try:
         real = Path(path).resolve()
+        if not any(real.is_relative_to(d) for d in allowed_dirs):
+            return None
+        return real if real.is_file() else None
     except (OSError, RuntimeError):
         return None
-    if not real.is_file():
-        return None
-    for d in allowed_dirs:
-        if real.is_relative_to(d):
-            return real
-    return None
 
 
 def clean_log_text(raw: str) -> str:
@@ -146,13 +147,22 @@ def setup_imports_routes(app, session_manager: WebSessionManager, require_auth_h
         # missing KB_ENV_FILE) have a log file but no run record.
         orphans = []
         for d_index, d in enumerate(allowed):
-            for f in sorted(d.glob("docdb-update-*.log"), reverse=True)[:200]:
-                if LOG_NAME_RE.match(f.name) and f.resolve() not in referenced:
+            try:
+                files = sorted(d.glob("docdb-update-*.log"), reverse=True)[:200]
+            except OSError as e:
+                logger.warning("Cannot list import logs in %s: %s", d, e)
+                files = []
+            for f in files:
+                if not LOG_NAME_RE.match(f.name) or f.resolve() in referenced:
+                    continue
+                try:
                     mtime = datetime.fromtimestamp(f.stat().st_mtime, tz=timezone.utc).isoformat()
-                    orphans.append(
-                        f"<tr><td>{_local_time(mtime)}</td>"
-                        f'<td><a href="/web/imports/file/{d_index}/{html_escape(f.name)}">{html_escape(f.name)}</a></td></tr>'
-                    )
+                except OSError:
+                    continue
+                orphans.append(
+                    f"<tr><td>{_local_time(mtime)}</td>"
+                    f'<td><a href="/web/imports/file/{d_index}/{html_escape(f.name)}">{html_escape(f.name)}</a></td></tr>'
+                )
 
         if allowed:
             dirs_note = "Log files are read from: " + ", ".join(f"<code>{html_escape(str(d))}</code>" for d in allowed)
