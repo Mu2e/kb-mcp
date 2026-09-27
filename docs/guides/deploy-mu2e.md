@@ -386,6 +386,14 @@ given: `kb-mcp-install-unit.sh --surface web ... --import-log-dirs
 Runs that stop before the import starts (credentials, configuration) have no
 database record; their logs are listed separately on the same page.
 
+The job's last step, `kb tools db-maintain`, also creates and refreshes two
+small materialized views that the web UI reads instead of scanning every
+document on each page load (`kb_document_counts`, `kb_metadata_keys`). Only
+the job's role creates or refreshes them; the servers only read, and fall back
+to live queries if the views do not exist. So the job must run a release that
+knows them, or they stop being refreshed; the dropdown counts are as fresh as
+the last import.
+
 A failed run exits non-zero and its log ends with a `FAILURE :` line; every
 run also appears in `kb logs imports`. Upgrading is the normal release loop:
 the crontab runs `<deploy-root>/current`, so deploying a new release is enough.
