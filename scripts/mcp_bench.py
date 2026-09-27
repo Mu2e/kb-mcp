@@ -9,9 +9,11 @@ or a deployment. Round 1 is the cold run; later rounds show warm behaviour.
 Usage:
   mcp_bench.py [base-url] [--rounds N] [--queries-file FILE] [--max-results N]
 
-The bearer token is read from KB_MCP_TOKEN, or from --token-file (a file only
-you can read). It is deliberately not a command-line argument: those are
-visible to every user on the host in `ps`.
+The bearer token is read from KB_MCP_TOKEN, or from --token-file /
+KB_MCP_TOKEN_FILE (a file only you can read); with neither, and a terminal,
+the script asks for it without echoing. It is deliberately not a command-line
+argument: those are visible to every user on the host in `ps`, and end up in
+the shell history.
 
 Example, from any Mu2e node:
   KB_MCP_TOKEN_FILE=~/.kb-mcp-token mcp_bench.py http://mu2eaigpvm01.fnal.gov:8008
@@ -155,9 +157,12 @@ def main() -> int:
         queries = [("custom", {"query": q.strip()}) for q in lines if q.strip()]
 
     token = read_token(args.token_file)
+    if not token and sys.stdin.isatty():
+        import getpass
+        token = getpass.getpass("MCP bearer token (not echoed): ").strip() or None
     if not token:
-        print("NOTE: no token (KB_MCP_TOKEN or --token-file); the server will likely answer 401.",
-              file=sys.stderr)
+        print("NOTE: no token (KB_MCP_TOKEN, --token-file, or the prompt); "
+              "the server will likely answer 401.", file=sys.stderr)
     return asyncio.run(run(args.base_url.rstrip("/"), token, queries, args.rounds,
                            args.max_results, args.timeout))
 
