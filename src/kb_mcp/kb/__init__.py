@@ -7,7 +7,7 @@ from .utils import list_sources, get_metadata_keys
 from .tools import ingest, parse_all, chunk_and_embed_all, image_chunk_and_embed_all, embed_all, filter_all, export_source
 
 # Internal imports (not exported in __all__ but available for internal use)
-from .documents import add_parsed, add_parsed_many, get_or_create_parser, get_or_create_raw_document, insert_raw_document, get_options, get_children  # noqa: F401
+from .documents import add_parsed, add_parsed_many, get_or_create_parser, get_or_create_raw_document, insert_raw_document, get_options, get_document_counts, get_children  # noqa: F401
 from .utils import deduplicate, find_all_duplicates, get_stats  # noqa: F401
 from .logs import get_search_logs, get_parsing_logs, get_chunking_logs, get_all_logs_for_document  # noqa: F401
 

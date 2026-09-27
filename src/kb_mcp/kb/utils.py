@@ -253,7 +253,14 @@ def get_metadata_keys(session=None, limit: int = 1000) -> List[str]:
         dialect_name = session.bind.dialect.name if session.bind else None
         all_keys = set()
         
-        if dialect_name == "postgresql":
+        from .database import summary_views_available
+        if dialect_name == "postgresql" and summary_views_available(session.connection()):
+            # The summary view (refreshed after every import): 44 rows instead
+            # of reading the meta of every document, which took over 5 minutes
+            # cold on 2026-09-27.
+            from sqlalchemy import text
+            all_keys = {row[0] for row in session.execute(text("SELECT key FROM kb_metadata_keys"))}
+        elif dialect_name == "postgresql":
             # PostgreSQL: use jsonb_object_keys for efficient extraction
             from sqlalchemy import text
             result = session.execute(text("""

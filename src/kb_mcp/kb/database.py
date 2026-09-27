@@ -287,6 +287,62 @@ def get_db_session_ephemeral(session=None, auto_commit: bool = True) -> Generato
         yield s
 
 
+# Small materialized views for web-UI queries that would otherwise scan every
+# document on each page load: the per-source/per-type counts behind the filter
+# dropdowns, and the list of metadata keys. Cold, those scans took 16 s and over
+# 5 minutes (2026-09-27); the views are a handful of rows. They are created and
+# refreshed by `kb tools db-maintain`, which the import job runs after every
+# import, so they are as fresh as the last import. The unique indexes allow
+# REFRESH ... CONCURRENTLY, which does not block readers.
+SUMMARY_VIEWS = {
+    "kb_document_counts": (
+        "SELECT source_id, doc_type, count(*)::bigint AS n FROM documents GROUP BY source_id, doc_type",
+        "CREATE UNIQUE INDEX IF NOT EXISTS kb_document_counts_key ON kb_document_counts (source_id, doc_type)",
+    ),
+    "kb_metadata_keys": (
+        "SELECT DISTINCT jsonb_object_keys(meta) AS key FROM documents "
+        "WHERE meta IS NOT NULL AND meta != '{}'::jsonb",
+        "CREATE UNIQUE INDEX IF NOT EXISTS kb_metadata_keys_key ON kb_metadata_keys (key)",
+    ),
+}
+
+
+def summary_views_available(conn) -> bool:
+    """True if every summary view exists (PostgreSQL only)."""
+    if conn.dialect.name != "postgresql":
+        return False
+    return all(
+        conn.execute(text("SELECT to_regclass(:n)"), {"n": name}).scalar() is not None
+        for name in SUMMARY_VIEWS
+    )
+
+
+def ensure_summary_views(conn) -> list:
+    """Create any missing summary view, if this role may create in the schema.
+
+    The web server's read-only role may not, and does not try: it reads the
+    views once the import job has created them, and falls back to live
+    queries until then. Returns the names created.
+    """
+    if conn.dialect.name != "postgresql":
+        return []
+    if not conn.execute(text("SELECT has_schema_privilege(current_user, current_schema(), 'CREATE')")).scalar():
+        return []
+    created = []
+    for name, (select_sql, index_sql) in SUMMARY_VIEWS.items():
+        if conn.execute(text("SELECT to_regclass(:n)"), {"n": name}).scalar() is None:
+            conn.execute(text(f"CREATE MATERIALIZED VIEW {name} AS {select_sql}"))
+            created.append(name)
+        conn.execute(text(index_sql))
+    return created
+
+
+def refresh_summary_views(conn) -> None:
+    """Recompute the summary views without blocking readers (owner only)."""
+    for name in SUMMARY_VIEWS:
+        conn.execute(text(f"REFRESH MATERIALIZED VIEW CONCURRENTLY {name}"))
+
+
 def _setup_fulltext_search_trigger(engine: Engine) -> None:
     """Set up PostgreSQL trigger for auto-updating text_search_vector on chunks.
 

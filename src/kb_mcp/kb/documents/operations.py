@@ -1716,6 +1716,26 @@ def delete_raw_document(
         return result
 
 
+def get_document_counts(session=None) -> Optional[List[tuple]]:
+    """Document counts per (source_id, doc_type), from the summary view.
+
+    Returns a list of (source_id, doc_type, count), or None when the view is
+    not available (not PostgreSQL, or not created yet), in which case callers
+    count live. The view is refreshed after every import (see
+    kb.database.SUMMARY_VIEWS), so it can lag direct uploads until then.
+    """
+    from sqlalchemy import text
+    from ..database import summary_views_available
+
+    _ensure_db_initialized()
+    with get_db_session(session) as session:
+        if not summary_views_available(session.connection()):
+            return None
+        return [tuple(r) for r in session.execute(
+            text("SELECT source_id, doc_type, n FROM kb_document_counts")
+        ).all()]
+
+
 def get_options() -> Dict[str, Any]:
     """Get filter options for the knowledge base.
 
@@ -1730,6 +1750,27 @@ def get_options() -> Dict[str, Any]:
     _ensure_db_initialized()
 
     from sqlalchemy import func
+
+    counts = get_document_counts()
+    if counts is not None:
+        # From the summary view: a handful of rows instead of a scan of every
+        # document (16 s cold on 2026-09-27). Sources without documents keep a
+        # count of 0, as in the live query below.
+        with get_db_session() as session:
+            sources = session.query(Source.id, Source.name).order_by(Source.id).all()
+        per_source: Dict[str, int] = {}
+        per_type: Dict[str, int] = {}
+        for source_id, doc_type, n in counts:
+            per_source[source_id] = per_source.get(source_id, 0) + n
+            per_type[doc_type] = per_type.get(doc_type, 0) + n
+        return {
+            "source_options": [
+                {"id": sid, "name": name, "count": per_source.get(sid, 0)} for sid, name in sources
+            ],
+            "doc_type_options": [
+                {"doc_type": t, "count": per_type[t]} for t in sorted(per_type, key=lambda t: (t is None, t))
+            ],
+        }
 
     with get_db_session() as session:
         # Get sources with document counts

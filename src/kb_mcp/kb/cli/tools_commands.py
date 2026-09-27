@@ -1075,6 +1075,20 @@ def cmd_db_maintain(args):
     ]
     all_tables = static_tables + [t for t, _dim in embedding_tables]
 
+    # Summary views for the web UI (document counts, metadata keys): created
+    # on first use, refreshed on every run. The import job runs this command
+    # after each import, which is what keeps them current.
+    from ..database import ensure_summary_views, refresh_summary_views, summary_views_available
+    with engine.connect() as conn:
+        conn = conn.execution_options(isolation_level="AUTOCOMMIT")
+        created = ensure_summary_views(conn)
+        if created:
+            print(f"Created summary views: {', '.join(created)}")
+        if summary_views_available(conn):
+            print("Refreshing summary views...")
+            refresh_summary_views(conn)
+            print("  done.")
+
     if do_analyze:
         print(f"Running ANALYZE on {len(all_tables)} table(s)...")
         with engine.connect() as conn:
@@ -1957,7 +1971,7 @@ def setup_commands(subparsers):
 
     db_maintain_parser = tools_subparsers.add_parser(
         "db-maintain",
-        help="Post-bulk-load bookkeeping: ANALYZE, VACUUM, and/or rebuild pgvector indexes sized to current row counts",
+        help="Post-bulk-load bookkeeping: refresh the web UI's summary views, ANALYZE, VACUUM, and/or rebuild pgvector indexes sized to current row counts",
     )
     db_maintain_parser.add_argument("--analyze", action="store_true", help="Refresh planner statistics (default if no flags given)")
     db_maintain_parser.add_argument("--vacuum", action="store_true", help="Reclaim dead tuple space")
