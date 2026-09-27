@@ -6,12 +6,30 @@ from pathlib import Path
 from starlette.responses import JSONResponse, Response
 from starlette.requests import Request
 
+from starlette.concurrency import run_in_threadpool
+
 from ..auth import WebSessionManager
 from .documents import require_auth_api, document_to_dict
 
 logger = logging.getLogger(__name__)
 
 _RANGE_OPERATIONS = {"gte", "gt", "lte", "lt"}
+
+
+def _option_count(counts, filter_dict):
+    """Count for one filter-dropdown option.
+
+    From the summary view's per-(source, type) counts when the filter only
+    involves those two, otherwise (text search, or no view yet) a live count.
+    """
+    from ....kb import get_count
+    if counts is None or set(filter_dict) - {"source_id", "doc_type"}:
+        return get_count(filter_dict=filter_dict)
+    return sum(
+        n for source_id, doc_type, n in counts
+        if source_id == filter_dict.get("source_id", source_id)
+        and doc_type == filter_dict.get("doc_type", doc_type)
+    )
 
 
 def parse_metadata_query_params(metadata_params):
@@ -101,101 +119,106 @@ def setup_api_routes(app, session_manager: WebSessionManager):
 
         try:
             # Query documents from knowledge base
-            from ....kb import get, get_count, get_options
-            from ....kb.database import get_db_session
+            # Synchronous DB work, off the event loop: run inline it blocked every other request, /status included, for as long as it took.
+            def _query():
+                from ....kb import get, get_count, get_options, get_document_counts
+                from ....kb.database import get_db_session
 
-            # Get documents with filters and pagination within a session
-            # This ensures all attributes are loaded before session closes
-            with get_db_session() as session:
-                # Get documents with filters and pagination
-                # The listing shows metadata only; loading every document's full
-                # text here cost ~1 s and 4+ MB for one page of 10.
-                documents_result = get(filter_dict=filter_dict if filter_dict else None, limit=limit, offset=offset, defer_content=not include_text, session=session)
-                if documents_result is None:
-                    documents = []
-                elif isinstance(documents_result, list):
-                    documents = documents_result
-                else:
-                    documents = [documents_result]
+                # Get documents with filters and pagination within a session
+                # This ensures all attributes are loaded before session closes
+                with get_db_session() as session:
+                    # Get documents with filters and pagination
+                    # The listing shows metadata only; loading every document's full
+                    # text here cost ~1 s and 4+ MB for one page of 10.
+                    documents_result = get(filter_dict=filter_dict if filter_dict else None, limit=limit, offset=offset, defer_content=not include_text, session=session)
+                    if documents_result is None:
+                        documents = []
+                    elif isinstance(documents_result, list):
+                        documents = documents_result
+                    else:
+                        documents = [documents_result]
 
-                # Convert documents to dictionaries while still in session
-                # This ensures all attributes are accessible
-                documents_data = [document_to_dict(doc, include_text=include_text) for doc in documents]
+                    # Convert documents to dictionaries while still in session
+                    # This ensures all attributes are accessible
+                    documents_data = [document_to_dict(doc, include_text=include_text) for doc in documents]
 
-                # The list shows the first 300 characters of the text where a
-                # document has no summary. Take just that slice in SQL, for the
-                # documents that need it, instead of loading their full text.
-                if not include_text:
-                    need = [d["id"] for d in documents_data if not d.get("summary")]
-                    if need:
-                        from sqlalchemy import func
-                        from ....kb.db_models import Document
-                        previews = dict(
-                            session.query(Document.id, func.substr(Document.text, 1, 300))
-                            .filter(Document.id.in_(need))
-                            .all()
-                        )
-                        for d in documents_data:
-                            if previews.get(d["id"]):
-                                d["text_preview"] = previews[d["id"]]
+                    # The list shows the first 300 characters of the text where a
+                    # document has no summary. Take just that slice in SQL, for the
+                    # documents that need it, instead of loading their full text.
+                    if not include_text:
+                        need = [d["id"] for d in documents_data if not d.get("summary")]
+                        if need:
+                            from sqlalchemy import func
+                            from ....kb.db_models import Document
+                            previews = dict(
+                                session.query(Document.id, func.substr(Document.text, 1, 300))
+                                .filter(Document.id.in_(need))
+                                .all()
+                            )
+                            for d in documents_data:
+                                if previews.get(d["id"]):
+                                    d["text_preview"] = previews[d["id"]]
 
-            # Get total count (outside session, doesn't need objects)
-            total_count = get_count(filter_dict=filter_dict if filter_dict else None)
+                # Get total count (outside session, doesn't need objects)
+                total_count = get_count(filter_dict=filter_dict if filter_dict else None)
 
-            # Get base filter options (outside session)
-            base_options = get_options()
+                # Get base filter options (outside session)
+                base_options = get_options()
+                counts = get_document_counts()
 
-            # Calculate filtered counts for options based on current filters
-            # For source options: if doc_type or search is selected, show counts filtered by those
-            # For doc_type options: if source_id or search is selected, show counts filtered by those
-            filtered_source_options = []
-            for source_option in base_options["source_options"]:
-                source_id_val = source_option["id"]
-                # Build filter dict for this source option
-                source_filter = {"source_id": source_id_val}
-                if doc_type:
-                    source_filter["doc_type"] = doc_type
-                if search:
-                    source_filter["text_contains"] = search
-                filtered_count = get_count(filter_dict=source_filter)
-                filtered_source_options.append({
-                    "id": source_id_val,
-                    "name": source_option["name"],
-                    "count": filtered_count
+                # Calculate filtered counts for options based on current filters
+                # For source options: if doc_type or search is selected, show counts filtered by those
+                # For doc_type options: if source_id or search is selected, show counts filtered by those
+                filtered_source_options = []
+                for source_option in base_options["source_options"]:
+                    source_id_val = source_option["id"]
+                    # Build filter dict for this source option
+                    source_filter = {"source_id": source_id_val}
+                    if doc_type:
+                        source_filter["doc_type"] = doc_type
+                    if search:
+                        source_filter["text_contains"] = search
+                    filtered_count = _option_count(counts, source_filter)
+                    filtered_source_options.append({
+                        "id": source_id_val,
+                        "name": source_option["name"],
+                        "count": filtered_count
+                    })
+
+                filtered_doc_type_options = []
+                for doc_type_option in base_options["doc_type_options"]:
+                    doc_type_val = doc_type_option["doc_type"]
+                    # Build filter dict for this doc_type option
+                    type_filter = {"doc_type": doc_type_val}
+                    if source_id:
+                        type_filter["source_id"] = source_id
+                    if search:
+                        type_filter["text_contains"] = search
+                    filtered_count = _option_count(counts, type_filter)
+                    filtered_doc_type_options.append({
+                        "doc_type": doc_type_val,
+                        "count": filtered_count
+                    })
+
+                filtered_options = {
+                    "source_options": filtered_source_options,
+                    "doc_type_options": filtered_doc_type_options,
+                }
+
+                return JSONResponse({
+                    "documents": documents_data,
+                    "total_count": total_count,
+                    "limit": limit,
+                    "offset": offset,
+                    "filters": {
+                        "source_id": source_id,
+                        "doc_type": doc_type,
+                        "search": search,
+                    },
+                    "options": filtered_options,
                 })
 
-            filtered_doc_type_options = []
-            for doc_type_option in base_options["doc_type_options"]:
-                doc_type_val = doc_type_option["doc_type"]
-                # Build filter dict for this doc_type option
-                type_filter = {"doc_type": doc_type_val}
-                if source_id:
-                    type_filter["source_id"] = source_id
-                if search:
-                    type_filter["text_contains"] = search
-                filtered_count = get_count(filter_dict=type_filter)
-                filtered_doc_type_options.append({
-                    "doc_type": doc_type_val,
-                    "count": filtered_count
-                })
-
-            filtered_options = {
-                "source_options": filtered_source_options,
-                "doc_type_options": filtered_doc_type_options,
-            }
-
-            return JSONResponse({
-                "documents": documents_data,
-                "total_count": total_count,
-                "limit": limit,
-                "offset": offset,
-                "filters": {
-                    "source_id": source_id,
-                    "doc_type": doc_type,
-                    "search": search,
-                },
-                "options": filtered_options,
-            })
+            return await run_in_threadpool(_query)
 
         except Exception as e:
             logger.error(f"Error in api_get: {e}", exc_info=True)
@@ -332,57 +355,62 @@ def setup_api_routes(app, session_manager: WebSessionManager):
         search = request.query_params.get("search", "")
 
         try:
-            from ....kb import get_count, get_options
+            # Synchronous DB work, off the event loop: run inline it blocked every other request, /status included, for as long as it took.
+            def _query():
+                from ....kb import get_count, get_options, get_document_counts
 
-            # Get base filter options
-            base_options = get_options()
+                # Get base filter options
+                base_options = get_options()
+                counts = get_document_counts()
 
-            # Build current filter dict
-            current_filter = {}
-            if source_id:
-                current_filter["source_id"] = source_id
-            if doc_type:
-                current_filter["doc_type"] = doc_type
-            if search:
-                current_filter["text_contains"] = search
-
-            # Calculate filtered counts for source options
-            filtered_source_options = []
-            for source_option in base_options["source_options"]:
-                source_id_val = source_option["id"]
-                # Build filter dict for this source option
-                source_filter = {"source_id": source_id_val}
-                if doc_type:
-                    source_filter["doc_type"] = doc_type
-                if search:
-                    source_filter["text_contains"] = search
-                filtered_count = get_count(filter_dict=source_filter)
-                filtered_source_options.append({
-                    "id": source_id_val,
-                    "name": source_option["name"],
-                    "count": filtered_count
-                })
-
-            # Calculate filtered counts for doc_type options
-            filtered_doc_type_options = []
-            for doc_type_option in base_options["doc_type_options"]:
-                doc_type_val = doc_type_option["doc_type"]
-                # Build filter dict for this doc_type option
-                type_filter = {"doc_type": doc_type_val}
+                # Build current filter dict
+                current_filter = {}
                 if source_id:
-                    type_filter["source_id"] = source_id
+                    current_filter["source_id"] = source_id
+                if doc_type:
+                    current_filter["doc_type"] = doc_type
                 if search:
-                    type_filter["text_contains"] = search
-                filtered_count = get_count(filter_dict=type_filter)
-                filtered_doc_type_options.append({
-                    "doc_type": doc_type_val,
-                    "count": filtered_count
+                    current_filter["text_contains"] = search
+
+                # Calculate filtered counts for source options
+                filtered_source_options = []
+                for source_option in base_options["source_options"]:
+                    source_id_val = source_option["id"]
+                    # Build filter dict for this source option
+                    source_filter = {"source_id": source_id_val}
+                    if doc_type:
+                        source_filter["doc_type"] = doc_type
+                    if search:
+                        source_filter["text_contains"] = search
+                    filtered_count = _option_count(counts, source_filter)
+                    filtered_source_options.append({
+                        "id": source_id_val,
+                        "name": source_option["name"],
+                        "count": filtered_count
+                    })
+
+                # Calculate filtered counts for doc_type options
+                filtered_doc_type_options = []
+                for doc_type_option in base_options["doc_type_options"]:
+                    doc_type_val = doc_type_option["doc_type"]
+                    # Build filter dict for this doc_type option
+                    type_filter = {"doc_type": doc_type_val}
+                    if source_id:
+                        type_filter["source_id"] = source_id
+                    if search:
+                        type_filter["text_contains"] = search
+                    filtered_count = _option_count(counts, type_filter)
+                    filtered_doc_type_options.append({
+                        "doc_type": doc_type_val,
+                        "count": filtered_count
+                    })
+
+                return JSONResponse({
+                    "source_options": filtered_source_options,
+                    "doc_type_options": filtered_doc_type_options,
                 })
 
-            return JSONResponse({
-                "source_options": filtered_source_options,
-                "doc_type_options": filtered_doc_type_options,
-            })
+            return await run_in_threadpool(_query)
 
         except Exception as e:
             logger.error(f"Error in api_options: {e}", exc_info=True)
@@ -680,10 +708,10 @@ def setup_api_routes(app, session_manager: WebSessionManager):
             return error_response
 
         try:
+            # Off the event loop; read from the summary view once it exists
+            # (the live query scans every document: 5 min cold on 2026-09-27).
             from ....kb.utils import get_metadata_keys
-            
-            # Get all unique metadata keys
-            keys = get_metadata_keys()
+            keys = await run_in_threadpool(get_metadata_keys)
             
             return JSONResponse({
                 "keys": keys

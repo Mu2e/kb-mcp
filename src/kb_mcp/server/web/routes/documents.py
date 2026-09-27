@@ -334,8 +334,11 @@ def setup_documents_routes(app, oauth_provider, session_manager: WebSessionManag
         uploaded_docs = request.query_params.get("uploaded_docs", "")  # Comma-separated doc IDs
 
         # Get filter options for initial dropdown population
+        # Off the event loop, and from the summary view once it exists:
+        # counting every document per source and type was 16 s cold.
+        from starlette.concurrency import run_in_threadpool
         from ....kb import get_options
-        options = get_options()
+        options = await run_in_threadpool(get_options)
 
         # Build initial filter dropdowns (counts will be updated dynamically via JS)
         source_options = '<option value="">All Sources</option>'

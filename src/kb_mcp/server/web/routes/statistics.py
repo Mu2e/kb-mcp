@@ -38,8 +38,9 @@ def setup_statistics_routes(app, session_manager: WebSessionManager, require_aut
         doc_type = request.query_params.get("doc_type", "")
 
         # Get filter options for dropdowns
+        from starlette.concurrency import run_in_threadpool
         from ....kb import get_options
-        options = get_options()
+        options = await run_in_threadpool(get_options)
 
         # Build filter dropdowns
         source_options = '<option value="">All Sources</option>'
