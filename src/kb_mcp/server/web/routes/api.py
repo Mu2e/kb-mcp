@@ -627,70 +627,75 @@ def setup_api_routes(app, session_manager: WebSessionManager):
             filter_dict = {"bool": {"must": must_clauses}} if len(must_clauses) > 1 else must_clauses[0]
 
         try:
-            # Import appropriate search function based on type
-            if search_type == "semantic":
-                from ....kb.search import search_semantic
-                search_fn = search_semantic
-            elif search_type == "fulltext":
-                from ....kb.search import search_fulltext
-                search_fn = search_fulltext
-            else:  # hybrid (default)
-                from ....kb.search import search
-                search_fn = search
+            # Synchronous search, off the event loop: inline, a slow (cold) search froze
+            # every other request of the web UI, /status included, until it finished.
+            def _query():
+                # Import appropriate search function based on type
+                if search_type == "semantic":
+                    from ....kb.search import search_semantic
+                    search_fn = search_semantic
+                elif search_type == "fulltext":
+                    from ....kb.search import search_fulltext
+                    search_fn = search_fulltext
+                else:  # hybrid (default)
+                    from ....kb.search import search
+                    search_fn = search
 
-            # Perform search
-            result = search_fn(
-                query=query,
-                embedding_name=embedding_name,
-                max_results=max_results,
-                source_id=source_id,
-                doc_type=doc_type,
-                chunking_strategy=chunking_strategy,
-                filter=filter_dict,
-            )
+                # Perform search
+                result = search_fn(
+                    query=query,
+                    embedding_name=embedding_name,
+                    max_results=max_results,
+                    source_id=source_id,
+                    doc_type=doc_type,
+                    chunking_strategy=chunking_strategy,
+                    filter=filter_dict,
+                )
 
-            # Convert results to document dictionaries
-            documents_data = []
-            for doc_result in result.get('results', []):
-                doc = doc_result.get('document')
-                if doc:
-                    doc_dict = document_to_dict(doc, include_text=False)
-                    # Add search-specific information
-                    doc_dict['chunks'] = doc_result.get('chunks', [])
+                # Convert results to document dictionaries
+                documents_data = []
+                for doc_result in result.get('results', []):
+                    doc = doc_result.get('document')
+                    if doc:
+                        doc_dict = document_to_dict(doc, include_text=False)
+                        # Add search-specific information
+                        doc_dict['chunks'] = doc_result.get('chunks', [])
 
-                    # Extract best similarity and rank scores
-                    best_similarity = None
-                    best_rank = None
-                    if doc_result.get('chunks'):
-                        first_chunk = doc_result['chunks'][0]
-                        best_similarity = first_chunk.get('similarity')
-                        best_rank = first_chunk.get('rank')
+                        # Extract best similarity and rank scores
+                        best_similarity = None
+                        best_rank = None
+                        if doc_result.get('chunks'):
+                            first_chunk = doc_result['chunks'][0]
+                            best_similarity = first_chunk.get('similarity')
+                            best_rank = first_chunk.get('rank')
 
-                    doc_dict['best_similarity'] = best_similarity
-                    doc_dict['best_rank'] = best_rank
+                        doc_dict['best_similarity'] = best_similarity
+                        doc_dict['best_rank'] = best_rank
 
-                    # For hybrid search, include RRF score and ranks
-                    if search_type == "hybrid":
-                        doc_dict['rrf_score'] = doc_result.get('rrf_score')
-                        doc_dict['semantic_rank'] = doc_result.get('semantic_rank')
-                        doc_dict['fulltext_rank'] = doc_result.get('fulltext_rank')
+                        # For hybrid search, include RRF score and ranks
+                        if search_type == "hybrid":
+                            doc_dict['rrf_score'] = doc_result.get('rrf_score')
+                            doc_dict['semantic_rank'] = doc_result.get('semantic_rank')
+                            doc_dict['fulltext_rank'] = doc_result.get('fulltext_rank')
 
-                    documents_data.append(doc_dict)
+                        documents_data.append(doc_dict)
 
-            return JSONResponse({
-                "documents": documents_data,
-                "total_results": result.get('metadata', {}).get('total_results', 0),
-                "query": query,
-                "search_type": search_type,
-                "embedding_name": result.get('metadata', {}).get('embedding_name'),
-                "timing": {
-                    "total": result.get('metadata', {}).get('time_search_total'),
-                    "embedding": result.get('metadata', {}).get('time_embedding'),
-                    "semantic": result.get('metadata', {}).get('time_semantic'),
-                    "fulltext": result.get('metadata', {}).get('time_fulltext'),
-                    "fusion": result.get('metadata', {}).get('time_fusion'),
-                }
-            })
+                return JSONResponse({
+                    "documents": documents_data,
+                    "total_results": result.get('metadata', {}).get('total_results', 0),
+                    "query": query,
+                    "search_type": search_type,
+                    "embedding_name": result.get('metadata', {}).get('embedding_name'),
+                    "timing": {
+                        "total": result.get('metadata', {}).get('time_search_total'),
+                        "embedding": result.get('metadata', {}).get('time_embedding'),
+                        "semantic": result.get('metadata', {}).get('time_semantic'),
+                        "fulltext": result.get('metadata', {}).get('time_fulltext'),
+                        "fusion": result.get('metadata', {}).get('time_fusion'),
+                    }
+                })
+
+            return await run_in_threadpool(_query)
 
         except Exception as e:
             logger.error(f"Error in api_search: {e}", exc_info=True)
@@ -844,40 +849,45 @@ def setup_api_routes(app, session_manager: WebSessionManager):
 
         try:
             # Import get_similar function
-            from ....kb.search import get_similar
+            # Synchronous search, off the event loop: inline, a slow (cold) search froze
+            # every other request of the web UI, /status included, until it finished.
+            def _query():
+                from ....kb.search import get_similar
 
-            # Perform similarity search
-            result = get_similar(
-                chunk_id=chunk_id,
-                document_id=document_id,
-                embedding_name=embedding_name,
-                max_results=max_results,
-                source_id=source_id,
-                doc_type=doc_type,
-                chunking_strategy=chunking_strategy,
-                filter=filter_dict,
-                **metadata_filters
-            )
+                # Perform similarity search
+                result = get_similar(
+                    chunk_id=chunk_id,
+                    document_id=document_id,
+                    embedding_name=embedding_name,
+                    max_results=max_results,
+                    source_id=source_id,
+                    doc_type=doc_type,
+                    chunking_strategy=chunking_strategy,
+                    filter=filter_dict,
+                    **metadata_filters
+                )
             
-            # Convert results to document dictionaries
-            documents_data = []
-            for doc_result in result.get('results', []):
-                doc = doc_result.get('document')
-                if doc:
-                    doc_dict = document_to_dict(doc, include_text=False)
-                    # Add search-specific information
-                    doc_dict['chunks'] = doc_result.get('chunks', [])
-                    doc_dict['best_similarity'] = doc_result['chunks'][0]['similarity'] if doc_result.get('chunks') else None
-                    documents_data.append(doc_dict)
+                # Convert results to document dictionaries
+                documents_data = []
+                for doc_result in result.get('results', []):
+                    doc = doc_result.get('document')
+                    if doc:
+                        doc_dict = document_to_dict(doc, include_text=False)
+                        # Add search-specific information
+                        doc_dict['chunks'] = doc_result.get('chunks', [])
+                        doc_dict['best_similarity'] = doc_result['chunks'][0]['similarity'] if doc_result.get('chunks') else None
+                        documents_data.append(doc_dict)
             
-            return JSONResponse({
-                "documents": documents_data,
-                "total_results": result.get('metadata', {}).get('total_results', 0),
-                "embedding_name": result.get('metadata', {}).get('embedding_name'),
-                "timing": {
-                    "total": result.get('metadata', {}).get('time_search_total'),
-                }
-            })
+                return JSONResponse({
+                    "documents": documents_data,
+                    "total_results": result.get('metadata', {}).get('total_results', 0),
+                    "embedding_name": result.get('metadata', {}).get('embedding_name'),
+                    "timing": {
+                        "total": result.get('metadata', {}).get('time_search_total'),
+                    }
+                })
+
+            return await run_in_threadpool(_query)
 
         except Exception as e:
             logger.error(f"Error in api_similar: {e}", exc_info=True)
