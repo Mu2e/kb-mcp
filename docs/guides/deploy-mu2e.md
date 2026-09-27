@@ -261,12 +261,22 @@ stat -c '%A %U %n' "$D" "$D/api_keys.json"
 
 ### 5. Prune
 
-Prune last, keeping the release you would roll back to:
+Prune last, keeping the release you would roll back to. Never remove the
+release `current` points at, nor the one the unit files link into (the
+installer renders them into a release's `share/kb-mcp/`):
 
 ```bash
-ls -l /exp/mu2e/app/users/mu2eai/mcp/kb/current
-rm -rf /exp/mu2e/app/users/mu2eai/mcp/kb/releases/<old-ref>
+ROOT=/exp/mu2e/app/users/mu2eai/mcp/kb
+readlink $ROOT/current
+readlink ~/.config/systemd/user/kb-mcp.service ~/.config/systemd/user/kb-web.service
+ls $ROOT/releases
+rm -rf $ROOT/releases/<old-ref>
 ```
+
+A release is 1.1–1.6 GB and the app area's quota is tight, so keep two: the
+current one and one to roll back to. The import job's deploy root
+(`/exp/mu2e/app/users/<you>/mcp/kb`) needs the same pruning; it has no unit
+files, only `current`.
 
 Rolling back to a release still on disk *is* repointing `current` and
 restarting — no re-render:
