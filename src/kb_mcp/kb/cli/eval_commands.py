@@ -13,6 +13,7 @@ from ..eval import (
     get_summary_stats,
 )
 from ..eval.db_models import get_eval_generation, get_eval_questions, get_eval_run
+from ...config import get_eval_config
 
 
 def cmd_eval_generate(args):
@@ -174,7 +175,8 @@ def cmd_eval_run(args):
         if args.use_judge:
             judge_strategy = {
                 "enabled": True,
-                "model": args.judge_model,
+                # Resolved here so the run records which model judged it.
+                "model": args.judge_model or get_eval_config()["judge_model"],
             }
 
         # Determine rerank setting
@@ -379,7 +381,7 @@ def setup_commands(subparsers):
     eval_audit_parser.add_argument("--generation-id", help="Filter to specific generation")
     eval_audit_parser.add_argument("--limit", type=int, default=20, help="Max questions to audit")
     eval_audit_parser.add_argument("--llm", action="store_true", help="Use LLM for automated auditing instead of interactive")
-    eval_audit_parser.add_argument("--model", help="LLM model to use for auditing (if --llm)")
+    eval_audit_parser.add_argument("--model", help="LLM model to use for auditing (if --llm; default: EVAL_AUDIT_MODEL, else EVAL_JUDGE_MODEL)")
     eval_audit_parser.add_argument("--workers", type=int, default=1, metavar="N", help="Number of parallel LLM audit calls (default: 1, only applies with --llm)")
     eval_audit_parser.set_defaults(func=cmd_eval_audit)
 
@@ -398,7 +400,7 @@ def setup_commands(subparsers):
     eval_run_parser.add_argument("--search-parser-name", help="Filter search to specific parser (e.g., 'marker', 'docling')")
     eval_run_parser.add_argument("--use-judge", action="store_true", help="Run LLM judge on results")
     eval_run_parser.add_argument("--judge-model", help="LLM model for judge (if --use-judge)")
-    eval_run_parser.add_argument("--answer-model", help="LLM model for answer generation in rag/agentic/llm_only modes (default: EVAL_GEN_MODEL)")
+    eval_run_parser.add_argument("--answer-model", help="LLM model for answer generation in rag/agentic/llm_only modes (default: EVAL_ANSWER_MODEL, else DEFAULT_LLM_MODEL)")
     eval_run_parser.add_argument("--workers", type=int, default=1, metavar="N", help="Number of parallel question evaluations (default: 1)")
     eval_run_parser.add_argument("--rerank", action="store_true", help="Enable cross-encoder reranking")
     eval_run_parser.add_argument("--no-rerank", action="store_true", help="Disable cross-encoder reranking")

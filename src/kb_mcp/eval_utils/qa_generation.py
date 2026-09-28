@@ -6,7 +6,7 @@ import json
 import logging
 from typing import Dict, List, Optional
 
-from ..llm import get_openai_client
+from ..llm import STAGE_EVAL_GENERATION, get_openai_client, parse_json_reply, record_llm_usage
 from ..config import get_eval_config
 
 logger = logging.getLogger(__name__)
@@ -115,8 +115,10 @@ Return ONLY a valid JSON object:
             response_format={"type": "json_object"}
         )
 
+        record_llm_usage(response.usage, stage=STAGE_EVAL_GENERATION, model=model,
+                         meta={"strategy": "agentic"})
         content = response.choices[0].message.content.strip()
-        result = json.loads(content)
+        result = parse_json_reply(content)
         qa_pairs = result.get("qa_pairs", [])
 
         valid_pairs = []
@@ -224,8 +226,10 @@ Return ONLY a valid JSON object with a "qa_pairs" array:
             response_format={"type": "json_object"}
         )
 
+        record_llm_usage(response.usage, stage=STAGE_EVAL_GENERATION, model=model,
+                         meta={"strategy": "keypoint"})
         content = response.choices[0].message.content.strip()
-        result = json.loads(content)
+        result = parse_json_reply(content)
         qa_pairs = result.get("qa_pairs", [])
 
         # Validate structure
@@ -361,8 +365,10 @@ Return ONLY a valid JSON object with persona-based Q&A pairs:
             response_format={"type": "json_object"}
         )
 
+        record_llm_usage(response.usage, stage=STAGE_EVAL_GENERATION, model=model,
+                         meta={"strategy": "persona"})
         content = response.choices[0].message.content.strip()
-        result = json.loads(content)
+        result = parse_json_reply(content)
         qa_pairs = result.get("persona_qa_pairs", [])
 
         # Validate structure

@@ -68,8 +68,10 @@ def create_eval_run(
             embedding_name = get_embedding_name(session=session)
 
         run_meta = meta or {}
-        if answer_model:
-            run_meta = {**run_meta, "answer_model": answer_model}
+        # Record the answering model even when it came from the default, so a
+        # run can always be attributed to the model that produced its answers.
+        if search_type in ("rag", "agentic", "llm_only"):
+            run_meta = {**run_meta, "answer_model": answer_model or get_eval_config()["answer_model"]}
 
         run = EvalRun(
             name=name,
@@ -97,11 +99,11 @@ def _llm_only_answer(question: str, model: Optional[str] = None):
 
     Returns (answer_text, time_seconds).
     """
-    from ...llm import get_openai_client
+    from ...llm import STAGE_EVAL_ANSWER, get_openai_client, record_llm_usage
     from ...config import get_eval_config
 
     if model is None:
-        model = get_eval_config().get("judge_model")
+        model = get_eval_config()["answer_model"]
 
     client = get_openai_client(model)
     start = time.time()
@@ -114,6 +116,7 @@ def _llm_only_answer(question: str, model: Optional[str] = None):
         max_tokens=16384,
     )
     elapsed = time.time() - start
+    record_llm_usage(response.usage, stage=STAGE_EVAL_ANSWER, model=model, meta={"mode": "llm_only"})
     return response.choices[0].message.content.strip(), elapsed
 
 
@@ -122,12 +125,12 @@ def _rag_answer(question: str, context: str, model: Optional[str] = None):
 
     Returns (answer_text, time_seconds).
     """
-    from ...llm import get_openai_client
+    from ...llm import STAGE_EVAL_ANSWER, get_openai_client, record_llm_usage
     from ...config import get_eval_config
     import json as _json
 
     if model is None:
-        model = get_eval_config().get("judge_model")
+        model = get_eval_config()["answer_model"]
 
     client = get_openai_client(model)
     prompt = (
@@ -147,6 +150,7 @@ def _rag_answer(question: str, context: str, model: Optional[str] = None):
         max_tokens=16384,
     )
     elapsed = time.time() - start
+    record_llm_usage(response.usage, stage=STAGE_EVAL_ANSWER, model=model, meta={"mode": "rag"})
     answer = response.choices[0].message.content.strip()
     return answer, elapsed
 
@@ -166,14 +170,14 @@ def _agentic_answer(
 
     Returns (final_answer, time_seconds, trace).
     """
-    from ...llm import get_openai_client
+    from ...llm import STAGE_EVAL_ANSWER, get_openai_client, record_llm_usage
     from ...config import get_eval_config
     from ..search.search import search as kb_search_fn
     from ..documents import get as kb_get_fn
     import json as _json
 
     if model is None:
-        model = get_eval_config().get("judge_model")
+        model = get_eval_config()["answer_model"]
 
     client = get_openai_client(model)
 
@@ -243,6 +247,7 @@ def _agentic_answer(
             tool_choice="auto",
             max_tokens=16384,
         )
+        record_llm_usage(response.usage, stage=STAGE_EVAL_ANSWER, model=model, meta={"mode": "agentic"})
         msg = response.choices[0].message
         messages.append(msg)
 
@@ -293,6 +298,7 @@ def _agentic_answer(
             tool_choice="none",
             max_tokens=16384,
         )
+        record_llm_usage(response.usage, stage=STAGE_EVAL_ANSWER, model=model, meta={"mode": "agentic"})
         msg = response.choices[0].message
         messages.append(msg)
 
@@ -434,7 +440,7 @@ def evaluate_single_question(
         }
 
         judge_model = (run.judge_strategy or {}).get("model") if run.judge_strategy else None
-        answer_model = (run.meta or {}).get("answer_model") or get_eval_config().get("gen_model")
+        answer_model = (run.meta or {}).get("answer_model") or get_eval_config()["answer_model"]
 
         def _build_context(results, max_chars=720000):
             """Concatenate top retrieved doc texts into a single context string."""

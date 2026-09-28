@@ -501,10 +501,18 @@ def get_eval_config() -> dict:
 
             * `gen_model` (str): Question generation model (Env: `EVAL_GEN_MODEL`, defaults to DEFAULT_LLM_MODEL).
             * `judge_model` (str): Answer judging model (Env: `EVAL_JUDGE_MODEL`, defaults to DEFAULT_LLM_MODEL).
+            * `audit_model` (str): Question audit model (Env: `EVAL_AUDIT_MODEL`, defaults to the judge
+              model, so the generator does not vet its own questions).
+            * `answer_model` (str): Answering model for rag/agentic/llm_only runs (Env: `EVAL_ANSWER_MODEL`,
+              defaults to DEFAULT_LLM_MODEL -- the model the knowledge base is actually used with, and not
+              the judge, which would otherwise grade its own answers).
     """
+    judge_model = _get_str("EVAL_JUDGE_MODEL", get_default_llm_model())
     return {
         'gen_model': _get_str("EVAL_GEN_MODEL", get_default_llm_model()),
-        'judge_model': _get_str("EVAL_JUDGE_MODEL", get_default_llm_model()),
+        'judge_model': judge_model,
+        'audit_model': _get_str("EVAL_AUDIT_MODEL", judge_model),
+        'answer_model': _get_str("EVAL_ANSWER_MODEL", get_default_llm_model()),
     }
 
 def get_import_log_dirs() -> list:

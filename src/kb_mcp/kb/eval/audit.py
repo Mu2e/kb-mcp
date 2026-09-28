@@ -7,7 +7,7 @@ from typing import List, Optional
 from .db_models import EvalDataset, EvalAudit
 from ..documents import get
 from ..database import get_db_session
-from ...llm import get_openai_client
+from ...llm import STAGE_EVAL_AUDIT, get_openai_client, parse_json_reply, record_llm_usage
 from ...config import get_eval_config
 from ..database import get_db_session
 
@@ -91,7 +91,7 @@ def audit_question(
 
     Args:
         question_id: ID of the question to audit
-        model: Optional model name (defaults to EVAL_GEN_MODEL env var)
+        model: Optional model name (defaults to EVAL_AUDIT_MODEL env var)
         auditor_name: Name to record for this audit
         session: Database session
 
@@ -122,7 +122,7 @@ def audit_question(
         # Get model
         if model is None:
             eval_config = get_eval_config()
-            model = eval_config['gen_model']
+            model = eval_config['audit_model']
 
         client = get_openai_client(model)
 
@@ -189,19 +189,16 @@ Respond with ONLY a valid JSON object:
             ],
             response_format={"type": "json_object"}
         )
+        record_llm_usage(response.usage, stage=STAGE_EVAL_AUDIT, model=model,
+                         meta={"question_id": question_id})
 
         # Parse response
         content = response.choices[0].message.content.strip()
         try:
-            result = json.loads(content)
-        except json.JSONDecodeError:
-            # Strip markdown code fences if present and retry
-            cleaned = content.strip("`").removeprefix("json").strip()
-            try:
-                result = json.loads(cleaned)
-            except json.JSONDecodeError as e:
-                logger.error(f"Failed to parse audit JSON for question {question_id}: {e}\nContent: {content}")
-                result = {"is_valid": False, "comments": f"Audit failed: malformed LLM response"}
+            result = parse_json_reply(content)
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse audit JSON for question {question_id}: {e}\nContent: {content}")
+            result = {"is_valid": False, "comments": f"Audit failed: malformed LLM response"}
 
         is_valid = result.get("is_valid", False)
         comments = result.get("comments", "")

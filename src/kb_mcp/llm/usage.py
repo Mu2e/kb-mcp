@@ -35,6 +35,13 @@ STAGE_GRAPH_EXTRACTION = "graph_extraction"
 STAGE_GRAPH_MATCHING = "graph_matching"
 STAGE_PRIVACY_FILTER = "privacy_filter"
 STAGE_EMBEDDING = "embedding"
+# Evaluation: question generation, question audit, answering (rag/agentic/
+# llm_only runs) and judging are separate stages so the cost of building an
+# eval set can be told apart from the cost of scoring retrieval against it.
+STAGE_EVAL_GENERATION = "eval_generation"
+STAGE_EVAL_AUDIT = "eval_audit"
+STAGE_EVAL_ANSWER = "eval_answer"
+STAGE_EVAL_JUDGE = "eval_judge"
 
 USAGE_FIELDS = (
     "prompt_tokens",

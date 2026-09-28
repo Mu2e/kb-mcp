@@ -9,7 +9,7 @@ import logging
 import time
 from typing import Dict, Optional
 
-from ..llm import get_openai_client
+from ..llm import STAGE_EVAL_JUDGE, get_openai_client, parse_json_reply, record_llm_usage
 from ..config import get_eval_config
 
 logger = logging.getLogger(__name__)
@@ -123,9 +123,10 @@ def llm_judge_answer(
             response_format={"type": "json_object"}
         )
         judge_time = time.time() - start_time
+        record_llm_usage(response.usage, stage=STAGE_EVAL_JUDGE, model=model)
 
         content = response.choices[0].message.content.strip()
-        result = json.loads(content)
+        result = parse_json_reply(content)
 
         is_hit = result.get("is_hit", False)
         justification = result.get("justification", "")

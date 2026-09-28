@@ -311,7 +311,7 @@ def cmd_logs_tokens(args):
         print(f"No token usage recorded{scope}.")
         print(
             "Usage is recorded per LLM call during parsing, summarization, "
-            "graph extraction, and embedding."
+            "graph extraction, embedding, and evaluation (eval_* stages)."
         )
         return
 
