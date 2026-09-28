@@ -434,7 +434,7 @@ def _print_compare_table(rows, strip_prefix=None):
     def opt(v, fmt="{}"):
         return fmt.format(v) if v is not None else "-"
 
-    header = f"{'Run':<58}{'Q':>4}{'Exact':>7}{'Entry':>7}{'Judge':>7}{'Saw':>6}{'Open':>6}{'Limit':>6}{'Stop':>5}{'Ans s':>7}{'Ans tok':>10}{'Jdg tok':>9}"
+    header = f"{'Run':<58}{'Q':>5}{'Exact':>9}{'Entry':>9}{'Judge':>9}{'Saw':>6}{'Open':>6}{'Limit':>6}{'Stop':>5}{'Ans s':>7}{'Ans tok':>13}{'Jdg tok':>11}"
     print(header)
     print("-" * len(header))
     for r in rows:
@@ -443,13 +443,13 @@ def _print_compare_table(rows, strip_prefix=None):
             name = name[len(strip_prefix):].lstrip("-") or name
         n = r["questions"]
         print(
-            f"{name[:57]:<58}{n:>4}"
-            f"{frac(r['exact_hits'], n):>7}{frac(r['entry_hits'], n) if r['entry_hits'] is not None else '-':>7}"
-            f"{frac(r['judge_correct'], r['judged']):>7}"
+            f"{name[:57]:<58}{n:>5}"
+            f"{frac(r['exact_hits'], n):>9}{frac(r['entry_hits'], n) if r['entry_hits'] is not None else '-':>9}"
+            f"{frac(r['judge_correct'], r['judged']):>9}"
             f"{opt(r['agent_saw_source']):>6}{opt(r['agent_opened_source']):>6}"
             f"{opt(r['turn_limit']):>6}{opt(r['stopped']):>5}"
             f"{opt(r['avg_answer_seconds'], '{:.0f}'):>7}"
-            f"{opt(r['answer_tokens'], '{:,}'):>10}{opt(r['judge_tokens'], '{:,}'):>9}"
+            f"{opt(r['answer_tokens'], '{:,}'):>13}{opt(r['judge_tokens'], '{:,}'):>11}"
         )
     print()
     print("Exact: source row in the retrieved list; Entry: any file/figure of the source's DocDB entry;")
