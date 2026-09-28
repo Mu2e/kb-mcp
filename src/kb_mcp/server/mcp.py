@@ -348,7 +348,7 @@ def kb_search(
         JSON. Each result carries source_id, doc_id, title and a `text` field
         holding a [[DOCUMENT_METADATA]] header (ID, TITLE, URI, TYPE, STATUS)
         followed by the content. Pass the header's ID to kb_get for the full
-        document whenever STATUS shows EXCERPTS, SUMMARY or PREVIEW.
+        document (paged, if long) whenever STATUS shows EXCERPTS, SUMMARY or PREVIEW.
         No matches returns {"message": "No results found", "results": []} - a valid
         empty answer, not an error to retry. A malformed or unsupported
         search_filter returns {"error": "Invalid search_filter: ..."} naming the
@@ -459,11 +459,22 @@ def kb_search(
         return json.dumps({"error": str(e)}, indent=2)
 
 
-def kb_get(identifier: str) -> str:
-    """Get the complete text of one Mu2e knowledge base document.
+# Upper bound on one kb_get page, whatever the client asks for: roughly 100k
+# tokens, which fits every model we serve with room to spare. Without it a
+# client could still request a 300M-character spreadsheet in one call.
+KB_GET_MAX_CHARS_LIMIT = 400_000
+
+
+def kb_get(identifier: str, offset: int = 0, max_chars: int | None = None) -> str:
+    """Get the text of one Mu2e knowledge base document, a page at a time.
 
     Use this after kb_search whenever STATUS shows EXCERPTS_WITH_MATCHES,
     SUMMARY_ONLY or PREVIEW_ONLY - those results contain only part of the document.
+
+    Most documents fit in one call. A long one is returned in pages: the page
+    ends with a [[DOCUMENT_CONTINUES: ...]] line giving the offset of the next
+    page instead of [[DOCUMENT_END]]. Read further only if the part you have
+    does not answer the question - some documents run to millions of characters.
 
     Args:
         identifier: Pass the value on the `ID:` line of a kb_search result's
@@ -473,17 +484,32 @@ def kb_get(identifier: str) -> str:
                    - "source_id_doc_id" (underscore form; kb_search emits this when
                      the document has no UUID)
                    - "doc_id" alone
+        offset: Character position to start from (default 0, the beginning).
+                Take it from a [[DOCUMENT_CONTINUES]] line.
+        max_chars: Characters to return. Omit for the server default (100000);
+                values above 400000 are reduced to 400000.
 
     Returns:
-        A metadata header, a [[DETECTED_CONCEPTS]] block listing knowledge-graph
-        nodes mentioned in the document (each with a kb_lookup_node CMD to follow),
-        then the full text between [[CONTENT_START]] and [[DOCUMENT_END]].
-        A string starting with "ERROR:" means the document was not found - that is
-        final, do not retry the same identifier.
+        A metadata header (with the document's Length and, for a partial page,
+        the Showing range), on the first page a [[DETECTED_CONCEPTS]] block
+        listing knowledge-graph nodes mentioned in the document (each with a
+        kb_lookup_node CMD to follow), then the text after [[CONTENT_START]],
+        closed by [[DOCUMENT_END]] or, if more follows, [[DOCUMENT_CONTINUES]].
+        "ERROR: Document not found" is final, do not retry the same identifier.
+        Other "ERROR:" strings name an invalid offset or max_chars to fix.
     """
     from ..kb import get
+    from ..config import get_server_config
 
     try:
+        if offset < 0:
+            return "ERROR: offset must be 0 or greater"
+        if max_chars is None:
+            max_chars = get_server_config()['kb_get_max_chars']
+        if max_chars <= 0:
+            return "ERROR: max_chars must be greater than 0"
+        max_chars = min(max_chars, KB_GET_MAX_CHARS_LIMIT)
+
         result = get(identifier=identifier)
 
         if result is None:
@@ -501,13 +527,25 @@ def kb_get(identifier: str) -> str:
         else:
             doc = result
 
+        text = doc.text or ""
+        total = len(text)
+        if offset > 0 and offset >= total:
+            return (
+                f"ERROR: offset {offset} is past the end of the document "
+                f"({total} characters); there is nothing more to read"
+            )
+        end = min(offset + max_chars, total)
+
         # Format metadata as a clean block
         meta_lines = [
             f"Title: {doc.title or doc.title_gen or 'Untitled'}",
             f"ID: {doc.doc_id}",
             f"Source: {doc.source_id}",
             f"Type: {doc.doc_type}",
+            f"Length: {total} characters",
         ]
+        if offset > 0 or end < total:
+            meta_lines.append(f"Showing: characters {offset}-{end} of {total}")
 
         if doc.uri:
             meta_lines.append(f"URI: {doc.uri}")
@@ -525,11 +563,10 @@ def kb_get(identifier: str) -> str:
 
         meta_header = "\n".join(meta_lines)
 
-        # Fetch Associated Nodes from Knowledge Graph (unless disabled via HIDE_GRAPH)
-        from ..config import get_server_config
-
+        # Fetch Associated Nodes from Knowledge Graph (unless disabled via HIDE_GRAPH).
+        # First page only: later pages continue the same document.
         graph_section = ""
-        if not get_server_config()['hide_graph']:
+        if offset == 0 and not get_server_config()['hide_graph']:
             graph_nodes = get_nodes_for_document(doc.doc_id)
 
             if graph_nodes:
@@ -543,12 +580,20 @@ def kb_get(identifier: str) -> str:
 
                 graph_section = "\n[[DETECTED_CONCEPTS]]\n" + "\n".join(node_lines) + "\n"
 
+        if end < total:
+            closing = (
+                f"[[DOCUMENT_CONTINUES: showing characters {offset}-{end} of {total}. "
+                f"Call kb_get(identifier=\"{identifier}\", offset={end}) for the next part.]]"
+            )
+        else:
+            closing = "[[DOCUMENT_END]]"
+
         # Return the natural text with metadata header
         return f"""[[DOCUMENT_METADATA]]
 {meta_header}
 {graph_section}[[CONTENT_START]]
-{doc.text or "No content available"}
-[[DOCUMENT_END]]"""
+{text[offset:end] or "No content available"}
+{closing}"""
 
     except Exception as e:
         logger.error(f"Error in kb_get: {e}", exc_info=True)

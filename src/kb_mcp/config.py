@@ -154,6 +154,8 @@ def get_server_config() -> dict:
             * `use_firestore` (bool): Use Firestore for session storage (Env: `SESSION_STORE_FIRESTORE`, default: False).
             * `site_name` (str): Display name for the web UI (Env: `SITE_NAME`, default: 'Knowledge Base').
             * `hide_graph` (bool): Hide the knowledge graph from the web UI and MCP tools (Env: `HIDE_GRAPH`, default: False).
+            * `kb_get_max_chars` (int): Default page size, in characters, of one kb_get call (Env: `MCP_KB_GET_MAX_CHARS`,
+              default: 100000). A client can ask for less or more per call, up to `KB_GET_MAX_CHARS_LIMIT`.
             * `mcp_host` (str): Bind address for the MCP server (Env: `MCP_HOST`, falls back to `SERVER_HOST`, default: '127.0.0.1').
             * `web_host` (str): Bind address for the web UI server (Env: `WEB_HOST`, default: '127.0.0.1', i.e. loopback only).
             * `web_port` (int): Port for the web UI server (Env: `WEB_PORT`, default: `PORT` + 1).
@@ -171,6 +173,9 @@ def get_server_config() -> dict:
         'use_firestore': _get_bool("SESSION_STORE_FIRESTORE", False),
         'site_name': _get_str("SITE_NAME", "Knowledge Base"),
         'hide_graph': _get_bool("HIDE_GRAPH", False),
+        # A handful of documents run to hundreds of millions of characters
+        # (spreadsheets), so kb_get pages rather than returning the whole text.
+        'kb_get_max_chars': _get_int("MCP_KB_GET_MAX_CHARS", 100000),
         # The MCP endpoint and the web UI are served by two separate uvicorn
         # servers so they can have different exposure: MCP is reachable from
         # the network and gated on an API key, while the web UI binds to
