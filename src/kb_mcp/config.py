@@ -506,6 +506,11 @@ def get_eval_config() -> dict:
             * `answer_model` (str): Answering model for rag/agentic/llm_only runs (Env: `EVAL_ANSWER_MODEL`,
               defaults to DEFAULT_LLM_MODEL -- the model the knowledge base is actually used with, and not
               the judge, which would otherwise grade its own answers).
+            * `agentic_max_turns` (int): Tool rounds an agentic run allows before the agent must answer
+              (Env: `EVAL_AGENTIC_MAX_TURNS`, default: 10).
+            * `agentic_tool_result_max_chars` (int): Characters of one tool result an agentic run passes to
+              the model; longer results are cut and labelled (Env: `EVAL_AGENTIC_TOOL_RESULT_MAX_CHARS`,
+              default: 100000).
     """
     judge_model = _get_str("EVAL_JUDGE_MODEL", get_default_llm_model())
     return {
@@ -513,6 +518,8 @@ def get_eval_config() -> dict:
         'judge_model': judge_model,
         'audit_model': _get_str("EVAL_AUDIT_MODEL", judge_model),
         'answer_model': _get_str("EVAL_ANSWER_MODEL", get_default_llm_model()),
+        'agentic_max_turns': _get_int("EVAL_AGENTIC_MAX_TURNS", 10),
+        'agentic_tool_result_max_chars': _get_int("EVAL_AGENTIC_TOOL_RESULT_MAX_CHARS", 100_000),
     }
 
 def get_import_log_dirs() -> list:

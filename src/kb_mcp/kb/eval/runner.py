@@ -161,14 +161,11 @@ def _rag_answer(question: str, context: str, model: Optional[str] = None):
 #: image can't be returned as a chat-completions tool result.
 AGENTIC_TOOLS = ("kb_search", "kb_get")
 
-#: Default cap on tool rounds before the agent is made to answer.
-AGENTIC_MAX_TURNS = 10
-
-#: Default cap on the characters of one tool result passed back to the model.
-#: kb_get returns whole documents, and a few are far beyond any context window
-#: (the largest is ~300M chars), so the eval client truncates -- and says so --
-#: until the server pages kb_get itself.
-AGENTIC_TOOL_RESULT_MAX_CHARS = 100_000
+# Loop limits come from get_eval_config() (EVAL_AGENTIC_MAX_TURNS and
+# EVAL_AGENTIC_TOOL_RESULT_MAX_CHARS). The tool-result cap exists because
+# kb_get returns whole documents, and a few are far beyond any context window
+# (the largest is ~300M chars), so the eval client truncates -- and says so --
+# until the server pages kb_get itself.
 
 _agentic_server = None
 
@@ -198,8 +195,8 @@ def _agentic_answer(
     question: str,
     model: Optional[str] = None,
     source_document_id: Optional[str] = None,
-    max_turns: int = AGENTIC_MAX_TURNS,
-    tool_result_max_chars: int = AGENTIC_TOOL_RESULT_MAX_CHARS,
+    max_turns: Optional[int] = None,
+    tool_result_max_chars: Optional[int] = None,
 ):
     """Answer a question the way an MCP client would, with the real kb-mcp tools.
 
@@ -216,8 +213,10 @@ def _agentic_answer(
 
     from ...llm import STAGE_EVAL_ANSWER, get_openai_client, record_llm_usage
 
-    if model is None:
-        model = get_eval_config()["answer_model"]
+    eval_config = get_eval_config()
+    model = model or eval_config["answer_model"]
+    max_turns = max_turns or eval_config["agentic_max_turns"]
+    tool_result_max_chars = tool_result_max_chars or eval_config["agentic_tool_result_max_chars"]
 
     client = get_openai_client(model)
     server = _get_agentic_server()

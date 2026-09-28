@@ -119,3 +119,16 @@ def test_context_overflow_is_recorded_not_raised(run_agent):
     assert "maximum context length" in trace[-1]["stopped_by"]
     assert trace[-1]["hit_turn_limit"] is False
     assert len(client.requests) == 2  # no forced final call after a rejection
+
+
+def test_limits_come_from_env_unless_given(run_agent, monkeypatch):
+    monkeypatch.setenv("EVAL_AGENTIC_TOOL_RESULT_MAX_CHARS", "50")
+    monkeypatch.setenv("EVAL_AGENTIC_MAX_TURNS", "1")
+    _, trace, client = run_agent([_tool_call_reply(), _text_reply("forced")], {"kb_search": "x" * 80})
+    assert trace[0]["truncated"] is True
+    assert trace[-1]["hit_turn_limit"] is True  # one round, then the forced answer
+    # An explicit argument (the CLI flag, via the run's meta) beats the env.
+    _, trace, _ = run_agent([_tool_call_reply(), _text_reply("done")], {"kb_search": "x" * 80},
+                            tool_result_max_chars=1000, max_turns=5)
+    assert trace[0]["truncated"] is False
+    assert trace[-1]["hit_turn_limit"] is False
