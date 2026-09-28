@@ -137,7 +137,7 @@ def generate_questions_from_documents(
                 # Calculate per-question time (approximate)
                 question_time = elapsed_time / len(qa_pairs) if qa_pairs else 0.0
 
-                question_meta = {"index": i}
+                question_meta = {"index": i, "model": result.get("model")}
                 if generation_method == "persona":
                     question_meta["persona"] = pair.get("persona")
                 elif generation_method == "agentic":
@@ -182,6 +182,7 @@ def generate_questions_from_documents(
                 source_type="text",
                 prompt=generation_metadata.get("prompt"),
                 meta=meta_without_method,
+                name=name,
                 session=session,
             )
 

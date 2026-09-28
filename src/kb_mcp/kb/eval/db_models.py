@@ -505,16 +505,20 @@ def compute_generation_hash(
     source_type: str,
     prompt: Optional[str],
     meta: Optional[Dict],
+    name: Optional[str] = None,
 ) -> str:
     """Compute deterministic SHA256 hash of generation identifying fields.
     
-    Note: Only includes meta.personas (if present), not the full meta dict.
-    Prompt is excluded from hash as it may vary without changing generation identity.
+    Note: Only includes meta.personas and meta.model (if present), not the full
+    meta dict. Prompt is excluded from hash as it may vary without changing
+    generation identity. The model is included because questions from two
+    generators are two question sets to compare, not one; the name, when
+    given, because naming a generation asks for that generation.
     """
-    # Extract only personas from meta for hashing
     meta_for_hash = {}
-    if meta and "personas" in meta:
-        meta_for_hash["personas"] = meta["personas"]
+    for key in ("personas", "model"):
+        if meta and meta.get(key) is not None:
+            meta_for_hash[key] = meta[key]
     
     hash_data = {
         "generation_type": generation_type,
@@ -523,6 +527,8 @@ def compute_generation_hash(
         "source_type": source_type,
         "meta": meta_for_hash,
     }
+    if name:
+        hash_data["name"] = name
     hash_string = json.dumps(hash_data, sort_keys=True, separators=(',', ':'))
     return hashlib.sha256(hash_string.encode('utf-8')).hexdigest()
 
@@ -534,6 +540,7 @@ def get_or_create_eval_generation(
     source_type: str = "text",
     prompt: Optional[str] = None,
     meta: Optional[Dict] = None,
+    name: Optional[str] = None,
     session: Optional[Session] = None,
 ) -> EvalGeneration:
     """Get existing or create new EvalGeneration using database-intrinsic content hash."""
@@ -542,7 +549,7 @@ def get_or_create_eval_generation(
     with get_db_session(session) as session:
         # Compute content hash from all identifying fields
         content_hash = compute_generation_hash(
-            generation_type, generation_method, source_id, source_type, prompt, meta or {}
+            generation_type, generation_method, source_id, source_type, prompt, meta or {}, name
         )
 
         # Query by hash (uses unique index)
@@ -556,6 +563,7 @@ def get_or_create_eval_generation(
 
         # Create new
         generation = EvalGeneration(
+            name=name,
             generation_type=generation_type,
             generation_method=generation_method,
             source_id=source_id,

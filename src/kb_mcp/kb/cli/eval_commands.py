@@ -19,12 +19,31 @@ from ...config import get_eval_config
 def cmd_eval_generate(args):
     """Generate evaluation questions from documents."""
     try:
-        if args.source_id:
+        num_questions = getattr(args, 'num_questions', 1) or 1
+        document_ids = list(args.doc_id or [])
+        if args.same_documents_as:
+            # Reuse another generation's documents, so two generators (or
+            # strategies) are compared on exactly the same material.
+            with get_db_session() as session:
+                questions = get_eval_questions(generation_id=args.same_documents_as, session=session)
+                document_ids += [q.source_document_id for q in questions if q.source_document_id]
+            document_ids = list(dict.fromkeys(document_ids))  # dedupe, keep order
+            if not document_ids:
+                print(f"Error: generation {args.same_documents_as} has no questions with a source document")
+                sys.exit(1)
+
+        if document_ids:
+            result = generate_questions_from_documents(
+                document_ids=document_ids,
+                num_questions_per_doc=num_questions,
+                generation_method=args.strategy,
+                model=args.model,
+                name=args.name,
+            )
+        elif args.source_id:
             # Use generate_questions_from_source when source_id is provided
             # Convert 0 to None to process all documents
             num_docs = None if args.num_documents == 0 else args.num_documents
-            # Ensure we have a valid num_questions value (default should be 1 from argparse)
-            num_questions = getattr(args, 'num_questions', 1) or 1
             result = generate_questions_from_source(
                 source_id=args.source_id,
                 num_documents=num_docs,
@@ -34,9 +53,7 @@ def cmd_eval_generate(args):
                 name=args.name,
             )
         else:
-            # For document-specific generation, we'd need document_ids
-            # This is not currently supported via CLI
-            print("Error: --source-id is required for question generation")
+            print("Error: one of --source-id, --doc-id or --same-documents-as is required")
             print("  Example: kb eval generate --source-id inspire-hep")
             sys.exit(1)
 
@@ -384,7 +401,8 @@ def setup_commands(subparsers):
     eval_generate_parser.add_argument("--strategy", default="keypoint", choices=["keypoint", "persona", "agentic"], help="Question generation strategy")
     eval_generate_parser.add_argument("--model", help="LLM model to use for generation")
     eval_generate_parser.add_argument("--source-id", help="Filter to specific source")
-    eval_generate_parser.add_argument("--doc-id", help="Filter to specific document")
+    eval_generate_parser.add_argument("--doc-id", action="append", metavar="UUID", help="Generate from this document (documents.id); repeatable")
+    eval_generate_parser.add_argument("--same-documents-as", metavar="GENERATION_ID", help="Generate from the same documents as an earlier generation")
     eval_generate_parser.add_argument("--generation-id", help="Use existing generation ID (or create new if not exists)")
     eval_generate_parser.set_defaults(func=cmd_eval_generate)
 
