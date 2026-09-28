@@ -121,39 +121,72 @@ def _llm_only_answer(question: str, model: Optional[str] = None):
     return response.choices[0].message.content.strip(), elapsed
 
 
-def _rag_answer(question: str, context: str, model: Optional[str] = None):
-    """Generate an answer from retrieved context using an LLM (RAG mode).
+def _rag_answer(
+    question: str,
+    model: Optional[str] = None,
+    source_document_id: Optional[str] = None,
+    source_entry_key: Optional[str] = None,
+    tool_result_max_chars: Optional[int] = None,
+):
+    """Single-shot RAG: one real kb_search with the question, then one answer.
 
-    Returns (answer_text, time_seconds).
+    Uses the same in-process MCP server as the agentic mode, so the context is
+    exactly what a client's first search returns (hybrid search, the server's
+    result formatting); comparing the two isolates what further searching and
+    reading add.
+
+    Returns (answer_text, time_seconds, trace) with a trace shaped like the
+    agentic one: the search, then a summary with saw_source.
     """
-    from ...llm import STAGE_EVAL_ANSWER, get_openai_client, record_llm_usage
-    from ...config import get_eval_config
-    import json as _json
+    import asyncio
 
-    if model is None:
-        model = get_eval_config()["answer_model"]
+    import openai
+
+    from ...llm import STAGE_EVAL_ANSWER, get_openai_client, record_llm_usage
+
+    eval_config = get_eval_config()
+    model = model or eval_config["answer_model"]
+    tool_result_max_chars = tool_result_max_chars or eval_config["agentic_tool_result_max_chars"]
+    server = _get_agentic_server()
+
+    start = time.time()
+    result = asyncio.run(server.call_tool("kb_search", {"query": question}))
+    context = "\n".join(getattr(c, "text", "") for c in result.content)
+    full_len = len(context)
+    saw_source = mentions_source(context, source_document_id, source_entry_key)
+    if full_len > tool_result_max_chars:
+        context = (context[:tool_result_max_chars]
+                   + f"\n[[TRUNCATED BY CLIENT: showing {tool_result_max_chars:,} of {full_len:,} chars]]")
 
     client = get_openai_client(model)
-    prompt = (
-        f"Answer the following question using only the provided context. "
-        f"Be concise and precise.\n\n"
-        f"Question: {question}\n\n"
-        f"Context:\n{context}\n\n"
-        f"Answer:"
-    )
-    start = time.time()
-    response = client.chat.completions.create(
-        model=model,
-        messages=[
-            {"role": "system", "content": "You are a precise scientific assistant. Answer only from the provided context."},
-            {"role": "user", "content": prompt},
-        ],
-        max_tokens=16384,
-    )
+    stopped_by = None
+    answer = ""
+    try:
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": server.instructions or ""},
+                {"role": "user", "content": (
+                    "Answer the question using only the knowledge base search results below. "
+                    "Be concise and precise, and cite the documents you used.\n\n"
+                    f"Question: {question}\n\nSearch results (kb_search):\n{context}"
+                )},
+            ],
+            max_tokens=16384,
+        )
+        record_llm_usage(response.usage, stage=STAGE_EVAL_ANSWER, model=model, meta={"mode": "rag"})
+        answer = (response.choices[0].message.content or "").strip()
+    except openai.BadRequestError as e:
+        stopped_by = f"request rejected: {e}"[:500]
     elapsed = time.time() - start
-    record_llm_usage(response.usage, stage=STAGE_EVAL_ANSWER, model=model, meta={"mode": "rag"})
-    answer = response.choices[0].message.content.strip()
-    return answer, elapsed
+
+    trace = [
+        {"tool": "kb_search", "args": {"query": question}, "result_len": full_len,
+         "truncated": full_len > tool_result_max_chars, "is_error": bool(getattr(result, "is_error", False))},
+        {"summary": True, "tool_calls": 1, "hit_turn_limit": False, "stopped_by": stopped_by,
+         "saw_source": saw_source, "opened_source": False},
+    ]
+    return answer, elapsed, trace
 
 
 #: Tools the agentic eval exposes, in the order the MCP server registers them.
@@ -575,28 +608,29 @@ def evaluate_single_question(
                 judge_time_seconds = judge_result["time_seconds"]
 
         elif search_type == "rag":
-            # RAG: LLM generates an answer from retrieved context, then judge scores it
-            if search_results:
-                context = _build_context(search_results)
-                llm_answer, llm_answer_time = _rag_answer(
-                    question=question.question,
-                    context=context,
-                    model=answer_model,
-                )
-                result_meta["llm_answer"] = llm_answer
-                result_meta["llm_answer_time"] = llm_answer_time
+            # Single-shot RAG: one real kb_search, then one answer (see _rag_answer)
+            llm_answer, llm_answer_time, rag_trace = _rag_answer(
+                question=question.question,
+                model=answer_model,
+                source_document_id=question.source_document_id,
+                source_entry_key=source_key,
+                tool_result_max_chars=(run.meta or {}).get("tool_result_max_chars"),
+            )
+            result_meta["llm_answer"] = llm_answer
+            result_meta["llm_answer_time"] = llm_answer_time
+            result_meta["agentic_trace"] = rag_trace
 
-                if use_llm_judge and run.judge_strategy and run.judge_strategy.get("enabled"):
-                    judge_result = llm_judge_answer(
-                        question=question.question,
-                        retrieved_context=llm_answer,
-                        expected_answer=question.answer,
-                        model=judge_model,
-                        mode="answer",
-                    )
-                    is_judge_hit = judge_result["is_hit"]
-                    justification = judge_result["justification"]
-                    judge_time_seconds = judge_result["time_seconds"]
+            if use_llm_judge and run.judge_strategy and run.judge_strategy.get("enabled"):
+                judge_result = llm_judge_answer(
+                    question=question.question,
+                    retrieved_context=llm_answer,
+                    expected_answer=question.answer,
+                    model=judge_model,
+                    mode="answer",
+                )
+                is_judge_hit = judge_result["is_hit"]
+                justification = judge_result["justification"]
+                judge_time_seconds = judge_result["time_seconds"]
 
         elif search_type == "agentic":
             # Agentic: LLM answers through the real MCP tools (see _agentic_answer)

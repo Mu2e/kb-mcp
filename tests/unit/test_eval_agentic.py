@@ -159,3 +159,20 @@ def test_source_is_recognised_by_entry_in_tool_results():
     assert runner.mentions_source(kb_search, source_entry_key=key)
     assert not runner.mentions_source(elsewhere, source_entry_key=key)
     assert runner.mentions_source(f"ID: {SOURCE}", source_document_id=SOURCE)
+
+
+def test_single_shot_rag_searches_once_and_answers(monkeypatch):
+    monkeypatch.setattr("kb_mcp.llm.record_llm_usage", lambda *a, **k: None)
+    client = _FakeClient([_text_reply("37 aluminum foils")])
+    monkeypatch.setattr(runner, "_agentic_server", _FakeServer({"kb_search": f"results ID: {SOURCE} " + "x" * 500}))
+    monkeypatch.setattr("kb_mcp.llm.get_openai_client", lambda model=None: client)
+
+    answer, _, trace = runner._rag_answer("q?", model="m", source_document_id=SOURCE, tool_result_max_chars=100)
+
+    assert answer == "37 aluminum foils"
+    assert len(client.requests) == 1 and "tools" not in client.requests[0]
+    prompt = client.requests[0]["messages"][1]["content"]
+    assert "Question: q?" in prompt and "TRUNCATED BY CLIENT" in prompt
+    assert client.requests[0]["messages"][0]["content"] == "server instructions"
+    assert trace[0]["tool"] == "kb_search" and trace[0]["truncated"]
+    assert trace[-1]["saw_source"] is True and trace[-1]["tool_calls"] == 1
