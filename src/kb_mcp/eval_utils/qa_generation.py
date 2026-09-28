@@ -25,6 +25,8 @@ QUESTION_CRITERIA = """A good evaluation question must satisfy ALL of the follow
 
 4. **Well-formed**: Clear, grammatically correct, and specific enough to have a definite answer.
 
+5. **Not worded from the document**: The question uses the terms a Mu2e collaborator would use without having read this particular document. It does not copy the document's own phrasing of a result or method, and does not rely on labels only this document uses (internal test or campaign names, drawing or part numbers, sector, figure or table labels, the document's nicknames for things). Established terminology such as subsystem names ("Cosmic Ray Veto", "Stopping Target Monitor") is fine. A question that echoes its source's wording is easy to retrieve for the wrong reason.
+
 Examples of GOOD questions:
 - "What gas mixture is used in the Mu2e straw tracker?"
 - "What is the readout scheme for the BaBar electromagnetic calorimeter?"
@@ -33,7 +35,10 @@ Examples of GOOD questions:
 Examples of BAD questions (fail self-containedness):
 - "What is the maximum voltage of the forty feedthroughs in the dewar?" (assumes knowledge of which dewar)
 - "What range of insertion trials is shown in Table 3?" (pure document reference)
-- "What material is used for the component described in section 2.3?" (document-internal reference)"""
+- "What material is used for the component described in section 2.3?" (document-internal reference)
+
+Example of a BAD question (worded from the document):
+- "What position resolutions were obtained for the Mu2e CRV KPP middle and top sectors by comparing reconstructed hit positions with the bottom-sector reference position?" (copies the note's method description and internal labels; a collaborator would ask "What position resolution along the counter does the Mu2e Cosmic Ray Veto achieve?")"""
 
 
 def format_document_context(title: Optional[str] = None, source_id: Optional[str] = None) -> str:
@@ -238,6 +243,8 @@ For each pair:
 """ + QUESTION_CRITERIA.replace("{", "{{").replace("}", "}}") + """
 
 To make questions self-contained, name what they are about: the experiment (e.g. Mu2e), the subsystem, and the specific component, using the source and title below where the text itself doesn't say. Never write "the assembly", "the detector", "this document", "the analysis" or similar references that only make sense next to the document.
+
+Write each question the way a collaborator who has NOT read this document would ask it: in your own words, with commonly used Mu2e terms, without the document's phrasing, internal labels or identifiers. The keypoint may quote the document; the question should not.
 
 Prefer facts that matter beyond this one document (design parameters, materials, methods, performance, decisions) over administrative details (who attended, document numbers, formatting). If the document does not support {num_questions} questions meeting all criteria, return fewer — even none. A short list of good questions is better than a full list with weak ones.
 

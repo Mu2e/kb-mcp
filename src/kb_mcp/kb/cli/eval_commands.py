@@ -471,6 +471,35 @@ def cmd_eval_compare(args):
     _print_compare_table(rows, strip_prefix=args.prefix)
 
 
+def cmd_eval_overlap(args):
+    """Report how much of each question's wording comes from its source document."""
+    from ...eval_utils.overlap import question_overlap
+    from ..db_models import Document
+
+    for gid in args.generation_id:
+        with get_db_session() as session:
+            generation = get_eval_generation(generation_id=gid, session=session)
+            questions = get_eval_questions(generation_id=gid, session=session) or []
+            scored = []
+            for q in questions:
+                doc = session.get(Document, q.source_document_id) if q.source_document_id else None
+                if doc is not None:
+                    scored.append((question_overlap(q.question, doc.text or ""), q.question))
+        name = (generation.name if generation else None) or gid[:8]
+        if not scored:
+            print(f"{name}: no questions with a source document")
+            continue
+        n = len(scored)
+        mean_bigram = sum(o["bigram_overlap"] for o, _ in scored) / n
+        mean_longest = sum(o["longest_shared_words"] for o, _ in scored) / n
+        copied = sum(1 for o, _ in scored if o["longest_shared_words"] >= args.phrase_words)
+        print(f"{name}: {n} questions | mean bigram overlap {mean_bigram:.0%} | "
+              f"mean longest copied phrase {mean_longest:.1f} words | "
+              f"{copied} copy a phrase of {args.phrase_words}+ words")
+        for o, text in sorted(scored, key=lambda x: (-x[0]["longest_shared_words"], -x[0]["bigram_overlap"]))[:args.show]:
+            print(f"   {o['bigram_overlap']:>4.0%} {o['longest_shared_words']:>2}w  {text[:110]}")
+
+
 def setup_commands(subparsers):
     """Set up evaluation commands."""
     # Eval command
@@ -543,6 +572,13 @@ def setup_commands(subparsers):
     eval_compare_parser.add_argument("--run-id", action="append", help="Run id; repeatable")
     eval_compare_parser.add_argument("--json", action="store_true", help="Output as JSON")
     eval_compare_parser.set_defaults(func=cmd_eval_compare)
+
+    # eval overlap
+    eval_overlap_parser = eval_subparsers.add_parser("overlap", help="How much of each question's wording comes from its source document")
+    eval_overlap_parser.add_argument("--generation-id", action="append", required=True, help="Question set; repeatable")
+    eval_overlap_parser.add_argument("--phrase-words", type=int, default=5, help="Count questions copying a phrase at least this long (default: 5)")
+    eval_overlap_parser.add_argument("--show", type=int, default=3, help="Show the N most document-worded questions per set (default: 3)")
+    eval_overlap_parser.set_defaults(func=cmd_eval_overlap)
 
     # eval stats
     eval_stats_parser = eval_subparsers.add_parser("stats", help="Show evaluation statistics")

@@ -13,6 +13,7 @@ from .db_models import EvalDataset, get_or_create_eval_generation
 from ..documents import get
 from ..database import get_db_session
 from ..database import get_db_session
+from ...eval_utils.overlap import question_overlap
 from ...eval_utils.qa_generation import (
     format_document_context,
     generate_qa_pairs_agentic,
@@ -145,7 +146,11 @@ def generate_questions_from_documents(
                 # Calculate per-question time (approximate)
                 question_time = elapsed_time / len(qa_pairs) if qa_pairs else 0.0
 
-                question_meta = {"index": i, "model": result.get("model")}
+                question_meta = {
+                    "index": i,
+                    "model": result.get("model"),
+                    "overlap": question_overlap(pair["question"], doc.text),
+                }
                 if generation_method == "persona":
                     question_meta["persona"] = pair.get("persona")
                 elif generation_method == "agentic":
