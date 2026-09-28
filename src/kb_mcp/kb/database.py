@@ -2,6 +2,7 @@
 
 import logging
 import os
+import threading
 from contextlib import contextmanager
 from typing import Generator
 from urllib.parse import quote
@@ -145,6 +146,7 @@ _SessionLocal = None
 # True after a create_tables=True run, so a hypothetical create_tables=False
 # call can't poison it for the real initialization that follows.
 _schema_ready = False
+_schema_lock = threading.Lock()
 
 
 def get_engine() -> Engine:
@@ -519,51 +521,57 @@ def init_db(create_tables: bool = True) -> None:
 
     global _schema_ready
     if create_tables and not _schema_ready:
-        logger.info(f"Initializing database: {database_url.split('@')[-1] if '@' in database_url else database_url}")
+        # Worker threads (eval --workers, ingest pools) can all arrive here at
+        # once; unserialised, their concurrent CREATE OR REPLACE FUNCTION calls
+        # fail with "tuple concurrently updated". The first thread does the
+        # setup, the rest wait and then skip it.
+        with _schema_lock:
+            if not _schema_ready:
+                logger.info(f"Initializing database: {database_url.split('@')[-1] if '@' in database_url else database_url}")
 
-        # Enable pgvector extension for PostgreSQL (required for vector columns)
-        if database_url.startswith('postgresql'):
-            try:
-                with engine.connect() as conn:
-                    conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
-                    conn.commit()
-                logger.info("PostgreSQL vector extension enabled")
-            except Exception as e:
-                logger.warning(f"Could not enable vector extension (may not have permissions): {e}")
+                # Enable pgvector extension for PostgreSQL (required for vector columns)
+                if database_url.startswith('postgresql'):
+                    try:
+                        with engine.connect() as conn:
+                            conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+                            conn.commit()
+                        logger.info("PostgreSQL vector extension enabled")
+                    except Exception as e:
+                        logger.warning(f"Could not enable vector extension (may not have permissions): {e}")
 
-        # Create all tables (including SearchLog from search module and eval models)
-        Base.metadata.create_all(bind=engine)
-        logger.info("Database tables created/verified")
+                # Create all tables (including SearchLog from search module and eval models)
+                Base.metadata.create_all(bind=engine)
+                logger.info("Database tables created/verified")
 
-        # Bring existing tables up to the latest schema. Base.metadata.create_all
-        # only creates tables that don't exist yet — it never adds columns to
-        # existing tables, so without Alembic we patch the known column drift here.
-        try:
-            _ensure_documents_columns(engine)
-        except Exception as e:
-            logger.warning(f"Could not patch documents schema: {e}")
+                # Bring existing tables up to the latest schema. Base.metadata.create_all
+                # only creates tables that don't exist yet — it never adds columns to
+                # existing tables, so without Alembic we patch the known column drift here.
+                try:
+                    _ensure_documents_columns(engine)
+                except Exception as e:
+                    logger.warning(f"Could not patch documents schema: {e}")
 
-        try:
-            _ensure_chunks_columns(engine)
-        except Exception as e:
-            logger.warning(f"Could not patch chunks schema: {e}")
+                try:
+                    _ensure_chunks_columns(engine)
+                except Exception as e:
+                    logger.warning(f"Could not patch chunks schema: {e}")
 
-        # Set up full-text search trigger AFTER tables are created
-        if database_url.startswith('postgresql'):
-            try:
-                _setup_fulltext_search_trigger(engine)
-                logger.info("Full-text search trigger created/verified")
-            except Exception as e:
-                logger.warning(f"Could not create full-text search trigger: {e}")
+                # Set up full-text search trigger AFTER tables are created
+                if database_url.startswith('postgresql'):
+                    try:
+                        _setup_fulltext_search_trigger(engine)
+                        logger.info("Full-text search trigger created/verified")
+                    except Exception as e:
+                        logger.warning(f"Could not create full-text search trigger: {e}")
 
-        # Auto-seed graph defaults (node types and verbs) if tables are empty
-        try:
-            from .graph.graph import seed_graph_defaults
-            seed_graph_defaults()
-        except Exception as e:
-            logger.warning(f"Could not seed graph defaults: {e}")
+                # Auto-seed graph defaults (node types and verbs) if tables are empty
+                try:
+                    from .graph.graph import seed_graph_defaults
+                    seed_graph_defaults()
+                except Exception as e:
+                    logger.warning(f"Could not seed graph defaults: {e}")
 
-        _schema_ready = True
+                _schema_ready = True
 
     # Test connection. Cheap (one round trip) and worth doing on every call —
     # it's what catches a dropped connection before an insert fails on it —
