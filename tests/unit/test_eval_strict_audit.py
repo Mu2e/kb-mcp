@@ -47,3 +47,23 @@ def test_plain_filter_still_accepts_any_valid_audit(session):
     _question(session, "overlap-rejected", ("llm_judge", True), ("overlap_check", False))
     selected = {q.id for q in get_eval_questions(generation_id="g", audit_filter={"is_valid": True}, session=session)}
     assert selected == {"overlap-rejected"}
+
+
+def test_grid_treats_partial_runs_as_unfinished(session):
+    from kb_mcp.kb.eval.db_models import EvalResult, EvalRetrievedDocument, EvalRun
+    from kb_mcp.kb.eval import grid
+
+    Base.metadata.create_all(session.get_bind(), tables=[EvalRun.__table__, EvalResult.__table__, EvalRetrievedDocument.__table__])
+    for qid in ("q1", "q2", "q3"):
+        _question(session, qid)
+    session.add(EvalRun(id="r", name="grid-x", generation_id="g", max_results=10))
+    for qid in ("q1", "q2"):
+        session.add(EvalResult(run_id="r", question_id=qid, is_hit=False))
+    session.flush()
+
+    assert grid._run_result_count(session, "grid-x") == 2
+    assert grid._run_has_results(session, "grid-x")          # any result
+    assert not grid._run_has_results(session, "grid-x", 3)   # but not all three
+    assert grid._run_has_results(session, "grid-x", 2)
+    assert grid._delete_runs(session, "grid-x") == 1
+    assert grid._run_result_count(session, "grid-x") == 0

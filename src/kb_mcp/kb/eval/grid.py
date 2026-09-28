@@ -49,14 +49,34 @@ def grid_run_name(
     return "-".join(parts)
 
 
-def _run_has_results(session, name: str) -> bool:
-    return (
-        session.query(EvalResult.id)
+def _run_result_count(session, name: str) -> int:
+    """Results of the most complete run with this name (0 if there is none)."""
+    from sqlalchemy import func
+
+    counts = (
+        session.query(func.count(EvalResult.id))
         .join(EvalRun, EvalRun.id == EvalResult.run_id)
         .filter(EvalRun.name == name)
-        .first()
-        is not None
+        .group_by(EvalRun.id)
+        .all()
     )
+    return max((c for (c,) in counts), default=0)
+
+
+def _run_has_results(session, name: str, expected: Optional[int] = None) -> bool:
+    """Whether a run with this name is finished: has a result for each of the
+    `expected` questions, or any result when `expected` is None."""
+    count = _run_result_count(session, name)
+    return count > 0 if expected is None else count >= expected
+
+
+def _delete_runs(session, name: str) -> int:
+    """Delete every run with this name; results cascade in the database."""
+    runs = session.query(EvalRun).filter_by(name=name).all()
+    for run in runs:
+        session.delete(run)
+    session.commit()
+    return len(runs)
 
 
 def run_grid(
@@ -94,13 +114,19 @@ def run_grid(
     answer_models = list(answer_models) or [None]
     judge_models = list(judge_models) or [None]
 
+    from .db_models import get_eval_questions
+
     with get_db_session() as session:
-        labels = {}
+        labels, expected = {}, {}
         for gid in generation_ids:
             generation = session.get(EvalGeneration, gid)
             if generation is None:
                 raise ValueError(f"Generation not found: {gid}")
             labels[gid] = generation_label(generation)
+            # A run is complete once it has a result for every question it
+            # selects; one cut short (interrupted, or out of budget) is redone.
+            questions = get_eval_questions(generation_id=gid, audit_filter=audit_filters, session=session) or []
+            expected[gid] = sum(1 for q in questions if q.source_document_id)
 
     # One cell per run. In answer modes, the judges of one (question set,
     # search type, answer model) share answers: one run generates them -- an
@@ -115,7 +141,8 @@ def run_grid(
                     names = [grid_run_name(prefix, search_type, labels[gid], answer_model, j) for j in judge_models]
                     answers_from = None
                     if search_type in ANSWER_SEARCH_TYPES and len(judge_models) > 1:
-                        answers_from = next((n for n in names if _run_has_results(session, n)), names[0])
+                        answers_from = next(
+                            (n for n in names if _run_has_results(session, n, expected[gid])), names[0])
                     for name, judge_model in zip(names, judge_models):
                         source = answers_from if answers_from and answers_from != name else None
                         cells.append((name, gid, search_type, answer_model, judge_model, source))
@@ -123,10 +150,15 @@ def run_grid(
     outcomes = []
     for i, (name, gid, search_type, answer_model, judge_model, answers_from) in enumerate(cells, 1):
         with get_db_session() as session:
-            done = _run_has_results(session, name)
+            count = _run_result_count(session, name)
+            done = count >= expected[gid] and count > 0
+            if count and not done and not dry_run:
+                removed = _delete_runs(session, name)
+                logger.warning(f"[{i}/{len(cells)}] {name}: incomplete ({count}/{expected[gid]}); "
+                               f"deleted {removed} run(s) to redo it")
         how = f"re-judge {answers_from}" if answers_from else "run"
         if done or dry_run:
-            status = "skipped" if done else "planned"
+            status = "skipped" if done else ("planned (redo, incomplete)" if count else "planned")
             logger.info(f"[{i}/{len(cells)}] {status} ({how}): {name}")
             outcomes.append({"name": name, "status": status, "how": how})
             continue
