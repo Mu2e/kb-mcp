@@ -133,11 +133,45 @@ def run_grid(
     return outcomes
 
 
-def _agentic_summary(meta: Dict) -> Optional[Dict]:
+def _agentic_summary(meta: Dict, source_entry_key: Optional[str] = None) -> Optional[Dict]:
+    """The run-time agentic summary, with saw/opened recomputed from the stored
+    conversation so runs made before entry-level matching are scored alike."""
+    from .runner import mentions_source
+
+    summary = None
     for entry in reversed((meta or {}).get("agentic_trace") or []):
         if isinstance(entry, dict) and entry.get("summary"):
-            return entry
-    return None
+            summary = dict(entry)
+            break
+    conversation = (meta or {}).get("agentic_conversation")
+    if summary is None or not conversation:
+        return summary
+
+    tool_names = {
+        call["id"]: call["function"]["name"]
+        for message in conversation if isinstance(message, dict)
+        for call in (message.get("tool_calls") or [])
+    }
+    saw = opened = False
+    for message in conversation:
+        if isinstance(message, dict) and message.get("role") == "tool":
+            if mentions_source(message.get("content") or "", meta.get("source_document_id"), source_entry_key):
+                saw = True
+                opened = opened or tool_names.get(message.get("tool_call_id")) == "kb_get"
+    summary["saw_source"], summary["opened_source"] = saw, opened
+    return summary
+
+
+def _entry_key(session, result: EvalResult) -> Optional[str]:
+    """Source entry key for a result, from its meta or (older runs) the source row."""
+    from .runner import document_entry_key
+    from ..db_models import Document
+
+    meta = result.meta or {}
+    if meta.get("source_entry_key"):
+        return meta["source_entry_key"]
+    source = session.get(Document, meta.get("source_document_id")) if meta.get("source_document_id") else None
+    return document_entry_key(source.source_id, source.doc_id) if source else None
 
 
 def compare_runs(name_prefix: Optional[str] = None, run_ids: Optional[Iterable[str]] = None) -> List[Dict]:
@@ -166,7 +200,7 @@ def compare_runs(name_prefix: Optional[str] = None, run_ids: Optional[Iterable[s
         for run in runs:
             results = session.query(EvalResult).filter_by(run_id=run.id).all()
             judged = [r for r in results if r.is_judge_hit is not None]
-            summaries = [s for s in (_agentic_summary(r.meta) for r in results) if s]
+            summaries = [s for s in (_agentic_summary(r.meta, _entry_key(session, r)) for r in results) if s]
             answer_times = [
                 (r.meta or {}).get("llm_answer_time") for r in results
                 if (r.meta or {}).get("llm_answer_time") is not None

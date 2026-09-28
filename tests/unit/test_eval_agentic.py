@@ -148,3 +148,14 @@ def test_entry_key_groups_files_versions_and_figures_of_one_docdb_entry():
     assert key("other-source", "55441-x") != key("mu2e-docdb", "55441-x")
     # No leading entry number: the doc id is its own entry.
     assert key("mu2e-wiki", "Tracker/Straws") == "mu2e-wiki:Tracker/Straws"
+
+
+def test_source_is_recognised_by_entry_in_tool_results():
+    key = "mu2e-docdb:52728"
+    kb_get = "[[DOCUMENT_METADATA]]\nTitle: STM drawings\nID: 52728-F10266664_STM_DS_Inner_Frame\nSource: mu2e-docdb\n"
+    kb_search = '{"results": [{"source_id": "mu2e-docdb", "doc_id": "52728-other_file_pdf-_page_2_Figure_1.png"}]}'
+    elsewhere = '{"results": [{"doc_id": "55441-STM_US_Proc_Spec"}]}\nID: 5272-unrelated'
+    assert runner.mentions_source(kb_get, source_entry_key=key)
+    assert runner.mentions_source(kb_search, source_entry_key=key)
+    assert not runner.mentions_source(elsewhere, source_entry_key=key)
+    assert runner.mentions_source(f"ID: {SOURCE}", source_document_id=SOURCE)

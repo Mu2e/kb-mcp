@@ -196,6 +196,7 @@ def _agentic_answer(
     question: str,
     model: Optional[str] = None,
     source_document_id: Optional[str] = None,
+    source_entry_key: Optional[str] = None,
     max_turns: Optional[int] = None,
     tool_result_max_chars: Optional[int] = None,
 ):
@@ -206,8 +207,9 @@ def _agentic_answer(
     advertises, then calls tools until it answers or runs out of turns.
 
     Returns (final_answer, time_seconds, trace, conversation). `trace` also
-    records whether the question's source document showed up in any tool
-    result ("saw") or in a kb_get result ("opened").
+    records whether the question's source document -- any file or figure of
+    its entry -- showed up in any tool result ("saw") or in a kb_get result
+    ("opened"); see mentions_source.
     """
     import asyncio
     import json as _json
@@ -285,7 +287,7 @@ def _agentic_answer(
                 args, tool_result, is_error = tc.function.arguments, f"Error: {e}", True
 
             full_len = len(tool_result)
-            if source_document_id and source_document_id in tool_result:
+            if mentions_source(tool_result, source_document_id, source_entry_key):
                 saw_source = True
                 opened_source = opened_source or name == "kb_get"
             if full_len > tool_result_max_chars:
@@ -355,6 +357,35 @@ def document_entry_key(source_id: Optional[str], doc_id: Optional[str]) -> str:
     doc_id = doc_id or ""
     match = _ENTRY_NUMBER.match(doc_id)
     return f"{source_id}:{match.group(1) if match else doc_id}"
+
+
+_TOOL_RESULT_DOC_IDS = (
+    re.compile(r'"doc_id":\s*"([^"]+)"'),  # kb_search results
+    re.compile(r"^ID:\s*(\S+)", re.MULTILINE),  # kb_get / metadata headers
+)
+
+
+def mentions_source(
+    tool_result: str,
+    source_document_id: Optional[str] = None,
+    source_entry_key: Optional[str] = None,
+) -> bool:
+    """Whether a tool result shows the question's source document.
+
+    Matches the source's UUID, or -- since tools mostly identify documents by
+    their doc id ("52728-F10266664_...") -- any doc id in the result that
+    belongs to the source's entry (see document_entry_key).
+    """
+    if source_document_id and source_document_id in tool_result:
+        return True
+    if not source_entry_key:
+        return False
+    source_id = source_entry_key.split(":", 1)[0]
+    return any(
+        document_entry_key(source_id, doc_id) == source_entry_key
+        for pattern in _TOOL_RESULT_DOC_IDS
+        for doc_id in pattern.findall(tool_result)
+    )
 
 
 def evaluate_single_question(
@@ -465,6 +496,7 @@ def evaluate_single_question(
         from ..db_models import Document
         source_doc = session.get(Document, question.source_document_id)
         entry_hit_rank = None
+        source_key = None
         if source_doc is not None:
             source_key = document_entry_key(source_doc.source_id, source_doc.doc_id)
             for rank, result in enumerate(search_results, start=1):
@@ -487,6 +519,7 @@ def evaluate_single_question(
         llm_answer = None
         result_meta = {
             "entry_hit_rank": entry_hit_rank,
+            "source_entry_key": source_key,
             "num_retrieved": len(search_results),
             "source_document_id": question.source_document_id,
             "search_type": search_type,
@@ -575,6 +608,7 @@ def evaluate_single_question(
                 question=question.question,
                 model=answer_model,
                 source_document_id=question.source_document_id,
+                source_entry_key=source_key,
                 **agentic_opts,
             )
             result_meta["llm_answer"] = llm_answer
