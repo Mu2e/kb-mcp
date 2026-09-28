@@ -469,6 +469,20 @@ def cmd_eval_compare(args):
         print(json.dumps(rows, indent=2))
         return
     _print_compare_table(rows, strip_prefix=args.prefix)
+    if args.per_question:
+        from ..eval.grid import per_question_matrix
+        for block in per_question_matrix(name_prefix=args.prefix, run_ids=args.run_id):
+            print()
+            print(f"Questions from {block['generation_name']} (hardest first; judge verdict, else entry retrieved):")
+            for i, run in enumerate(block["runs"], 1):
+                name = run["name"] or run["run_id"][:8]
+                if args.prefix and name.startswith(args.prefix):
+                    name = name[len(args.prefix):].lstrip("-")
+                print(f"  [{i}] {name}")
+            print("  " + " ".join(f"{i:>2}" for i in range(1, len(block["runs"]) + 1)) + "  question")
+            for row in block["rows"]:
+                marks = " ".join(f"{('✓' if c['ok'] else '✗') if c else '·':>2}" for c in row["cells"])
+                print(f"  {marks}  {row['question'][:100]}")
 
 
 def cmd_eval_overlap(args):
@@ -571,6 +585,7 @@ def setup_commands(subparsers):
     eval_compare_parser.add_argument("--prefix", help="Runs whose name starts with this")
     eval_compare_parser.add_argument("--run-id", action="append", help="Run id; repeatable")
     eval_compare_parser.add_argument("--json", action="store_true", help="Output as JSON")
+    eval_compare_parser.add_argument("--per-question", action="store_true", help="Also show a question-by-run matrix of verdicts, per question set")
     eval_compare_parser.set_defaults(func=cmd_eval_compare)
 
     # eval overlap

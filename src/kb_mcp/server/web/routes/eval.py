@@ -79,6 +79,121 @@ def _render_agentic_conversation(conversation: list) -> str:
     </div>"""
 
 
+_TH = 'style="text-align: {align}; padding: 8px 10px; font-weight: 600; white-space: nowrap;"'
+_TD = 'style="text-align: {align}; padding: 8px 10px; white-space: nowrap;{extra}"'
+
+
+def _rate_cell(n, d) -> str:
+    """"n/d" with a background shade by rate, so strong and weak runs stand out."""
+    if n is None or not d:
+        return f'<td {_TD.format(align="right", extra=" color: #999;")}>—</td>'
+    rate = n / d
+    shade = "#e8f5e9" if rate >= 0.8 else "#fff8e1" if rate >= 0.5 else "#ffebee"
+    return (f'<td {_TD.format(align="right", extra=f" background-color: {shade};")} '
+            f'title="{rate:.0%}">{n}/{d}</td>')
+
+
+def _plain_cell(value, fmt="{}") -> str:
+    text = fmt.format(value) if value is not None else "—"
+    color = " color: #999;" if value is None else ""
+    return f'<td {_TD.format(align="right", extra=color)}>{html_escape(text)}</td>'
+
+
+def _short_run_name(name, prefix) -> str:
+    name = name or ""
+    if prefix and name.startswith(prefix):
+        name = name[len(prefix):].lstrip("-") or name
+    return name
+
+
+def _render_compare_table(rows, prefix) -> str:
+    """Summary table of compare_runs() rows."""
+    head = "".join(
+        f'<th {_TH.format(align=a)}>{h}</th>' for h, a in (
+            ("Run", "left"), ("Type", "left"), ("Answer model", "left"), ("Judge", "left"), ("Q", "right"),
+            ("Exact", "right"), ("Entry", "right"), ("Judge ✓", "right"), ("Saw", "right"), ("Opened", "right"),
+            ("Limit", "right"), ("Stop", "right"), ("Ans s", "right"), ("Ans tokens", "right"), ("Judge tokens", "right"),
+        )
+    )
+    body = ""
+    for r in rows:
+        n = r["questions"]
+        body += (
+            '<tr style="border-bottom: 1px solid #eee;">'
+            f'<td {_TD.format(align="left", extra="")}><a href="/web/eval/run/{r["run_id"]}" '
+            f'style="color: #2196F3; text-decoration: none;">{html_escape(_short_run_name(r["name"], prefix))}</a></td>'
+            f'<td {_TD.format(align="left", extra=" color: #666;")}>{html_escape(r["search_type"] or "—")}</td>'
+            f'<td {_TD.format(align="left", extra=" color: #666;")}>{html_escape(r["answer_model"] or "—")}</td>'
+            f'<td {_TD.format(align="left", extra=" color: #666;")}>{html_escape(r["judge_model"] or "—")}</td>'
+            + _plain_cell(n)
+            + _rate_cell(r["exact_hits"], n)
+            + _rate_cell(r["entry_hits"], n)
+            + _rate_cell(r["judge_correct"], r["judged"])
+            + _plain_cell(r["agent_saw_source"]) + _plain_cell(r["agent_opened_source"])
+            + _plain_cell(r["turn_limit"]) + _plain_cell(r["stopped"])
+            + _plain_cell(r["avg_answer_seconds"], "{:.0f}")
+            + _plain_cell(r["answer_tokens"], "{:,}") + _plain_cell(r["judge_tokens"], "{:,}")
+            + "</tr>"
+        )
+    return f"""
+    <div style="overflow-x: auto;">
+    <table style="width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 13px;">
+        <thead><tr style="background-color: #f5f5f5; border-bottom: 2px solid #ddd;">{head}</tr></thead>
+        <tbody>{body}</tbody>
+    </table>
+    </div>
+    <p style="color: #666; font-size: 12px; margin-top: 10px; line-height: 1.5;">
+        <b>Exact</b>: source row retrieved; <b>Entry</b>: any file or figure of the source's DocDB entry retrieved;
+        <b>Judge ✓</b>: answers the judge accepted; <b>Saw / Opened</b>: the agent saw the source in a tool result /
+        opened it with kb_get; <b>Limit / Stop</b>: the agent hit the turn limit / the endpoint stopped it (e.g. context
+        overflow). For agentic and llm_only runs, Exact and Entry come from a separate search the agent never sees.
+        Shading: green ≥ 80%, yellow ≥ 50%, red below.
+    </p>
+    """
+
+
+def _render_question_matrix(block, prefix) -> str:
+    """Question-by-run verdict grid for one question set."""
+    runs = block["runs"]
+    head = f'<th {_TH.format(align="left")}>Question</th>' + "".join(
+        f'<th {_TH.format(align="center")} title="{html_escape(r["name"] or "")}">'
+        f'<a href="/web/eval/run/{r["run_id"]}" style="color: #2196F3; text-decoration: none;">{i}</a></th>'
+        for i, r in enumerate(runs, 1)
+    )
+    body = ""
+    for row in block["rows"]:
+        cells = ""
+        for cell in row["cells"]:
+            if cell is None:
+                cells += f'<td {_TD.format(align="center", extra=" color: #ccc;")}>·</td>'
+                continue
+            mark, color = ("✓", "#2e7d32") if cell["ok"] else ("✗", "#c62828")
+            cells += (f'<td {_TD.format(align="center", extra="")}><a href="/web/eval/result/{cell["result_id"]}" '
+                      f'style="color: {color}; text-decoration: none; font-weight: 600;">{mark}</a></td>')
+        body += (
+            '<tr style="border-bottom: 1px solid #eee;">'
+            f'<td style="padding: 8px 10px; max-width: 640px;"><a href="/web/eval/question/{row["question_id"]}" '
+            f'style="color: #333; text-decoration: none;">{html_escape(row["question"])}</a></td>{cells}</tr>'
+        )
+    legend = "".join(
+        f'<li><b>{i}</b> {html_escape(_short_run_name(r["name"], prefix))}</li>' for i, r in enumerate(runs, 1)
+    )
+    return f"""
+    <h3 style="margin-top: 24px;">Questions from
+        <a href="/web/eval/generation/{block['generation_id']}" style="color: #2196F3; text-decoration: none;">{html_escape(block['generation_name'])}</a>
+    </h3>
+    <p style="color: #666; font-size: 12px;">Hardest questions first. A cell is the judge's verdict, or for unjudged
+        retrieval runs whether the source's entry was retrieved; click it for the answer.</p>
+    <div style="overflow-x: auto;">
+    <table style="border-collapse: collapse; font-size: 13px;">
+        <thead><tr style="background-color: #f5f5f5; border-bottom: 2px solid #ddd;">{head}</tr></thead>
+        <tbody>{body}</tbody>
+    </table>
+    </div>
+    <ol style="list-style: none; padding-left: 0; color: #666; font-size: 12px; columns: 2;">{legend}</ol>
+    """
+
+
 def setup_eval_routes(app, session_manager: WebSessionManager, require_auth_html):
     """Register evaluation web routes.
 
@@ -212,6 +327,8 @@ def setup_eval_routes(app, session_manager: WebSessionManager, require_auth_html
 
         content = f"""
         <h1>Evaluation Overview</h1>
+        <p><a href="/web/eval/compare" style="color: #2196F3; text-decoration: none; font-weight: 500;">Compare runs →</a>
+            <span style="color: #666;">side-by-side results of a grid, with a per-question view</span></p>
         
         <div class="card">
             <h2>Eval Datasets ({len(generations) if generations else 0})</h2>
@@ -242,6 +359,77 @@ def setup_eval_routes(app, session_manager: WebSessionManager, require_auth_html
             username
         ))
     app.add_route("/web/eval", web_eval_overview)
+
+    async def web_eval_compare(request: Request):
+        """Compare runs side by side: summary table plus a question-by-run matrix.
+
+        Select runs with ?prefix=<run name prefix> (one grid) and/or repeated
+        ?run=<run id>. Without either, lists the run groups to pick from.
+        """
+        session_data, redirect = await require_auth_html(request, session_manager, require_admin=True)
+        if redirect:
+            return redirect
+        username = session_data.get("username")
+
+        from starlette.concurrency import run_in_threadpool
+        from ....kb.eval.grid import compare_runs, per_question_matrix, run_groups
+
+        prefix = (request.query_params.get("prefix") or "").strip() or None
+        run_ids = request.query_params.getlist("run") or None
+
+        def _load():
+            groups = run_groups()
+            if not prefix and not run_ids:
+                return groups, [], []
+            return groups, compare_runs(name_prefix=prefix, run_ids=run_ids), per_question_matrix(
+                name_prefix=prefix, run_ids=run_ids)
+
+        # Off the event loop: a large grid's comparison is several queries.
+        groups, rows, blocks = await run_in_threadpool(_load)
+
+        group_links = " ".join(
+            f'<a href="/web/eval/compare?prefix={html_escape(g["prefix"])}-" '
+            f'style="display: inline-block; margin: 3px 6px 3px 0; padding: 4px 10px; border-radius: 12px; '
+            f'text-decoration: none; font-size: 13px; '
+            f'{"background-color: #2196F3; color: white;" if prefix and prefix.rstrip("-") == g["prefix"] else "background-color: #eef4fb; color: #1565c0;"}">'
+            f'{html_escape(g["prefix"])} <span style="opacity: 0.7;">({g["runs"]})</span></a>'
+            for g in groups
+        ) or '<span style="color: #999;">No grid runs yet.</span>'
+
+        if rows:
+            results_html = f"""
+            <div class="card" style="margin-top: 20px;">
+                <h2>Runs ({len(rows)})</h2>
+                {_render_compare_table(rows, prefix)}
+            </div>
+            <div class="card" style="margin-top: 20px;">
+                <h2>Per question</h2>
+                {"".join(_render_question_matrix(b, prefix) for b in blocks) or '<div class="info-box">No results.</div>'}
+            </div>
+            """
+        elif prefix or run_ids:
+            results_html = '<div class="info-box" style="margin-top: 20px;">No runs match.</div>'
+        else:
+            results_html = '<div class="info-box" style="margin-top: 20px;">Pick a run group above.</div>'
+
+        content = f"""
+        <h1>Compare Evaluation Runs</h1>
+        <p><a href="/web/eval" style="color: #2196F3; text-decoration: none;">← Evaluation overview</a></p>
+        <div class="card">
+            <h2>Run groups</h2>
+            <div>{group_links}</div>
+            <p style="color: #666; font-size: 12px; margin-top: 8px;">A group is every run whose name starts with the
+                prefix, e.g. one <code>kb eval grid --prefix …</code>.</p>
+        </div>
+        {results_html}
+        """
+        return HTMLResponse(html_templates.base_template(
+            "Compare Evaluation Runs - MCP Server",
+            content,
+            None,
+            username
+        ))
+    app.add_route("/web/eval/compare", web_eval_compare)
 
     async def web_eval_generation(request: Request):
         """Eval generation detail page showing questions list."""

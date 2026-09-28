@@ -133,45 +133,44 @@ def run_grid(
     return outcomes
 
 
-def _agentic_summary(meta: Dict, source_entry_key: Optional[str] = None) -> Optional[Dict]:
-    """The run-time agentic summary, with saw/opened recomputed from the stored
-    conversation so runs made before entry-level matching are scored alike."""
-    from .runner import mentions_source
-
-    summary = None
-    for entry in reversed((meta or {}).get("agentic_trace") or []):
+def _agentic_summary(trace) -> Optional[Dict]:
+    """The summary entry the agentic loop appends to its trace, if any."""
+    for entry in reversed(trace or []):
         if isinstance(entry, dict) and entry.get("summary"):
-            summary = dict(entry)
-            break
-    conversation = (meta or {}).get("agentic_conversation")
-    if summary is None or not conversation:
-        return summary
-
-    tool_names = {
-        call["id"]: call["function"]["name"]
-        for message in conversation if isinstance(message, dict)
-        for call in (message.get("tool_calls") or [])
-    }
-    saw = opened = False
-    for message in conversation:
-        if isinstance(message, dict) and message.get("role") == "tool":
-            if mentions_source(message.get("content") or "", meta.get("source_document_id"), source_entry_key):
-                saw = True
-                opened = opened or tool_names.get(message.get("tool_call_id")) == "kb_get"
-    summary["saw_source"], summary["opened_source"] = saw, opened
-    return summary
+            return entry
+    return None
 
 
-def _entry_key(session, result: EvalResult) -> Optional[str]:
-    """Source entry key for a result, from its meta or (older runs) the source row."""
-    from .runner import document_entry_key
-    from ..db_models import Document
+def _select_runs(session, name_prefix: Optional[str], run_ids: Optional[Iterable[str]]):
+    query = session.query(EvalRun)
+    if name_prefix:
+        query = query.filter(EvalRun.name.like(f"{name_prefix}%"))
+    if run_ids:
+        query = query.filter(EvalRun.id.in_(list(run_ids)))
+    return query.order_by(EvalRun.name, EvalRun.created_time).all()
 
-    meta = result.meta or {}
-    if meta.get("source_entry_key"):
-        return meta["source_entry_key"]
-    source = session.get(Document, meta.get("source_document_id")) if meta.get("source_document_id") else None
-    return document_entry_key(source.source_id, source.doc_id) if source else None
+
+def _result_rows(session, run_id: str):
+    """Per-result fields compare needs, read as JSON paths.
+
+    Loading whole results would pull every stored agent conversation (up to
+    hundreds of kB each); these paths keep a large grid's comparison cheap.
+    """
+    meta = EvalResult.meta
+    return (
+        session.query(
+            EvalResult.id,
+            EvalResult.question_id,
+            EvalResult.is_hit,
+            EvalResult.is_judge_hit,
+            meta["source_entry_key"].as_string().label("source_entry_key"),
+            meta["entry_hit_rank"].as_string().label("entry_hit_rank"),
+            meta["llm_answer_time"].as_float().label("answer_time"),
+            meta["agentic_trace"].label("trace"),
+        )
+        .filter(EvalResult.run_id == run_id)
+        .all()
+    )
 
 
 def compare_runs(name_prefix: Optional[str] = None, run_ids: Optional[Iterable[str]] = None) -> List[Dict]:
@@ -190,40 +189,31 @@ def compare_runs(name_prefix: Optional[str] = None, run_ids: Optional[Iterable[s
 
     rows = []
     with get_db_session() as session:
-        query = session.query(EvalRun)
-        if name_prefix:
-            query = query.filter(EvalRun.name.like(f"{name_prefix}%"))
-        if run_ids:
-            query = query.filter(EvalRun.id.in_(list(run_ids)))
-        runs = query.order_by(EvalRun.name, EvalRun.created_time).all()
-
-        for run in runs:
-            results = session.query(EvalResult).filter_by(run_id=run.id).all()
+        for run in _select_runs(session, name_prefix, run_ids):
+            results = _result_rows(session, run.id)
             judged = [r for r in results if r.is_judge_hit is not None]
-            summaries = [s for s in (_agentic_summary(r.meta, _entry_key(session, r)) for r in results) if s]
-            answer_times = [
-                (r.meta or {}).get("llm_answer_time") for r in results
-                if (r.meta or {}).get("llm_answer_time") is not None
-            ]
+            summaries = [s for s in (_agentic_summary(r.trace) for r in results) if s]
+            answer_times = [r.answer_time for r in results if r.answer_time is not None]
             tokens = dict(
                 session.query(LLMUsage.stage, func.sum(LLMUsage.total_tokens))
                 .filter(LLMUsage.meta["eval_run_id"].as_string() == run.id)
                 .group_by(LLMUsage.stage)
                 .all()
             )
+            # The entry-level metric exists only for runs that recorded a source
+            # entry key; older runs show None rather than a misleading zero.
+            has_entry_metric = any(r.source_entry_key for r in results)
             rows.append({
                 "run_id": run.id,
                 "name": run.name,
+                "generation_id": run.generation_id,
                 "search_type": run.search_type,
                 "answer_model": (run.meta or {}).get("answer_model"),
                 "judge_model": (run.judge_strategy or {}).get("model"),
+                "created_time": run.created_time,
                 "questions": len(results),
                 "exact_hits": sum(1 for r in results if r.is_hit),
-                # None for runs made before the entry-level metric existed.
-                "entry_hits": (
-                    sum(1 for r in results if (r.meta or {}).get("entry_hit_rank") is not None)
-                    if any("entry_hit_rank" in (r.meta or {}) for r in results) else None
-                ),
+                "entry_hits": sum(1 for r in results if r.entry_hit_rank) if has_entry_metric else None,
                 "judged": len(judged),
                 "judge_correct": sum(1 for r in judged if r.is_judge_hit),
                 "agent_saw_source": sum(1 for s in summaries if s.get("saw_source")) if summaries else None,
@@ -235,3 +225,73 @@ def compare_runs(name_prefix: Optional[str] = None, run_ids: Optional[Iterable[s
                 "judge_tokens": int(tokens.get(STAGE_EVAL_JUDGE) or 0) or None,
             })
     return rows
+
+
+def per_question_matrix(name_prefix: Optional[str] = None, run_ids: Optional[Iterable[str]] = None) -> List[Dict]:
+    """Question-by-run verdicts, one block per question set.
+
+    A cell is the judge's verdict when the run was judged, else whether the
+    source's entry was retrieved. Rows every run gets wrong usually point at
+    a bad question; rows only one model gets right show where models differ.
+
+    Returns:
+        One dict per generation: generation id/name, the runs (id, name) in
+        column order, and rows of (question id, question text, cells), where a
+        cell is {"result_id", "ok"} or None when the run has no result for it.
+    """
+    from .db_models import EvalDataset
+
+    blocks = []
+    with get_db_session() as session:
+        runs = _select_runs(session, name_prefix, run_ids)
+        by_generation: Dict[str, List[EvalRun]] = {}
+        for run in runs:
+            by_generation.setdefault(run.generation_id, []).append(run)
+
+        for gid, gen_runs in by_generation.items():
+            generation = session.get(EvalGeneration, gid) if gid else None
+            cells: Dict[str, Dict[str, Dict]] = {}
+            for run in gen_runs:
+                for r in _result_rows(session, run.id):
+                    ok = r.is_judge_hit if r.is_judge_hit is not None else bool(r.entry_hit_rank or r.is_hit)
+                    cells.setdefault(r.question_id, {})[run.id] = {"result_id": r.id, "ok": ok}
+            questions = (
+                session.query(EvalDataset.id, EvalDataset.question)
+                .filter(EvalDataset.id.in_(list(cells)))
+                .all()
+            ) if cells else []
+            rows = []
+            for qid, text in questions:
+                row_cells = [cells[qid].get(run.id) for run in gen_runs]
+                rows.append({"question_id": qid, "question": text, "cells": row_cells})
+            # Hardest questions first: fewest runs got them right.
+            rows.sort(key=lambda row: sum(1 for c in row["cells"] if c and c["ok"]))
+            blocks.append({
+                "generation_id": gid,
+                "generation_name": (generation.name if generation else None) or (gid or "")[:8],
+                "runs": [{"run_id": run.id, "name": run.name} for run in gen_runs],
+                "rows": rows,
+            })
+    return blocks
+
+
+def run_groups(limit: int = 50) -> List[Dict]:
+    """Run name prefixes (the part before "-<search type>-"), newest first.
+
+    Grid runs share a prefix, so each group is one grid's worth of runs.
+    """
+    groups: Dict[str, Dict] = {}
+    with get_db_session() as session:
+        for name, search_type, created in session.query(EvalRun.name, EvalRun.search_type, EvalRun.created_time):
+            if not name or not search_type:
+                continue
+            marker = f"-{search_type}-"
+            prefix = name.split(marker, 1)[0] if marker in name else None
+            if not prefix:
+                continue
+            group = groups.setdefault(prefix, {"prefix": prefix, "runs": 0, "latest": created})
+            group["runs"] += 1
+            if created and (group["latest"] is None or created > group["latest"]):
+                group["latest"] = created
+    ordered = sorted(groups.values(), key=lambda g: g["latest"] or 0, reverse=True)
+    return ordered[:limit]
