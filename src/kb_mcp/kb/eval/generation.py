@@ -13,7 +13,12 @@ from .db_models import EvalDataset, get_or_create_eval_generation
 from ..documents import get
 from ..database import get_db_session
 from ..database import get_db_session
-from ...eval_utils.qa_generation import generate_qa_pairs_keypoint, generate_qa_pairs_persona, generate_qa_pairs_agentic
+from ...eval_utils.qa_generation import (
+    format_document_context,
+    generate_qa_pairs_agentic,
+    generate_qa_pairs_keypoint,
+    generate_qa_pairs_persona,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +99,9 @@ def generate_questions_from_documents(
                     doc.text,
                     num_questions=questions_to_generate,
                     model=model,
+                    document_context=format_document_context(
+                        getattr(doc, "title", None) or getattr(doc, "title_gen", None), doc.source_id
+                    ),
                 )
             elif generation_method == "persona":
                 result = generate_qa_pairs_persona(
