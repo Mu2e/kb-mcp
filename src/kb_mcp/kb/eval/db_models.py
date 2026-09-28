@@ -649,7 +649,9 @@ def get_eval_questions(
         question_id: Optional question ID to retrieve specific question
         generation_id: Optional filter by generation
         source_document_id: Optional filter by source document
-        audit_filter: Optional audit criteria (e.g., {"is_valid": True, "audit_type": "human_review"})
+        audit_filter: Optional audit criteria (e.g., {"is_valid": True, "audit_type": "human_review"}).
+            {"strict": True} instead selects questions with a valid and no invalid
+            audit, or whose latest human review is valid (what kb eval grid uses).
         limit: Optional limit on number of results
         offset: Optional offset for pagination
         session: Optional database session
@@ -675,8 +677,34 @@ def get_eval_questions(
         if source_document_id:
             query = query.filter(EvalDataset.source_document_id == source_document_id)
 
+        # Strict selection: usable only with a valid audit and no invalid one,
+        # unless a human reviewed it, in which case the latest human verdict
+        # decides. The plain filter below accepts a question if *any* audit
+        # matches, so an automated rejection (e.g. the overlap check) would be
+        # overridden by an LLM audit that passed it.
+        if audit_filter and audit_filter.get("strict"):
+            from sqlalchemy import and_, exists, not_, select
+
+            def _audit(*conds):
+                return exists().where(and_(EvalAudit.question_id == EvalDataset.id, *conds))
+
+            latest_human = (
+                select(EvalAudit.is_valid)
+                .where(EvalAudit.question_id == EvalDataset.id, EvalAudit.audit_type == "human_review")
+                .order_by(EvalAudit.created_time.desc())
+                .limit(1)
+                .scalar_subquery()
+            )
+            human_reviewed = _audit(EvalAudit.audit_type == "human_review")
+            automated_ok = and_(
+                _audit(EvalAudit.is_valid.is_(True)),
+                not_(_audit(EvalAudit.is_valid.is_(False))),
+            )
+            query = query.filter(
+                (human_reviewed & latest_human.is_(True)) | (not_(human_reviewed) & automated_ok)
+            )
         # Apply audit filter if provided
-        if audit_filter:
+        elif audit_filter:
             # Join with audit table and filter
             is_valid = audit_filter.get("is_valid")
             audit_type = audit_filter.get("audit_type")

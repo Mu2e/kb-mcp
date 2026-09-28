@@ -68,6 +68,7 @@ def run_grid(
     max_results: int = 10,
     workers: int = 1,
     run_meta: Optional[Dict] = None,
+    audit_filters: Optional[Dict] = None,
     dry_run: bool = False,
 ) -> List[Dict]:
     """Run every (generation, search type, answer model, judge) combination.
@@ -79,6 +80,8 @@ def run_grid(
 
     Args:
         run_meta: Extra run meta for answer-mode runs (e.g. agentic loop limits).
+        audit_filters: Which questions to use (see get_eval_questions); the CLI
+            passes {"strict": True}. None uses every question.
         dry_run: Only report what would run.
 
     Returns:
@@ -151,6 +154,7 @@ def run_grid(
             use_llm_judge=judge_model is not None,
             workers=workers,
             meta=run_meta if search_type == "agentic" else None,
+            audit_filters=audit_filters,
         )
         outcomes.append({"name": name, "status": "ran", "how": how, **stats})
     return outcomes

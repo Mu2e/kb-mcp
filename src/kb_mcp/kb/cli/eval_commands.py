@@ -21,6 +21,9 @@ def cmd_eval_generate(args):
     try:
         num_questions = getattr(args, 'num_questions', 1) or 1
         document_ids = list(args.doc_id or [])
+        if args.doc_ids_file:
+            with open(args.doc_ids_file) as fh:
+                document_ids += [line.split("#", 1)[0].strip() for line in fh if line.split("#", 1)[0].strip()]
         if args.same_documents_as:
             # Reuse another generation's documents, so two generators (or
             # strategies) are compared on exactly the same material.
@@ -53,7 +56,7 @@ def cmd_eval_generate(args):
                 name=args.name,
             )
         else:
-            print("Error: one of --source-id, --doc-id or --same-documents-as is required")
+            print("Error: one of --source-id, --doc-id, --doc-ids-file or --same-documents-as is required")
             print("  Example: kb eval generate --source-id inspire-hep")
             sys.exit(1)
 
@@ -69,8 +72,39 @@ def cmd_eval_generate(args):
         sys.exit(1)
 
 
+def _overlap_audit(args):
+    """Record an automated overlap_check audit for each question not yet checked."""
+    from ...eval_utils.overlap import question_overlap
+    from ..db_models import Document
+
+    questions = get_unaudited_questions(generation_id=args.generation_id, audit_type="overlap_check",
+                                        limit=None if args.limit == 0 else args.limit)
+    rejected = 0
+    for q in questions:
+        with get_db_session() as session:
+            doc = session.get(Document, q.source_document_id) if q.source_document_id else None
+            overlap = question_overlap(q.question, doc.text or "") if doc is not None else None
+        if overlap is None:
+            continue
+        ok = overlap["bigram_overlap"] <= args.overlap_max
+        rejected += not ok
+        add_audit(
+            question_id=q.id,
+            is_valid=ok,
+            audit_type="overlap_check",
+            auditor_name="overlap_check",
+            comments=(f"bigram overlap {overlap['bigram_overlap']:.0%} "
+                      f"{'<=' if ok else '>'} {args.overlap_max:.0%}; longest copied phrase "
+                      f"{overlap['longest_shared_words']} words"),
+            meta={"overlap": overlap, "overlap_max": args.overlap_max},
+        )
+    print(f"Overlap check: {len(questions)} questions, {rejected} above {args.overlap_max:.0%} marked invalid")
+
+
 def cmd_eval_audit(args):
     """Audit evaluation questions."""
+    if args.overlap_max is not None:
+        return _overlap_audit(args)
     try:
         # Get unaudited questions (convert 0 to None for unlimited)
         limit = None if args.limit == 0 else args.limit
@@ -186,7 +220,9 @@ def cmd_eval_run(args):
     try:
         # Build audit filters
         audit_filters = {}
-        if not args.include_invalid:
+        if args.strict_audit:
+            audit_filters["strict"] = True
+        elif not args.include_invalid:
             audit_filters["is_valid"] = True
         if args.audit_type:
             audit_filters["audit_type"] = args.audit_type
@@ -442,6 +478,7 @@ def cmd_eval_grid(args):
         max_results=args.max_results,
         workers=args.workers,
         run_meta=agentic_meta,
+        audit_filters=None if args.include_invalid else {"strict": True},
         dry_run=args.dry_run,
     )
     for o in outcomes:
@@ -543,6 +580,7 @@ def setup_commands(subparsers):
     eval_generate_parser.add_argument("--model", help="LLM model to use for generation")
     eval_generate_parser.add_argument("--source-id", help="Filter to specific source")
     eval_generate_parser.add_argument("--doc-id", action="append", metavar="UUID", help="Generate from this document (documents.id); repeatable")
+    eval_generate_parser.add_argument("--doc-ids-file", metavar="PATH", help="File with one document id (documents.id) per line; '#' starts a comment")
     eval_generate_parser.add_argument("--same-documents-as", metavar="GENERATION_ID", help="Generate from the same documents as an earlier generation")
     eval_generate_parser.add_argument("--generation-id", help="Use existing generation ID (or create new if not exists)")
     eval_generate_parser.set_defaults(func=cmd_eval_generate)
@@ -553,6 +591,7 @@ def setup_commands(subparsers):
     eval_audit_parser.add_argument("--limit", type=int, default=20, help="Max questions to audit")
     eval_audit_parser.add_argument("--llm", action="store_true", help="Use LLM for automated auditing instead of interactive")
     eval_audit_parser.add_argument("--model", help="LLM model to use for auditing (if --llm; default: EVAL_AUDIT_MODEL, else EVAL_JUDGE_MODEL)")
+    eval_audit_parser.add_argument("--overlap-max", type=float, metavar="FRACTION", help="Instead of an LLM/human audit, record an automated overlap_check audit: invalid when the question shares more than FRACTION of its word pairs with its source (e.g. 0.4); covers all unchecked questions unless --limit is given")
     eval_audit_parser.add_argument("--workers", type=int, default=1, metavar="N", help="Number of parallel LLM audit calls (default: 1, only applies with --llm)")
     eval_audit_parser.set_defaults(func=cmd_eval_audit)
 
@@ -562,6 +601,7 @@ def setup_commands(subparsers):
     eval_run_parser.add_argument("--description", help="Description for this run")
     eval_run_parser.add_argument("--search-type", default="semantic", choices=["semantic", "fulltext", "hybrid", "rag", "agentic", "llm_only"], help="Search/answer mode (default: semantic)")
     eval_run_parser.add_argument("--generation-id", help="Filter to questions from specific generation")
+    eval_run_parser.add_argument("--strict-audit", action="store_true", help="Use only questions with a valid and no invalid audit (a human review, if any, decides)")
     eval_run_parser.add_argument("--include-invalid", action="store_true", help="Include questions marked as invalid")
     eval_run_parser.add_argument("--audit-type", help="Filter by audit type (e.g., 'llm_judge', 'human_review')")
     eval_run_parser.add_argument("--embedding-name", help="Embedding model to use")
@@ -591,6 +631,7 @@ def setup_commands(subparsers):
     eval_grid_parser.add_argument("--max-turns", type=int, metavar="N", help="agentic: max tool rounds (default: EVAL_AGENTIC_MAX_TURNS, else 10)")
     eval_grid_parser.add_argument("--tool-result-max-chars", type=int, metavar="N", help="agentic: per-tool-result cap (default: EVAL_AGENTIC_TOOL_RESULT_MAX_CHARS, else 100000)")
     eval_grid_parser.add_argument("--workers", type=int, default=1, metavar="N", help="Parallel questions per run (default: 1)")
+    eval_grid_parser.add_argument("--include-invalid", action="store_true", help="Use every question, audited or not (default: only questions with a valid and no invalid audit)")
     eval_grid_parser.add_argument("--dry-run", action="store_true", help="Only list the runs, marking which would be skipped")
     eval_grid_parser.set_defaults(func=cmd_eval_grid)
 
