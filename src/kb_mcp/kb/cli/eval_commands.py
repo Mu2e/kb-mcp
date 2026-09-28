@@ -153,6 +153,17 @@ def cmd_eval_audit(args):
         sys.exit(1)
 
 
+def _agentic_meta(args):
+    """Agent-loop limits for an agentic run, stored on the run so it records them."""
+    if args.search_type != "agentic":
+        return None
+    from ..eval.runner import AGENTIC_MAX_TURNS, AGENTIC_TOOL_RESULT_MAX_CHARS
+    return {
+        "max_turns": args.max_turns or AGENTIC_MAX_TURNS,
+        "tool_result_max_chars": args.tool_result_max_chars or AGENTIC_TOOL_RESULT_MAX_CHARS,
+    }
+
+
 def cmd_eval_run(args):
     """Run an evaluation."""
     try:
@@ -200,6 +211,7 @@ def cmd_eval_run(args):
             judge_strategy=judge_strategy,
             use_llm_judge=args.use_judge,
             workers=args.workers,
+            meta=_agentic_meta(args),
             rerank=rerank,
         )
 
@@ -401,6 +413,8 @@ def setup_commands(subparsers):
     eval_run_parser.add_argument("--use-judge", action="store_true", help="Run LLM judge on results")
     eval_run_parser.add_argument("--judge-model", help="LLM model for judge (if --use-judge)")
     eval_run_parser.add_argument("--answer-model", help="LLM model for answer generation in rag/agentic/llm_only modes (default: EVAL_ANSWER_MODEL, else DEFAULT_LLM_MODEL)")
+    eval_run_parser.add_argument("--max-turns", type=int, metavar="N", help="agentic: max tool rounds before the agent must answer (default: 10)")
+    eval_run_parser.add_argument("--tool-result-max-chars", type=int, metavar="N", help="agentic: truncate each tool result to N chars, noting it for the model (default: 100000)")
     eval_run_parser.add_argument("--workers", type=int, default=1, metavar="N", help="Number of parallel question evaluations (default: 1)")
     eval_run_parser.add_argument("--rerank", action="store_true", help="Enable cross-encoder reranking")
     eval_run_parser.add_argument("--no-rerank", action="store_true", help="Disable cross-encoder reranking")

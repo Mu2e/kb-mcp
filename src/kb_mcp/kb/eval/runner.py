@@ -155,146 +155,159 @@ def _rag_answer(question: str, context: str, model: Optional[str] = None):
     return answer, elapsed
 
 
+#: Tools the agentic eval exposes, in the order the MCP server registers them.
+#: Graph tools are left out for now, kb_research because it is itself an agent
+#: (a nested loop of its own, minutes per call), and kb_get_image because an
+#: image can't be returned as a chat-completions tool result.
+AGENTIC_TOOLS = ("kb_search", "kb_get")
+
+#: Default cap on tool rounds before the agent is made to answer.
+AGENTIC_MAX_TURNS = 10
+
+#: Default cap on the characters of one tool result passed back to the model.
+#: kb_get returns whole documents, and a few are far beyond any context window
+#: (the largest is ~300M chars), so the eval client truncates -- and says so --
+#: until the server pages kb_get itself.
+AGENTIC_TOOL_RESULT_MAX_CHARS = 100_000
+
+_agentic_server = None
+
+
+def _get_agentic_server():
+    """An in-process MCP server with the real kb-mcp tools and prompts.
+
+    Tools are called through MCPServer.call_tool, so arguments are validated
+    and results formatted exactly as for a connected client; only transport
+    and auth are skipped.
+    """
+    global _agentic_server
+    if _agentic_server is None:
+        from mcp.server.mcpserver import MCPServer
+        from ...server import mcp as mcp_tools
+        from ...server.mcp_prompts import get_server_instructions
+
+        server = MCPServer("kb-mcp-eval", instructions=get_server_instructions())
+        for name in AGENTIC_TOOLS:
+            server.tool()(getattr(mcp_tools, name))
+        mcp_tools.register_prompts(server)
+        _agentic_server = server
+    return _agentic_server
+
+
 def _agentic_answer(
     question: str,
-    source_id: Optional[str] = None,
-    parser_id: Optional[str] = None,
-    es_filter: Optional[Dict] = None,
-    max_results: int = 5,
     model: Optional[str] = None,
+    source_document_id: Optional[str] = None,
+    max_turns: int = AGENTIC_MAX_TURNS,
+    tool_result_max_chars: int = AGENTIC_TOOL_RESULT_MAX_CHARS,
 ):
-    """Run the research_question agentic loop with kb_search/kb_get as tools.
+    """Answer a question the way an MCP client would, with the real kb-mcp tools.
 
-    The LLM can call kb_search and kb_get iteratively, mirroring the MCP
-    research_question prompt used in the web interface.
+    The model gets the server's instructions as system prompt, the server's
+    research_question prompt as the task, and the tool definitions the server
+    advertises, then calls tools until it answers or runs out of turns.
 
-    Returns (final_answer, time_seconds, trace).
+    Returns (final_answer, time_seconds, trace, conversation). `trace` also
+    records whether the question's source document showed up in any tool
+    result ("saw") or in a kb_get result ("opened").
     """
-    from ...llm import STAGE_EVAL_ANSWER, get_openai_client, record_llm_usage
-    from ...config import get_eval_config
-    from ..search.search import search as kb_search_fn
-    from ..documents import get as kb_get_fn
+    import asyncio
     import json as _json
+
+    from ...llm import STAGE_EVAL_ANSWER, get_openai_client, record_llm_usage
 
     if model is None:
         model = get_eval_config()["answer_model"]
 
     client = get_openai_client(model)
+    server = _get_agentic_server()
 
-    filter_str = None  # unused, kept for reference
+    async def _setup():
+        tools = await server.list_tools()
+        prompt = await server.get_prompt("research_question", {"question": question})
+        return tools, prompt
 
+    mcp_tools, prompt = asyncio.run(_setup())
     tools = [
         {
             "type": "function",
             "function": {
-                "name": "kb_search",
-                "description": "Search the knowledge base. Returns ranked documents with excerpts.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "query": {"type": "string", "description": "Search query"},
-                        "max_results": {"type": "integer", "default": max_results},
-                    },
-                    "required": ["query"],
-                },
+                "name": t.name,
+                "description": t.description or "",
+                "parameters": t.input_schema,
             },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "kb_get",
-                "description": "Retrieve the full text of a document by its ID.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "doc_id": {"type": "string", "description": "Document ID"},
-                    },
-                    "required": ["doc_id"],
-                },
-            },
-        },
+        }
+        for t in mcp_tools
     ]
-
-    system_prompt = (
-        "You are a scientific research assistant helping to answer questions about "
-        "legacy high-energy physics experiments. Use kb_search to find relevant documents "
-        "and kb_get to read full document content when needed. "
-        "After gathering information, provide a precise, concise answer."
-    )
-
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": (
-            f"Research the following question using the knowledge base:\n\n"
-            f"Question: {question}\n\n"
-            f"Steps:\n"
-            f"1. Use kb_search to find relevant documents\n"
-            f"2. Use kb_get on the most relevant document(s) if needed\n"
-            f"3. Provide a precise answer citing the sources"
-        )},
-    ]
+    messages = [{"role": "system", "content": server.instructions or ""}]
+    messages += [{"role": m.role, "content": m.content.text} for m in prompt.messages]
 
     trace = []
+    saw_source = opened_source = False
     start = time.time()
-    max_iterations = 5
     got_final_answer = False
 
-    for _ in range(max_iterations):
-        response = client.chat.completions.create(
-            model=model,
-            messages=messages,
-            tools=tools,
-            tool_choice="auto",
-            max_tokens=16384,
-        )
+    import openai
+
+    msg = None
+    stopped_by = None
+    for _ in range(max_turns):
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                messages=messages,
+                tools=tools,
+                tool_choice="auto",
+                max_tokens=16384,
+            )
+        except openai.BadRequestError as e:
+            # Almost always the conversation outgrowing the model's context --
+            # an outcome of the run (a real client would hit it too), so it is
+            # recorded rather than failing the question.
+            stopped_by = f"request rejected: {e}"[:500]
+            break
         record_llm_usage(response.usage, stage=STAGE_EVAL_ANSWER, model=model, meta={"mode": "agentic"})
         msg = response.choices[0].message
         messages.append(msg)
 
         if not msg.tool_calls:
-            # LLM gave a final text answer
             got_final_answer = True
             break
 
-        # Execute tool calls
         for tc in msg.tool_calls:
-            fn = tc.function.name
-            args = _json.loads(tc.function.arguments)
-            trace.append({"tool": fn, "args": args})
+            name = tc.function.name
+            try:
+                args = _json.loads(tc.function.arguments or "{}")
+                result = asyncio.run(server.call_tool(name, args))
+                tool_result = "\n".join(getattr(c, "text", "") for c in result.content)
+                is_error = bool(getattr(result, "is_error", False))
+            except Exception as e:
+                args, tool_result, is_error = tc.function.arguments, f"Error: {e}", True
 
-            if fn == "kb_search":
-                search_response = kb_search_fn(
-                    query=args["query"],
-                    max_results=args.get("max_results", max_results),
-                    source_id=source_id,
-                    parser_id=parser_id,
-                    filter=es_filter,
+            full_len = len(tool_result)
+            if source_document_id and source_document_id in tool_result:
+                saw_source = True
+                opened_source = opened_source or name == "kb_get"
+            if full_len > tool_result_max_chars:
+                tool_result = (
+                    tool_result[:tool_result_max_chars]
+                    + f"\n[[TRUNCATED BY CLIENT: showing {tool_result_max_chars:,} of {full_len:,} chars]]"
                 )
-                results = search_response.get("results", [])
-                tool_result = _json.dumps([
-                    {"doc_id": r["document"].doc_id, "excerpt": (r["document"].text or "")[:500]}
-                    for r in results if r.get("document")
-                ])
-            elif fn == "kb_get":
-                doc = kb_get_fn(identifier=args["doc_id"])
-                if isinstance(doc, list):
-                    doc = next((d for d in doc if d.parser_id == "marker"), doc[0] if doc else None)
-                tool_result = doc.text[:4000] if doc and doc.text else "Document not found"
-            else:
-                tool_result = "Unknown tool"
-
-            trace.append({"tool_result_len": len(tool_result)})
-            messages.append({
-                "role": "tool",
-                "tool_call_id": tc.id,
-                "content": tool_result,
+            trace.append({
+                "tool": name,
+                "args": args,
+                "result_len": full_len,
+                "truncated": full_len > tool_result_max_chars,
+                "is_error": is_error,
             })
+            messages.append({"role": "tool", "tool_call_id": tc.id, "content": tool_result})
 
-    # If loop exhausted max_iterations without a text turn, force a synthesis call
-    if not got_final_answer:
+    # Out of turns without a text answer: one more call with tools disabled.
+    if not got_final_answer and stopped_by is None:
         response = client.chat.completions.create(
             model=model,
             messages=messages,
+            tools=tools,
             tool_choice="none",
             max_tokens=16384,
         )
@@ -303,7 +316,15 @@ def _agentic_answer(
         messages.append(msg)
 
     elapsed = time.time() - start
-    final_answer = msg.content or ""
+    final_answer = (msg.content or "") if (msg is not None and stopped_by is None) else ""
+    trace.append({
+        "summary": True,
+        "tool_calls": sum(1 for t in trace if "tool" in t),
+        "hit_turn_limit": not got_final_answer and stopped_by is None,
+        "stopped_by": stopped_by,
+        "saw_source": saw_source,
+        "opened_source": opened_source,
+    })
 
     # Serialize full message history for storage
     conversation = []
@@ -513,14 +534,16 @@ def evaluate_single_question(
                     judge_time_seconds = judge_result["time_seconds"]
 
         elif search_type == "agentic":
-            # Agentic: LLM runs the research_question loop with kb_search/kb_get tools
+            # Agentic: LLM answers through the real MCP tools (see _agentic_answer)
+            # The agent searches with its own arguments, as a real client does:
+            # the run's search filters and max_results are not imposed on it.
+            agentic_opts = {k: v for k, v in (run.meta or {}).items()
+                            if k in ("max_turns", "tool_result_max_chars")}
             llm_answer, llm_answer_time, agentic_trace, agentic_conversation = _agentic_answer(
                 question=question.question,
-                source_id=source_id_filter,
-                parser_id=parser_id_filter,
-                es_filter=es_filter,
-                max_results=run.max_results,
                 model=answer_model,
+                source_document_id=question.source_document_id,
+                **agentic_opts,
             )
             result_meta["llm_answer"] = llm_answer
             result_meta["llm_answer_time"] = llm_answer_time
