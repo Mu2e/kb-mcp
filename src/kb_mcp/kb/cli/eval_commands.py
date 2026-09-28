@@ -445,12 +445,26 @@ def cmd_eval_grid(args):
         dry_run=args.dry_run,
     )
     for o in outcomes:
-        print(f"{o['status']:>8}  {o['name']}")
+        how = f"  ({o['how']})" if o.get("how", "run") != "run" else ""
+        print(f"{o['status']:>8}  {o['name']}{how}")
     if args.dry_run:
         return
     print()
     from ..eval.grid import compare_runs
     _print_compare_table(compare_runs(name_prefix=args.prefix), strip_prefix=args.prefix)
+
+
+def cmd_eval_rejudge(args):
+    """Judge an existing run's answers again with another judge model."""
+    from ..eval.rejudge import rejudge_run
+
+    stats = rejudge_run(args.run_id, args.judge_model, name=args.name, workers=args.workers)
+    print(f"Re-judged {stats['num_questions']} answers as run {stats['name']}")
+    print(f"  Run ID: {stats['run_id']}")
+    if stats["num_questions"]:
+        print(f"  Judged correct: {stats['num_judge_hits']}/{stats['num_questions']} "
+              f"({stats['num_judge_hits'] / stats['num_questions']:.0%})")
+    print(f"  Total time: {stats['total_time_seconds']:.1f}s")
 
 
 def cmd_eval_compare(args):
@@ -579,6 +593,14 @@ def setup_commands(subparsers):
     eval_grid_parser.add_argument("--workers", type=int, default=1, metavar="N", help="Parallel questions per run (default: 1)")
     eval_grid_parser.add_argument("--dry-run", action="store_true", help="Only list the runs, marking which would be skipped")
     eval_grid_parser.set_defaults(func=cmd_eval_grid)
+
+    # eval rejudge
+    eval_rejudge_parser = eval_subparsers.add_parser("rejudge", help="Judge an existing run's answers again with another judge (no new answers)")
+    eval_rejudge_parser.add_argument("--run-id", required=True, help="Answer-mode run (rag/agentic/llm_only) to re-judge")
+    eval_rejudge_parser.add_argument("--judge-model", required=True, help="Judge model for the new run")
+    eval_rejudge_parser.add_argument("--name", help="Name of the new run (default: source name with its judge suffix replaced)")
+    eval_rejudge_parser.add_argument("--workers", type=int, default=1, metavar="N", help="Parallel judge calls (default: 1)")
+    eval_rejudge_parser.set_defaults(func=cmd_eval_rejudge)
 
     # eval compare
     eval_compare_parser = eval_subparsers.add_parser("compare", help="Show runs side by side (retrieval hits, judge verdicts, agent behaviour, tokens)")

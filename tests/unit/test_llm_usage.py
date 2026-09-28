@@ -92,3 +92,26 @@ def test_reported_usage_does_not_warn(caplog):
     with caplog.at_level("WARNING"):
         acc.add(_Usage(prompt_tokens=5, completion_tokens=1), "table_summary", "chat")
     assert not [r for r in caplog.records if "No token usage reported" in r.message]
+
+
+def test_cache_excluded_prompt_count_is_corrected():
+    # argo-proxy passes Claude's usage through with cached tokens outside
+    # prompt_tokens: a 6,820-token prompt served from cache.
+    snapshot = usage_snapshot(
+        _Usage(prompt_tokens=2, completion_tokens=20, total_tokens=22,
+               prompt_tokens_details=_Usage(cached_tokens=6818))
+    )
+    assert snapshot["prompt_tokens"] == 6820
+    assert snapshot["total_tokens"] == 6840
+    assert snapshot["cached_prompt_tokens"] == 6818
+    assert snapshot["main_context_tokens"] == 2
+    # Re-normalizing the corrected snapshot must not add the cache twice.
+    assert usage_snapshot(snapshot) == snapshot
+
+
+def test_openai_style_cached_subset_is_left_alone():
+    snapshot = usage_snapshot(
+        _Usage(prompt_tokens=3619, completion_tokens=20, prompt_tokens_details=_Usage(cached_tokens=3328))
+    )
+    assert snapshot["prompt_tokens"] == 3619
+    assert snapshot["main_context_tokens"] == 291

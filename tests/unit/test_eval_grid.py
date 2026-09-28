@@ -42,3 +42,19 @@ def test_usage_rows_carry_the_context(monkeypatch):
 
     assert written[0]["meta"] == {"eval_run_id": "run-1", "eval_question_id": "q-1", "mode": "x"}
     assert written[1]["meta"] == {}  # context ends with the block
+
+
+def test_rejudge_refuses_retrieval_runs(monkeypatch):
+    from types import SimpleNamespace
+
+    import pytest
+
+    import kb_mcp.kb.eval.rejudge as rejudge
+
+    @contextmanager
+    def _session(*a, **k):
+        yield SimpleNamespace(get=lambda model, rid: SimpleNamespace(id=rid, search_type="hybrid", name="x"))
+
+    monkeypatch.setattr(rejudge, "get_db_session", _session)
+    with pytest.raises(ValueError, match="only answer-mode runs"):
+        rejudge.rejudge_run("r1", "argo:claude-opus-5")

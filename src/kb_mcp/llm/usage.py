@@ -123,6 +123,17 @@ def usage_snapshot(usage: Any) -> Dict[str, int]:
     else:
         cached_prompt_tokens = _int_field(prompt_details, "cached_tokens")
 
+    # OpenAI counts cached tokens inside prompt_tokens; Anthropic's usage does
+    # not (its input_tokens is only the uncached part), and argo-proxy passes
+    # Claude's count through unchanged -- a 7k-token prompt served from cache
+    # arrives as prompt_tokens=2, cached_tokens=6818. More cached than prompt
+    # tokens can only mean that convention, so add them back. Prompt-cache
+    # *writes* are not reported by that proxy at all and stay uncounted.
+    # Idempotent: an already-corrected snapshot has cached <= prompt.
+    if cached_prompt_tokens > prompt_tokens:
+        prompt_tokens += cached_prompt_tokens
+        total_tokens = prompt_tokens + completion_tokens
+
     # Input context actually processed, i.e. excluding what the provider
     # served from its prompt cache.
     main_context_tokens = max(prompt_tokens - cached_prompt_tokens, 0)

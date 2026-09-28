@@ -73,8 +73,9 @@ def run_grid(
     """Run every (generation, search type, answer model, judge) combination.
 
     Retrieval-only search types ignore `answer_models` and run once per
-    generation and judge. Each judge is a separate run, so answers are
-    regenerated per judge.
+    generation and judge. In answer modes each judge is a separate run, but
+    only one of them generates answers; the others re-judge it (see
+    kb.eval.rejudge), so a second judge costs judge calls only.
 
     Args:
         run_meta: Extra run meta for answer-mode runs (e.g. agentic loop limits).
@@ -98,23 +99,45 @@ def run_grid(
                 raise ValueError(f"Generation not found: {gid}")
             labels[gid] = generation_label(generation)
 
+    # One cell per run. In answer modes, the judges of one (question set,
+    # search type, answer model) share answers: one run generates them -- an
+    # existing run under any of the judges, else the first judge's -- and every
+    # other judge re-judges that run instead of answering again.
     cells = []
-    for gid in generation_ids:
-        for search_type in search_types:
-            models = answer_models if search_type in ANSWER_SEARCH_TYPES else [None]
-            for answer_model in models:
-                for judge_model in judge_models:
-                    name = grid_run_name(prefix, search_type, labels[gid], answer_model, judge_model)
-                    cells.append((name, gid, search_type, answer_model, judge_model))
+    with get_db_session() as session:
+        for gid in generation_ids:
+            for search_type in search_types:
+                models = answer_models if search_type in ANSWER_SEARCH_TYPES else [None]
+                for answer_model in models:
+                    names = [grid_run_name(prefix, search_type, labels[gid], answer_model, j) for j in judge_models]
+                    answers_from = None
+                    if search_type in ANSWER_SEARCH_TYPES and len(judge_models) > 1:
+                        answers_from = next((n for n in names if _run_has_results(session, n)), names[0])
+                    for name, judge_model in zip(names, judge_models):
+                        source = answers_from if answers_from and answers_from != name else None
+                        cells.append((name, gid, search_type, answer_model, judge_model, source))
 
     outcomes = []
-    for i, (name, gid, search_type, answer_model, judge_model) in enumerate(cells, 1):
+    for i, (name, gid, search_type, answer_model, judge_model, answers_from) in enumerate(cells, 1):
         with get_db_session() as session:
             done = _run_has_results(session, name)
+        how = f"re-judge {answers_from}" if answers_from else "run"
         if done or dry_run:
             status = "skipped" if done else "planned"
-            logger.info(f"[{i}/{len(cells)}] {status}: {name}")
-            outcomes.append({"name": name, "status": status})
+            logger.info(f"[{i}/{len(cells)}] {status} ({how}): {name}")
+            outcomes.append({"name": name, "status": status, "how": how})
+            continue
+
+        if answers_from:
+            from .rejudge import rejudge_run
+
+            with get_db_session() as session:
+                source = session.query(EvalRun).filter_by(name=answers_from).order_by(EvalRun.created_time.desc()).first()
+            if source is None:
+                raise RuntimeError(f"Answer run {answers_from} missing; cannot re-judge for {name}")
+            logger.info(f"[{i}/{len(cells)}] re-judging {answers_from} as: {name}")
+            stats = rejudge_run(source.id, judge_model, name=name, workers=workers)
+            outcomes.append({"name": name, "status": "ran", "how": how, **stats})
             continue
 
         logger.info(f"[{i}/{len(cells)}] running: {name}")
@@ -129,7 +152,7 @@ def run_grid(
             workers=workers,
             meta=run_meta if search_type == "agentic" else None,
         )
-        outcomes.append({"name": name, "status": "ran", **stats})
+        outcomes.append({"name": name, "status": "ran", "how": how, **stats})
     return outcomes
 
 
