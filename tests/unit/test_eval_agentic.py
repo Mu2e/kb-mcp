@@ -132,3 +132,19 @@ def test_limits_come_from_env_unless_given(run_agent, monkeypatch):
                             tool_result_max_chars=1000, max_turns=5)
     assert trace[0]["truncated"] is False
     assert trace[-1]["hit_turn_limit"] is False
+
+
+def test_entry_key_groups_files_versions_and_figures_of_one_docdb_entry():
+    key = runner.document_entry_key
+    same = {
+        key("mu2e-docdb", "55441-STM_US_Proc_Spec_Trolley_Assy_V3_docx"),
+        key("mu2e-docdb", "55441-STM_US_Proc_Spec_Trolley_Assy_V3_pdf"),
+        key("mu2e-docdb", "55441/STM_US_Proc_Spec_Trolley_Assy_V2"),
+        key("mu2e-docdb", "55441-STM_US_Proc_Spec_Trolley_Assy_V3_pdf-_page_4_Figure_0.png"),
+    }
+    assert same == {"mu2e-docdb:55441"}
+    assert key("mu2e-docdb", "56095") == "mu2e-docdb:56095"
+    assert key("mu2e-docdb", "554410-other") != key("mu2e-docdb", "55441-x")
+    assert key("other-source", "55441-x") != key("mu2e-docdb", "55441-x")
+    # No leading entry number: the doc id is its own entry.
+    assert key("mu2e-wiki", "Tracker/Straws") == "mu2e-wiki:Tracker/Straws"

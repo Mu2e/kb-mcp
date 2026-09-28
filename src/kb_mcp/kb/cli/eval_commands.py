@@ -239,6 +239,9 @@ def cmd_eval_run(args):
         if stats['num_questions'] > 0:
             hit_rate = stats['num_hits'] / stats['num_questions']
             print(f"  Hit rate: {hit_rate:.2%}")
+            entry_hits = stats.get('num_entry_hits', 0)
+            print(f"  Entry-level hits (any file/figure of the source entry): {entry_hits} "
+                  f"({entry_hits / stats['num_questions']:.2%})")
         print(f"  Total time: {stats['total_time_seconds']:.1f}s")
         print(f"  Avg retrieval time: {stats['avg_retrieval_time_seconds']:.3f}s")
 

@@ -1,6 +1,7 @@
 """Execution engine for evaluation runs."""
 
 import logging
+import re
 import socket
 import time
 from typing import Dict, List, Optional
@@ -339,6 +340,23 @@ def _agentic_answer(
     return final_answer, elapsed, trace, conversation
 
 
+_ENTRY_NUMBER = re.compile(r"^(\d+)(?:[-/_]|$)")
+
+
+def document_entry_key(source_id: Optional[str], doc_id: Optional[str]) -> str:
+    """Key identifying the source entry a document row belongs to.
+
+    One DocDB entry is stored as several document rows: each attached file and
+    version ("55441-..._V3_pdf", "55441/..._V2", "55441-..._V3_docx") and every
+    figure and table cut from them ("55441-..._page_4_Figure_0.png"). All
+    share the leading entry number, which is what a reader means by "the
+    document". Doc ids without a leading number key on themselves.
+    """
+    doc_id = doc_id or ""
+    match = _ENTRY_NUMBER.match(doc_id)
+    return f"{source_id}:{match.group(1) if match else doc_id}"
+
+
 def evaluate_single_question(
     run: EvalRun,
     question_id: str,
@@ -441,6 +459,20 @@ def evaluate_single_question(
                     best_similarity = chunks[0].get("similarity")
                 break
 
+        # Entry-level hit: any row of the source's DocDB entry (another file
+        # version, or a figure/table from it) counts. The exact hit above
+        # under-counts whenever an entry has more than one row.
+        from ..db_models import Document
+        source_doc = session.get(Document, question.source_document_id)
+        entry_hit_rank = None
+        if source_doc is not None:
+            source_key = document_entry_key(source_doc.source_id, source_doc.doc_id)
+            for rank, result in enumerate(search_results, start=1):
+                doc = result.get("document")
+                if doc and document_entry_key(doc.source_id, doc.doc_id) == source_key:
+                    entry_hit_rank = rank
+                    break
+
         # If not found, get best similarity from top result
         if not is_hit and search_results:
             top_result = search_results[0]
@@ -454,6 +486,7 @@ def evaluate_single_question(
         judge_time_seconds = None
         llm_answer = None
         result_meta = {
+            "entry_hit_rank": entry_hit_rank,
             "num_retrieved": len(search_results),
             "source_document_id": question.source_document_id,
             "search_type": search_type,
@@ -703,6 +736,7 @@ def execute_eval_run(
 
     start_time = time.time()
     num_hits = 0
+    num_entry_hits = 0
     num_processed = 0
     total_retrieval_time = 0.0
     lock = threading.Lock()
@@ -730,6 +764,8 @@ def execute_eval_run(
                         num_processed += 1
                         if result.is_hit:
                             num_hits += 1
+                        if (result.meta or {}).get("entry_hit_rank") is not None:
+                            num_entry_hits += 1
                         if result.retrieval_time_seconds:
                             total_retrieval_time += result.retrieval_time_seconds
                         hit_rate = num_hits / num_processed if num_processed > 0 else 0.0
@@ -755,6 +791,7 @@ def execute_eval_run(
         "run_id": run_id,
         "num_questions": num_processed,
         "num_hits": num_hits,
+        "num_entry_hits": num_entry_hits,
         "total_time_seconds": total_time,
         "avg_retrieval_time_seconds": avg_retrieval_time,
     }
