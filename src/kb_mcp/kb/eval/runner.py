@@ -13,6 +13,7 @@ from ..search.search import search
 from ..embedding.utils import get_embedding_name
 from ...eval_utils.judge import llm_judge_answer
 from ...config import get_eval_config
+from ...llm import GatewayLimitExceeded
 from ..database import get_db_session
 
 logger = logging.getLogger(__name__)
@@ -846,6 +847,12 @@ def execute_eval_run(
                             f"Hit rate: {hit_rate:.1%} ({num_hits}/{num_processed})",
                             refresh=False,
                         )
+                except GatewayLimitExceeded:
+                    # Every further call gets the same refusal: stop now and
+                    # leave the run incomplete, so a later grid run redoes it.
+                    for pending in futures:
+                        pending.cancel()
+                    raise
                 except Exception as e:
                     logger.error(f"Failed to evaluate question {futures[future]}: {e}")
                 finally:

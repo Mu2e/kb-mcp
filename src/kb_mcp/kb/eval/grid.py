@@ -50,17 +50,19 @@ def grid_run_name(
 
 
 def _run_result_count(session, name: str) -> int:
-    """Results of the most complete run with this name (0 if there is none)."""
-    from sqlalchemy import func
+    """Usable results of the most complete run with this name (0 if none).
 
-    counts = (
-        session.query(func.count(EvalResult.id))
-        .join(EvalRun, EvalRun.id == EvalResult.run_id)
-        .filter(EvalRun.name == name)
-        .group_by(EvalRun.id)
-        .all()
-    )
-    return max((c for (c,) in counts), default=0)
+    In a judged run a result only counts once it has a verdict: one the judge
+    could not produce (a broken reply, a refused request) leaves the run
+    incomplete, so the grid redoes it instead of scoring it as wrong.
+    """
+    counts = []
+    for run in session.query(EvalRun).filter(EvalRun.name == name):
+        query = session.query(EvalResult.id).filter(EvalResult.run_id == run.id)
+        if (run.judge_strategy or {}).get("enabled"):
+            query = query.filter(EvalResult.is_judge_hit.isnot(None))
+        counts.append(query.count())
+    return max(counts, default=0)
 
 
 def _run_has_results(session, name: str, expected: Optional[int] = None) -> bool:

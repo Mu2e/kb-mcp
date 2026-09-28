@@ -9,7 +9,7 @@ import logging
 import time
 from typing import Dict, Optional
 
-from ..llm import STAGE_EVAL_JUDGE, get_openai_client, parse_json_reply, record_llm_usage
+from ..llm import STAGE_EVAL_JUDGE, GatewayLimitExceeded, get_openai_client, parse_json_reply, record_llm_usage
 from ..config import get_eval_config
 
 logger = logging.getLogger(__name__)
@@ -38,7 +38,7 @@ def llm_judge_answer(
     Returns:
         Dict with:
         {
-            "is_hit": bool,  # Whether LLM judges the answer as correct
+            "is_hit": bool | None,  # Whether the judge accepts the answer; None if it could not judge
             "justification": str,  # Explanation of judgment
             "time_seconds": float,  # Time taken for judgment
         }
@@ -142,17 +142,21 @@ def llm_judge_answer(
             "time_seconds": judge_time,
         }
 
+    except GatewayLimitExceeded:
+        # Not a verdict and not retryable now: let the run stop.
+        raise
     except json.JSONDecodeError as e:
+        # is_hit None = not judged, so a broken reply never counts as "wrong".
         logger.error(f"Failed to parse LLM judge response: {e}")
         return {
-            "is_hit": False,
+            "is_hit": None,
             "justification": f"Error parsing judge response: {e}",
             "time_seconds": 0.0,
         }
     except Exception as e:
         logger.error(f"Error in LLM judge: {e}")
         return {
-            "is_hit": False,
+            "is_hit": None,
             "justification": f"Error: {e}",
             "time_seconds": 0.0,
         }

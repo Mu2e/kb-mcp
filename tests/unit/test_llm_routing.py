@@ -49,3 +49,30 @@ def test_fenced_json_reply():
 def test_unparseable_reply_still_raises():
     with pytest.raises(json.JSONDecodeError):
         parse_json_reply("The answer is yes.")
+
+
+def _completion(text):
+    from types import SimpleNamespace
+    return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=text))])
+
+
+def test_gateway_notice_is_raised_not_returned():
+    from kb_mcp.llm import GatewayLimitExceeded, check_gateway_notice
+
+    notice = "\n\n⚠️ **IMPORTANT USAGE NOTICE FROM ARGO** ⚠️\n🚫 **ACCESS REVOKED** 🚫\nDaily user limit exceeded."
+    with pytest.raises(GatewayLimitExceeded, match="ACCESS REVOKED"):
+        check_gateway_notice(_completion(notice))
+    ok = _completion("The stopping target is aluminum.")
+    assert check_gateway_notice(ok) is ok
+    assert check_gateway_notice(_completion(None)).choices[0].message.content is None
+
+
+def test_judge_errors_are_unjudged_not_wrong(monkeypatch):
+    import kb_mcp.eval_utils.judge as judge
+
+    client = type("C", (), {})()
+    client.chat = type("Ch", (), {})()
+    client.chat.completions = type("Co", (), {"create": lambda self, **k: _completion("not json")})()
+    monkeypatch.setattr(judge, "get_openai_client", lambda model=None: client)
+    monkeypatch.setattr(judge, "record_llm_usage", lambda *a, **k: None)
+    assert judge.llm_judge_answer("q?", "a", model="m", mode="answer")["is_hit"] is None

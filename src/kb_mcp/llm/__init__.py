@@ -1,6 +1,6 @@
 """LLM client utilities."""
 
-from .llm import get_openai_client, parse_json_reply
+from .llm import GatewayLimitExceeded, check_gateway_notice, get_openai_client, parse_json_reply
 from .retry import RateLimited, call_with_backoff, is_throttling
 from .usage import (
     STAGE_DOCUMENT_SUMMARY,
@@ -22,6 +22,8 @@ from .usage import (
 
 __all__ = [
     'get_openai_client',
+    'GatewayLimitExceeded',
+    'check_gateway_notice',
     'parse_json_reply',
     'RateLimited',
     'call_with_backoff',

@@ -67,3 +67,19 @@ def test_grid_treats_partial_runs_as_unfinished(session):
     assert grid._run_has_results(session, "grid-x", 2)
     assert grid._delete_runs(session, "grid-x") == 1
     assert grid._run_result_count(session, "grid-x") == 0
+
+
+def test_judged_run_is_incomplete_while_verdicts_are_missing(session):
+    from kb_mcp.kb.eval.db_models import EvalResult, EvalRetrievedDocument, EvalRun
+    from kb_mcp.kb.eval import grid
+
+    Base.metadata.create_all(session.get_bind(), tables=[EvalRun.__table__, EvalResult.__table__, EvalRetrievedDocument.__table__])
+    for qid in ("q1", "q2"):
+        _question(session, qid)
+    session.add(EvalRun(id="r", name="grid-j", generation_id="g", max_results=10,
+                        judge_strategy={"enabled": True, "model": "m"}))
+    session.add(EvalResult(run_id="r", question_id="q1", is_hit=False, is_judge_hit=True))
+    session.add(EvalResult(run_id="r", question_id="q2", is_hit=False, is_judge_hit=None))
+    session.flush()
+    assert grid._run_result_count(session, "grid-j") == 1
+    assert not grid._run_has_results(session, "grid-j", 2)

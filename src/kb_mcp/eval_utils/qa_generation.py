@@ -6,7 +6,7 @@ import json
 import logging
 from typing import Dict, List, Optional
 
-from ..llm import STAGE_EVAL_GENERATION, get_openai_client, parse_json_reply, record_llm_usage
+from ..llm import STAGE_EVAL_GENERATION, GatewayLimitExceeded, get_openai_client, parse_json_reply, record_llm_usage
 from ..config import get_eval_config
 
 logger = logging.getLogger(__name__)
@@ -186,6 +186,8 @@ Return ONLY a valid JSON object:
     except json.JSONDecodeError as e:
         logger.error(f"Failed to parse JSON response: {e}")
         return {"qa_pairs": [], "type": "qa_pairs_agentic", "model": model, "prompt": user_prompt_template}
+    except GatewayLimitExceeded:
+        raise
     except Exception as e:
         logger.error(f"Error generating agentic QA pairs: {e}")
         return {"qa_pairs": [], "type": "qa_pairs_agentic", "model": model, "prompt": user_prompt_template}
@@ -326,6 +328,8 @@ Return ONLY a valid JSON object with a "qa_pairs" array (possibly empty):
                 document_text="{document_text}"
             )
         }
+    except GatewayLimitExceeded:
+        raise
     except Exception as e:
         logger.error(f"Error generating QA pairs: {e}")
         return {
@@ -505,6 +509,8 @@ Return ONLY a valid JSON object with persona-based Q&A pairs:
             "model": model,
             "prompt": prompt_template
         }
+    except GatewayLimitExceeded:
+        raise
     except Exception as e:
         logger.error(f"Error generating persona QA pairs: {e}")
         prompt_template = """Analyze the following document and generate {num_questions} question-answer pairs for each of these user personas:

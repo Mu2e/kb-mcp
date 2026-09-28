@@ -1,10 +1,53 @@
 """LLM client utilities for OpenAI-compatible APIs."""
 
+import functools
 import logging
 
 from ..config import get_llm_config
 
 logger = logging.getLogger(__name__)
+
+# Argo answers an over-limit request with HTTP 200 and this notice as the
+# assistant message (zero usage), not with an error status -- so without a
+# check it is stored as an ordinary answer, summary or verdict.
+_GATEWAY_NOTICE_MARKERS = ("USAGE NOTICE FROM ARGO",)
+
+
+class GatewayLimitExceeded(RuntimeError):
+    """The gateway refused the request (e.g. Argo's daily limit) in a normal reply.
+
+    Raised instead of returning the reply, so the notice can never be taken
+    for model output. Retrying does not help until the limit resets.
+    """
+
+
+def check_gateway_notice(response):
+    """Raise GatewayLimitExceeded if a chat completion carries a gateway notice."""
+    for choice in getattr(response, "choices", None) or []:
+        content = getattr(getattr(choice, "message", None), "content", None) or ""
+        if any(marker in content for marker in _GATEWAY_NOTICE_MARKERS):
+            raise GatewayLimitExceeded(" ".join(content.split())[:300])
+    return response
+
+
+def _guard_completions(client, use_async: bool):
+    """Check every non-streaming chat completion for a gateway notice."""
+    completions = client.chat.completions
+    create = completions.create
+
+    if use_async:
+        @functools.wraps(create)
+        async def guarded(*args, **kwargs):
+            response = await create(*args, **kwargs)
+            return response if kwargs.get("stream") else check_gateway_notice(response)
+    else:
+        @functools.wraps(create)
+        def guarded(*args, **kwargs):
+            response = create(*args, **kwargs)
+            return response if kwargs.get("stream") else check_gateway_notice(response)
+
+    completions.create = guarded
+    return client
 
 
 def get_openai_client(model: str = None, use_async: bool = False):
@@ -56,7 +99,7 @@ def get_openai_client(model: str = None, use_async: bool = False):
         client_kwargs['base_url'] = base_url
         logger.debug(f"Using OpenAI base URL: {base_url}")
 
-    return ClientClass(**client_kwargs)
+    return _guard_completions(ClientClass(**client_kwargs), use_async)
 
 
 def _lookup_model(mapping: dict, model: str = None):

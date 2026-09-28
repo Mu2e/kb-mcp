@@ -18,6 +18,7 @@ from tqdm import tqdm
 from .db_models import EvalDataset, EvalResult, EvalRun
 from ..database import get_db_session
 from ...eval_utils.judge import llm_judge_answer
+from ...llm import GatewayLimitExceeded
 
 logger = logging.getLogger(__name__)
 
@@ -136,6 +137,10 @@ def rejudge_run(
                         done += 1
                         hits += ok
                         pbar.set_postfix_str(f"Judged correct: {hits}/{done}", refresh=False)
+                except GatewayLimitExceeded:
+                    for pending in futures:
+                        pending.cancel()
+                    raise
                 except Exception as e:
                     logger.error(f"Re-judging failed for one answer: {e}")
                 finally:
