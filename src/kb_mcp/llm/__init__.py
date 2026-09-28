@@ -16,6 +16,7 @@ from .usage import (
     STAGE_TABLE_SUMMARY,
     UsageAccumulator,
     record_llm_usage,
+    usage_context,
     usage_snapshot,
 )
 
@@ -27,6 +28,7 @@ __all__ = [
     'is_throttling',
     'record_llm_usage',
     'usage_snapshot',
+    'usage_context',
     'UsageAccumulator',
     'STAGE_TABLE_SUMMARY',
     'STAGE_IMAGE_DESCRIPTION',

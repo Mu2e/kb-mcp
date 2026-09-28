@@ -17,6 +17,8 @@ normalization, extracted so the ingest path doesn't have to import an agent.
 
 import logging
 import threading
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
@@ -42,6 +44,26 @@ STAGE_EVAL_GENERATION = "eval_generation"
 STAGE_EVAL_AUDIT = "eval_audit"
 STAGE_EVAL_ANSWER = "eval_answer"
 STAGE_EVAL_JUDGE = "eval_judge"
+
+# Extra meta merged into every llm_usage row written in the current context,
+# so calls deep in a pipeline can be attributed to what drove them (an eval
+# run and question) without passing ids through every function.
+_usage_context: ContextVar[Dict[str, Any]] = ContextVar("llm_usage_context", default={})
+
+
+@contextmanager
+def usage_context(**fields: Any):
+    """Tag every llm_usage row recorded inside the block with `fields`.
+
+    Context variables are per thread, so set this inside each worker, not
+    around a thread pool.
+    """
+    token = _usage_context.set({**_usage_context.get(), **fields})
+    try:
+        yield
+    finally:
+        _usage_context.reset(token)
+
 
 USAGE_FIELDS = (
     "prompt_tokens",
@@ -242,6 +264,7 @@ def record_llm_usage(
     Returns:
         The usage snapshot (all zeros if nothing was reported).
     """
+    meta = {**_usage_context.get(), **(meta or {})}
     if accumulator is not None:
         snapshot = accumulator.add(usage, stage=stage, model=model)
     else:

@@ -390,6 +390,87 @@ def cmd_eval_load_benchmark(args):
         sys.exit(1)
 
 
+def _print_compare_table(rows, strip_prefix=None):
+    """Print compare_runs() rows as a fixed-width table."""
+    def frac(n, d):
+        return f"{n}/{d}" if d else "-"
+
+    def opt(v, fmt="{}"):
+        return fmt.format(v) if v is not None else "-"
+
+    header = f"{'Run':<58}{'Q':>4}{'Exact':>7}{'Entry':>7}{'Judge':>7}{'Saw':>6}{'Open':>6}{'Limit':>6}{'Stop':>5}{'Ans s':>7}{'Ans tok':>10}{'Jdg tok':>9}"
+    print(header)
+    print("-" * len(header))
+    for r in rows:
+        name = r["name"] or r["run_id"][:8]
+        if strip_prefix and name.startswith(strip_prefix):
+            name = name[len(strip_prefix):].lstrip("-") or name
+        n = r["questions"]
+        print(
+            f"{name[:57]:<58}{n:>4}"
+            f"{frac(r['exact_hits'], n):>7}{frac(r['entry_hits'], n) if r['entry_hits'] is not None else '-':>7}"
+            f"{frac(r['judge_correct'], r['judged']):>7}"
+            f"{opt(r['agent_saw_source']):>6}{opt(r['agent_opened_source']):>6}"
+            f"{opt(r['turn_limit']):>6}{opt(r['stopped']):>5}"
+            f"{opt(r['avg_answer_seconds'], '{:.0f}'):>7}"
+            f"{opt(r['answer_tokens'], '{:,}'):>10}{opt(r['judge_tokens'], '{:,}'):>9}"
+        )
+    print()
+    print("Exact: source row in the retrieved list; Entry: any file/figure of the source's DocDB entry;")
+    print("Judge: answers judged correct; Saw/Open: agent saw the source in a tool result / opened it with kb_get;")
+    print("Limit/Stop: agent hit the turn limit / was stopped by the endpoint (e.g. context overflow).")
+    print("For agentic and llm_only runs, Exact/Entry come from a separate search the agent never sees.")
+
+
+def cmd_eval_grid(args):
+    """Run every combination of question set, search type, answering model and judge."""
+    from ..eval.grid import run_grid
+
+    agentic_meta = None
+    if "agentic" in args.search_type:
+        eval_config = get_eval_config()
+        agentic_meta = {
+            "max_turns": args.max_turns or eval_config["agentic_max_turns"],
+            "tool_result_max_chars": args.tool_result_max_chars or eval_config["agentic_tool_result_max_chars"],
+        }
+    outcomes = run_grid(
+        prefix=args.prefix,
+        generation_ids=args.generation_id,
+        search_types=args.search_type,
+        answer_models=args.answer_model or [None],
+        judge_models=args.judge_model or [None],
+        max_results=args.max_results,
+        workers=args.workers,
+        run_meta=agentic_meta,
+        dry_run=args.dry_run,
+    )
+    for o in outcomes:
+        print(f"{o['status']:>8}  {o['name']}")
+    if args.dry_run:
+        return
+    print()
+    from ..eval.grid import compare_runs
+    _print_compare_table(compare_runs(name_prefix=args.prefix), strip_prefix=args.prefix)
+
+
+def cmd_eval_compare(args):
+    """Show runs side by side."""
+    from ..eval.grid import compare_runs
+
+    if not args.prefix and not args.run_id:
+        print("Error: give --prefix and/or --run-id")
+        sys.exit(1)
+    rows = compare_runs(name_prefix=args.prefix, run_ids=args.run_id)
+    if not rows:
+        print("No runs found.")
+        return
+    if args.json:
+        import json
+        print(json.dumps(rows, indent=2))
+        return
+    _print_compare_table(rows, strip_prefix=args.prefix)
+
+
 def setup_commands(subparsers):
     """Set up evaluation commands."""
     # Eval command
@@ -440,6 +521,28 @@ def setup_commands(subparsers):
     eval_run_parser.add_argument("--rerank", action="store_true", help="Enable cross-encoder reranking")
     eval_run_parser.add_argument("--no-rerank", action="store_true", help="Disable cross-encoder reranking")
     eval_run_parser.set_defaults(func=cmd_eval_run)
+
+    # eval grid
+    eval_grid_parser = eval_subparsers.add_parser(
+        "grid", help="Run every combination of question set, search type, answer model and judge; skips runs that already have results")
+    eval_grid_parser.add_argument("--prefix", required=True, help="Run name prefix, e.g. pilot-20260927; each run is named <prefix>-<type>[-<model>]-q<set>[-judge-<judge>]")
+    eval_grid_parser.add_argument("--generation-id", action="append", required=True, help="Question set (generation) to evaluate; repeatable")
+    eval_grid_parser.add_argument("--search-type", action="append", required=True, choices=["semantic", "fulltext", "hybrid", "rag", "agentic", "llm_only"], help="Repeatable")
+    eval_grid_parser.add_argument("--answer-model", action="append", help="Answering model for rag/agentic/llm_only; repeatable (default: EVAL_ANSWER_MODEL)")
+    eval_grid_parser.add_argument("--judge-model", action="append", help="Judge model; repeatable, one run per judge (default: no judge)")
+    eval_grid_parser.add_argument("--max-results", type=int, default=10, help="Max search results to retrieve")
+    eval_grid_parser.add_argument("--max-turns", type=int, metavar="N", help="agentic: max tool rounds (default: EVAL_AGENTIC_MAX_TURNS, else 10)")
+    eval_grid_parser.add_argument("--tool-result-max-chars", type=int, metavar="N", help="agentic: per-tool-result cap (default: EVAL_AGENTIC_TOOL_RESULT_MAX_CHARS, else 100000)")
+    eval_grid_parser.add_argument("--workers", type=int, default=1, metavar="N", help="Parallel questions per run (default: 1)")
+    eval_grid_parser.add_argument("--dry-run", action="store_true", help="Only list the runs, marking which would be skipped")
+    eval_grid_parser.set_defaults(func=cmd_eval_grid)
+
+    # eval compare
+    eval_compare_parser = eval_subparsers.add_parser("compare", help="Show runs side by side (retrieval hits, judge verdicts, agent behaviour, tokens)")
+    eval_compare_parser.add_argument("--prefix", help="Runs whose name starts with this")
+    eval_compare_parser.add_argument("--run-id", action="append", help="Run id; repeatable")
+    eval_compare_parser.add_argument("--json", action="store_true", help="Output as JSON")
+    eval_compare_parser.set_defaults(func=cmd_eval_compare)
 
     # eval stats
     eval_stats_parser = eval_subparsers.add_parser("stats", help="Show evaluation statistics")

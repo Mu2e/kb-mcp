@@ -742,14 +742,19 @@ def execute_eval_run(
     lock = threading.Lock()
 
     def _evaluate(question_id: str):
-        # Each worker gets its own DB session
-        result = evaluate_single_question(
-            run=run_snapshot,
-            question_id=question_id,
-            use_llm_judge=use_llm_judge,
-            rerank=rerank,
-            session=None,
-        )
+        from ...llm import usage_context
+
+        # Each worker gets its own DB session. The usage context tags this
+        # question's answer and judge calls in llm_usage with the run, so a
+        # run's token cost can be read back (see `kb eval compare`).
+        with usage_context(eval_run_id=run_snapshot.id, eval_question_id=question_id):
+            result = evaluate_single_question(
+                run=run_snapshot,
+                question_id=question_id,
+                use_llm_judge=use_llm_judge,
+                rerank=rerank,
+                session=None,
+            )
         return result
 
     from concurrent.futures import ThreadPoolExecutor, as_completed
