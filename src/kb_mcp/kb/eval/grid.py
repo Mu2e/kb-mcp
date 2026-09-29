@@ -72,13 +72,17 @@ def _run_has_results(session, name: str, expected: Optional[int] = None) -> bool
     return count > 0 if expected is None else count >= expected
 
 
-def _delete_runs(session, name: str) -> int:
-    """Delete every run with this name; results cascade in the database."""
-    runs = session.query(EvalRun).filter_by(name=name).all()
-    for run in runs:
-        session.delete(run)
-    session.commit()
-    return len(runs)
+def _most_complete_run_id(session, name: str) -> Optional[str]:
+    """The run with this name that has the most usable results, to resume."""
+    best, best_count = None, -1
+    for run in session.query(EvalRun).filter(EvalRun.name == name):
+        query = session.query(EvalResult.id).filter(EvalResult.run_id == run.id)
+        if (run.judge_strategy or {}).get("enabled"):
+            query = query.filter(EvalResult.is_judge_hit.isnot(None))
+        count = query.count()
+        if count > best_count:
+            best, best_count = run.id, count
+    return best
 
 
 def run_grid(
@@ -154,13 +158,10 @@ def run_grid(
         with get_db_session() as session:
             count = _run_result_count(session, name)
             done = count >= expected[gid] and count > 0
-            if count and not done and not dry_run:
-                removed = _delete_runs(session, name)
-                logger.warning(f"[{i}/{len(cells)}] {name}: incomplete ({count}/{expected[gid]}); "
-                               f"deleted {removed} run(s) to redo it")
+            resume_id = _most_complete_run_id(session, name) if count and not done else None
         how = f"re-judge {answers_from}" if answers_from else "run"
         if done or dry_run:
-            status = "skipped" if done else ("planned (redo, incomplete)" if count else "planned")
+            status = "skipped" if done else (f"planned (resume, {count}/{expected[gid]} done)" if count else "planned")
             logger.info(f"[{i}/{len(cells)}] {status} ({how}): {name}")
             outcomes.append({"name": name, "status": status, "how": how})
             continue
@@ -172,9 +173,19 @@ def run_grid(
                 source = session.query(EvalRun).filter_by(name=answers_from).order_by(EvalRun.created_time.desc()).first()
             if source is None:
                 raise RuntimeError(f"Answer run {answers_from} missing; cannot re-judge for {name}")
-            logger.info(f"[{i}/{len(cells)}] re-judging {answers_from} as: {name}")
-            stats = rejudge_run(source.id, judge_model, name=name, workers=workers)
+            logger.info(f"[{i}/{len(cells)}] {'resuming' if resume_id else 're-judging'} {answers_from} as: {name}")
+            stats = rejudge_run(source.id, judge_model, name=name, workers=workers, resume_run_id=resume_id)
             outcomes.append({"name": name, "status": "ran", "how": how, **stats})
+            continue
+
+        if resume_id:
+            # An interrupted run: keep its answers and answer only the rest.
+            from .runner import execute_eval_run
+
+            logger.info(f"[{i}/{len(cells)}] resuming ({count}/{expected[gid]} done): {name}")
+            stats = execute_eval_run(resume_id, use_llm_judge=judge_model is not None,
+                                     workers=workers, resume=True)
+            outcomes.append({"name": name, "status": "ran", "how": "resume", **stats})
             continue
 
         logger.info(f"[{i}/{len(cells)}] running: {name}")

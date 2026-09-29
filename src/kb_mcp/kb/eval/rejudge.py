@@ -38,8 +38,13 @@ def rejudge_run(
     judge_model: str,
     name: Optional[str] = None,
     workers: int = 1,
+    resume_run_id: Optional[str] = None,
 ) -> Dict:
     """Create a run that re-judges `source_run_id`'s answers with `judge_model`.
+
+    With `resume_run_id`, continue that earlier, interrupted re-judge run
+    instead: its unscored results are dropped and only answers without a
+    verdict are judged.
 
     Args:
         source_run_id: Run whose answers are judged again.
@@ -70,20 +75,32 @@ def rejudge_run(
             base = (source.name or f"run-{source.id[:8]}").split("-judge-", 1)[0]
             name = f"{base}-judge-{model_label(judge_model)}"
 
-        run = EvalRun(
-            name=name,
-            description=f"Re-judged answers of run {source.id} with {judge_model}",
-            generation_id=source.generation_id,
-            audit_filters=source.audit_filters,
-            search_type=source.search_type,
-            embedding_name=source.embedding_name,
-            chunking_strategy=source.chunking_strategy,
-            max_results=source.max_results,
-            search_filters=source.search_filters,
-            judge_strategy={"enabled": True, "model": judge_model},
-            meta={**(source.meta or {}), "rejudged_from_run_id": source.id},
-        )
-        session.add(run)
+        done_questions = set()
+        if resume_run_id:
+            run = session.get(EvalRun, resume_run_id)
+            if run is None:
+                raise ValueError(f"Run to resume not found: {resume_run_id}")
+            for result in session.query(EvalResult).filter_by(run_id=run.id).all():
+                if result.is_judge_hit is None:
+                    session.delete(result)
+                else:
+                    done_questions.add(result.question_id)
+            name = run.name
+        else:
+            run = EvalRun(
+                name=name,
+                description=f"Re-judged answers of run {source.id} with {judge_model}",
+                generation_id=source.generation_id,
+                audit_filters=source.audit_filters,
+                search_type=source.search_type,
+                embedding_name=source.embedding_name,
+                chunking_strategy=source.chunking_strategy,
+                max_results=source.max_results,
+                search_filters=source.search_filters,
+                judge_strategy={"enabled": True, "model": judge_model},
+                meta={**(source.meta or {}), "rejudged_from_run_id": source.id},
+            )
+            session.add(run)
         session.commit()
         run_id = run.id
 
@@ -92,6 +109,7 @@ def rejudge_run(
             (r.id, r.question_id, r.is_hit, r.hit_rank, r.retrieval_time_seconds, r.best_similarity,
              {k: (r.meta or {}).get(k) for k in _COPIED_META if k in (r.meta or {})})
             for r in session.query(EvalResult).filter_by(run_id=source.id).all()
+            if r.question_id not in done_questions
         ]
 
     def _judge(item):

@@ -65,8 +65,8 @@ def test_grid_treats_partial_runs_as_unfinished(session):
     assert grid._run_has_results(session, "grid-x")          # any result
     assert not grid._run_has_results(session, "grid-x", 3)   # but not all three
     assert grid._run_has_results(session, "grid-x", 2)
-    assert grid._delete_runs(session, "grid-x") == 1
-    assert grid._run_result_count(session, "grid-x") == 0
+    assert grid._most_complete_run_id(session, "grid-x") == "r"
+    assert grid._most_complete_run_id(session, "no-such-run") is None
 
 
 def test_judged_run_is_incomplete_while_verdicts_are_missing(session):

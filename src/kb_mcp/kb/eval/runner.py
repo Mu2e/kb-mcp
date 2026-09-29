@@ -717,12 +717,18 @@ def execute_eval_run(
     use_llm_judge: bool = False,
     workers: int = 1,
     rerank: Optional[bool] = None,
+    resume: bool = False,
     session=None,
 ) -> Dict:
     """Execute an evaluation run.
 
     Retrieves questions based on run configuration, evaluates each,
     and stores results.
+
+    With `resume`, an interrupted run is continued instead of redone: results
+    the judge could not score are dropped, questions that already have a
+    result are skipped, and only the rest are answered -- so answers already
+    paid for are kept when a run was cut short (e.g. by a gateway's limit).
 
     Args:
         run_id: Run ID to execute
@@ -785,6 +791,19 @@ def execute_eval_run(
         skipped = len(questions) - len(question_ids)
         if skipped:
             logger.warning(f"Skipping {skipped} question(s) with no source_document_id")
+
+        if resume:
+            judged = bool((run.judge_strategy or {}).get("enabled"))
+            existing = db.query(EvalResult).filter(EvalResult.run_id == run.id).all()
+            kept = set()
+            for result in existing:
+                if judged and result.is_judge_hit is None:
+                    db.delete(result)
+                else:
+                    kept.add(result.question_id)
+            db.commit()
+            question_ids = [qid for qid in question_ids if qid not in kept]
+            logger.info(f"Resuming run {run_id}: {len(kept)} results kept, {len(question_ids)} questions left")
 
         # Detach a plain-dict copy of run config for workers to read without a session
         run_snapshot = EvalRun(
