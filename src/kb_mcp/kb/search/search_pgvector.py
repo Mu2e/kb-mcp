@@ -67,6 +67,63 @@ def _search_pgvector(
     if max_chunks_per_doc is None:
         max_chunks_per_doc = search_config['max_chunks_per_doc']
 
+    def _empty(**extra) -> Dict[str, Any]:
+        return {
+            "results": [],
+            "metadata": {
+                "time_search_total": time.time() - start_time,
+                "time_embedding": embedding_time,
+                "total_results": 0,
+                "embedding_name": embedding_name,
+                "max_results": max_results,
+                **extra,
+            },
+        }
+
+    # A bound on every statement below. Measured 2026-09-30: a source_id
+    # filter that no embedded chunk passes (mu2e-wiki -- none of the 477,500
+    # chunks in embeddings_st_bgesmallenv1_5) made the iterative index scan
+    # below read the whole index, one scalar subquery per row: 203 s and
+    # still no rows, longer than an MCP client waits in silence. A search
+    # that runs out of time fails loudly (search_hybrid keeps its full-text
+    # half); it never hangs. SEARCH_VECTOR_TIMEOUT_MS, 0 = no bound.
+    timeout_ms = int(search_config['vector_timeout_ms'])
+    if timeout_ms > 0:
+        session.execute(text(f"SET LOCAL statement_timeout = {timeout_ms}"))
+
+    # How many embedded chunks can pass the filters? Counted up to one past
+    # SEARCH_EXACT_MAX_CHUNKS, so a broad filter stops early; the join starts
+    # from the filtered documents, so a narrow one is cheap to count too.
+    #  - none: there is nothing to rank, so the vector query is skipped.
+    #  - up to SEARCH_EXACT_MAX_CHUNKS: rank them exactly (`filtered` below).
+    #    An exact ranking of all 477,500 chunks took 1.0 s (2026-09-30), so a
+    #    subset of that size costs a fraction of it, and it is exact.
+    #  - more: the index path, where a filter most chunks pass lets the
+    #    iterative scan stop early.
+    vector_path = "index"
+    filtered_chunks = None
+    if where_clause_sql != "TRUE":
+        exact_max = int(search_config['exact_max_chunks'])
+        filtered_chunks = session.execute(
+            text(f"""
+                SELECT count(*) FROM (
+                    SELECT 1
+                    FROM {embedding_table.name} e
+                    JOIN chunks c ON c.id = e.chunk_id
+                    JOIN documents d ON c.document_id = d.id
+                    WHERE {where_clause_sql}
+                    LIMIT :count_cap
+                ) passing
+            """),
+            {"count_cap": exact_max + 1, **filter_params_dict},
+        ).scalar()
+        if filtered_chunks == 0:
+            if timeout_ms > 0:
+                session.execute(text("SET LOCAL statement_timeout = DEFAULT"))
+            return _empty(vector_path="no_match", filtered_chunks=0)
+        if filtered_chunks <= exact_max:
+            vector_path = "exact"
+
     # Nearest neighbours first, per-document diversity second. The ORDER BY
     # distance LIMIT in `knn` is what lets the vector index do the work. The
     # filters are a per-row scalar subquery rather than a join on purpose:
@@ -82,8 +139,28 @@ def _search_pgvector(
     # Ranking inside the top candidates gives the same ranks as ranking all
     # chunks: every chunk of a document that is closer than a candidate is a
     # candidate too. So only the index's approximation can change results.
-    vector_query = f"""
-        WITH knn AS MATERIALIZED (
+    if vector_path == "exact":
+        # The subset is small, so filter first and compute every distance:
+        # the MATERIALIZED `filtered` keeps the index out of the ORDER BY.
+        knn_ctes = f"""
+        filtered AS MATERIALIZED (
+            SELECT e.chunk_id, e.embedding
+            FROM {embedding_table.name} e
+            JOIN chunks c ON c.id = e.chunk_id
+            JOIN documents d ON c.document_id = d.id
+            WHERE {where_clause_sql}
+        ),
+        knn AS MATERIALIZED (
+            SELECT
+                f.chunk_id,
+                (f.embedding <=> CAST(:query_embedding AS vector)) AS distance
+            FROM filtered f
+            ORDER BY distance
+            LIMIT :initial_limit
+        )"""
+    else:
+        knn_ctes = f"""
+        knn AS MATERIALIZED (
             SELECT
                 e.chunk_id,
                 (e.embedding <=> CAST(:query_embedding AS vector)) AS distance
@@ -97,7 +174,9 @@ def _search_pgvector(
             )
             ORDER BY e.embedding <=> CAST(:query_embedding AS vector)
             LIMIT :initial_limit
-        ),
+        )"""
+    vector_query = f"""
+        WITH {knn_ctes},
         nearest AS (
             SELECT
                 c.id AS chunk_id,
@@ -158,13 +237,25 @@ def _search_pgvector(
     #    reject candidates, keep reading the index instead of returning fewer
     #    than LIMIT rows (pgvector >= 0.8). relaxed_order is fine: the ranking
     #    below recomputes order from the distances.
+    #  - ivfflat.max_probes: how far that iterative scan may go (pgvector >=
+    #    0.8; by default, every list). With only broad filters reaching this
+    #    path it rarely matters, but it bounds a filter that passes many
+    #    chunks none of which are near the query. SEARCH_IVFFLAT_MAX_PROBES.
     #  - work_mem: room for the sorts, which otherwise spill to disk.
-    for setting in (
-        f"SET LOCAL ivfflat.probes = {int(search_config['ivfflat_probes'])}",
-        "SET LOCAL ivfflat.iterative_scan = relaxed_order",
-        "SET LOCAL work_mem = '64MB'",
-        "SET LOCAL enable_seqscan = off",
-    ):
+    # The exact path computes every distance on purpose, so it takes only
+    # work_mem: the index settings, and enable_seqscan = off, are for the
+    # index scan.
+    if vector_path == "exact":
+        settings = ("SET LOCAL work_mem = '64MB'",)
+    else:
+        settings = (
+            f"SET LOCAL ivfflat.probes = {int(search_config['ivfflat_probes'])}",
+            "SET LOCAL ivfflat.iterative_scan = relaxed_order",
+            f"SET LOCAL ivfflat.max_probes = {int(search_config['ivfflat_max_probes'])}",
+            "SET LOCAL work_mem = '64MB'",
+            "SET LOCAL enable_seqscan = off",
+        )
+    for setting in settings:
         # A savepoint per setting: a failed statement aborts the whole
         # transaction in Postgres, so without it an older pgvector rejecting
         # one setting would take the search down with it.
@@ -193,24 +284,18 @@ def _search_pgvector(
         print("Query execution plan:\n" + "\n".join(explain_output))
 
     results = session.execute(text(vector_query), query_params).all()
+    # SET LOCAL outlives this query when the caller's savepoint is released:
+    # the full-text half of a hybrid search runs in the same transaction.
+    if timeout_ms > 0:
+        session.execute(text("SET LOCAL statement_timeout = DEFAULT"))
 
     logger.debug(
-        "Using pgvector native operators with CTEs, retrieved %d chunk results",
-        len(results),
+        "Using pgvector native operators with CTEs (%s path), retrieved %d chunk results",
+        vector_path, len(results),
     )
 
     if not results:
-        time_search_total = time.time() - start_time
-        return {
-            "results": [],
-            "metadata": {
-                "time_search_total": time_search_total,
-                "time_embedding": embedding_time,
-                "total_results": 0,
-                "embedding_name": embedding_name,
-                "max_results": max_results,
-            },
-        }
+        return _empty(vector_path=vector_path, filtered_chunks=filtered_chunks)
 
     # Group by document and fetch Document objects
     dedup_start = time.time()
@@ -285,6 +370,8 @@ def _search_pgvector(
             "total_results": len(final_results),
             "embedding_name": embedding_name,
             "max_results": max_results,
+            "vector_path": vector_path,
+            "filtered_chunks": filtered_chunks,
         },
     }
 
