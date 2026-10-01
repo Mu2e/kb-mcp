@@ -176,3 +176,22 @@ def test_single_shot_rag_searches_once_and_answers(monkeypatch):
     assert client.requests[0]["messages"][0]["content"] == "server instructions"
     assert trace[0]["tool"] == "kb_search" and trace[0]["truncated"]
     assert trace[-1]["saw_source"] is True and trace[-1]["tool_calls"] == 1
+
+
+def test_empty_reply_is_nudged_not_taken_as_the_answer(run_agent):
+    answer, trace, client = run_agent([_text_reply(""), _text_reply("the real answer")], {})
+    assert answer == "the real answer"
+    user_texts = [m["content"] for m in client.requests[1]["messages"] if isinstance(m, dict) and m.get("role") == "user"]
+    assert any("neither an answer nor a tool call" in t for t in user_texts)
+    assert trace[-1]["nudges"] == 1
+
+
+def test_empty_forced_answer_is_requested_again(run_agent):
+    answer, trace, client = run_agent(
+        [_tool_call_reply(), _text_reply(""), _text_reply("final")], {"kb_search": "r"}, max_turns=1
+    )
+    assert answer == "final"
+    assert client.requests[1]["tool_choice"] == client.requests[2]["tool_choice"] == "none"
+    user_texts = [m["content"] for m in client.requests[1]["messages"] if isinstance(m, dict) and m.get("role") == "user"]
+    assert sum("used all available tool calls" in t for t in user_texts) == 2  # first ask, then the retry
+    assert trace[-1]["hit_turn_limit"] is True and trace[-1]["nudges"] == 1

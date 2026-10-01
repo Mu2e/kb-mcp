@@ -202,6 +202,18 @@ AGENTIC_TOOLS = ("kb_search", "kb_get")
 # (the largest is ~300M chars), so the eval client truncates -- and says so --
 # until the server pages kb_get itself.
 
+#: Prompts a client would send after an empty reply; nudges are recorded in
+#: the trace so affected answers stay identifiable.
+AGENTIC_MAX_NUDGES = 2
+_EMPTY_REPLY_NUDGE = (
+    "Your last reply contained neither an answer nor a tool call. Continue: call a tool "
+    "if you need more information, otherwise give your final answer."
+)
+_FINAL_ANSWER_REQUEST = (
+    "You have used all available tool calls. Write your final answer to the question now, "
+    "based on the information gathered above."
+)
+
 _agentic_server = None
 
 
@@ -279,6 +291,7 @@ def _agentic_answer(
     messages += [{"role": m.role, "content": m.content.text} for m in prompt.messages]
 
     trace = []
+    nudges = 0
     saw_source = opened_source = False
     start = time.time()
     got_final_answer = False
@@ -307,6 +320,14 @@ def _agentic_answer(
         messages.append(msg)
 
         if not msg.tool_calls:
+            if not (msg.content or "").strip() and nudges < AGENTIC_MAX_NUDGES:
+                # Neither an answer nor a tool call -- gpt-oss sometimes writes
+                # its tool call into its reasoning instead of emitting it. A
+                # client would prompt again rather than show a blank reply.
+                nudges += 1
+                trace.append({"nudge": "empty_reply"})
+                messages.append({"role": "user", "content": _EMPTY_REPLY_NUDGE})
+                continue
             got_final_answer = True
             break
 
@@ -338,24 +359,33 @@ def _agentic_answer(
             })
             messages.append({"role": "tool", "tool_call_id": tc.id, "content": tool_result})
 
-    # Out of turns without a text answer: one more call with tools disabled.
+    # Out of turns without a text answer: ask for the answer with tools
+    # disabled, saying so explicitly -- without the instruction some models
+    # (opus-5) reply with reasoning only and no text. One retry if still empty.
     if not got_final_answer and stopped_by is None:
-        response = client.chat.completions.create(
-            model=model,
-            messages=messages,
-            tools=tools,
-            tool_choice="none",
-            max_tokens=16384,
-        )
-        record_llm_usage(response.usage, stage=STAGE_EVAL_ANSWER, model=model, meta={"mode": "agentic"})
-        msg = response.choices[0].message
-        messages.append(msg)
+        messages.append({"role": "user", "content": _FINAL_ANSWER_REQUEST})
+        for attempt in range(2):
+            response = client.chat.completions.create(
+                model=model,
+                messages=messages,
+                tools=tools,
+                tool_choice="none",
+                max_tokens=16384,
+            )
+            record_llm_usage(response.usage, stage=STAGE_EVAL_ANSWER, model=model, meta={"mode": "agentic"})
+            msg = response.choices[0].message
+            messages.append(msg)
+            if (msg.content or "").strip():
+                break
+            trace.append({"nudge": "empty_final_answer"})
+            messages.append({"role": "user", "content": _FINAL_ANSWER_REQUEST})
 
     elapsed = time.time() - start
     final_answer = (msg.content or "") if (msg is not None and stopped_by is None) else ""
     trace.append({
         "summary": True,
         "tool_calls": sum(1 for t in trace if "tool" in t),
+        "nudges": sum(1 for t in trace if "nudge" in t),
         "hit_turn_limit": not got_final_answer and stopped_by is None,
         "stopped_by": stopped_by,
         "saw_source": saw_source,
