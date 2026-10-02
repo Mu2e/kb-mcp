@@ -423,6 +423,30 @@ def document_entry_key(source_id: Optional[str], doc_id: Optional[str]) -> str:
     return f"{source_id}:{match.group(1) if match else doc_id}"
 
 
+def describe_reference_source(doc) -> Optional[str]:
+    """One line naming a question's source document for the judge.
+
+    "mu2e-docdb 52249-intro_04_01_25 'Trigger meeting introduction', 2025-04-01"
+    -- the DocDB number and date let the judge tell newer sources from older.
+    """
+    if doc is None:
+        return None
+    title = getattr(doc, "title", None) or getattr(doc, "title_gen", None)
+    created = getattr(doc, "creating_time", None)
+    parts = [f"{doc.source_id} {doc.doc_id}"]
+    if title:
+        parts.append(f"'{title}'")
+    line = " ".join(parts)
+    return f"{line}, {created:%Y-%m-%d}" if created else line
+
+
+def record_judge_fields(result_meta: Dict, judge_result: Dict) -> None:
+    """Store an answer-mode verdict's source fields in a result's meta."""
+    if judge_result.get("source_relation") is not None:
+        result_meta["judge_source_relation"] = judge_result["source_relation"]
+        result_meta["judge_acknowledges_conflict"] = judge_result.get("acknowledges_conflict")
+
+
 _TOOL_RESULT_DOC_IDS = (
     re.compile(r'"doc_id":\s*"([^"]+)"'),  # kb_search results
     re.compile(r"^ID:\s*(\S+)", re.MULTILINE),  # kb_get / metadata headers
@@ -561,6 +585,7 @@ def evaluate_single_question(
         source_doc = session.get(Document, question.source_document_id)
         entry_hit_rank = None
         source_key = None
+        reference_source = describe_reference_source(source_doc)
         if source_doc is not None:
             source_key = document_entry_key(source_doc.source_id, source_doc.doc_id)
             for rank, result in enumerate(search_results, start=1):
@@ -619,10 +644,12 @@ def evaluate_single_question(
                 expected_answer=question.answer,
                 model=judge_model,
                 mode="answer",
+                reference_source=reference_source,
             )
             is_judge_hit = judge_result["is_hit"]
             justification = judge_result["justification"]
             judge_time_seconds = judge_result["time_seconds"]
+            record_judge_fields(result_meta, judge_result)
 
         elif search_type in ("semantic", "fulltext", "hybrid"):
             # Retrieval-only: optionally judge whether context contains the answer
@@ -637,6 +664,7 @@ def evaluate_single_question(
                 is_judge_hit = judge_result["is_hit"]
                 justification = judge_result["justification"]
                 judge_time_seconds = judge_result["time_seconds"]
+                record_judge_fields(result_meta, judge_result)
 
         elif search_type == "rag":
             # Single-shot RAG: one real kb_search, then one answer (see _rag_answer)
@@ -658,10 +686,12 @@ def evaluate_single_question(
                     expected_answer=question.answer,
                     model=judge_model,
                     mode="answer",
+                    reference_source=reference_source,
                 )
                 is_judge_hit = judge_result["is_hit"]
                 justification = judge_result["justification"]
                 judge_time_seconds = judge_result["time_seconds"]
+                record_judge_fields(result_meta, judge_result)
 
         elif search_type == "agentic":
             # Agentic: LLM answers through the real MCP tools (see _agentic_answer)
@@ -688,10 +718,12 @@ def evaluate_single_question(
                     expected_answer=question.answer,
                     model=judge_model,
                     mode="answer",
+                    reference_source=reference_source,
                 )
                 is_judge_hit = judge_result["is_hit"]
                 justification = judge_result["justification"]
                 judge_time_seconds = judge_result["time_seconds"]
+                record_judge_fields(result_meta, judge_result)
 
         # Create result record
         result = EvalResult(

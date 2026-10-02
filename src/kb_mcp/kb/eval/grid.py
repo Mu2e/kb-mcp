@@ -38,14 +38,21 @@ def grid_run_name(
     generation: str,
     answer_model: Optional[str] = None,
     judge_model: Optional[str] = None,
+    judge_version: int = 1,
 ) -> str:
-    """`<prefix>-<search type>[-<answer model>]-q<question set>[-judge-<judge>]`."""
+    """`<prefix>-<search type>[-<answer model>]-q<question set>[-judge-<judge>[-v<N>]]`.
+
+    The judge prompt version is part of the name from version 2 on, so runs
+    judged by different prompts are distinct; version 1 names are unchanged.
+    """
     parts = [prefix, search_type]
     if search_type in ANSWER_SEARCH_TYPES:
         parts.append(model_label(answer_model))
     parts.append(f"q{generation}")
     if judge_model:
         parts += ["judge", model_label(judge_model)]
+        if judge_version > 1:
+            parts.append(f"v{judge_version}")
     return "-".join(parts)
 
 
@@ -121,7 +128,9 @@ def run_grid(
     judge_models = list(judge_models) or [None]
 
     from .db_models import get_eval_questions
+    from ...eval_utils.judge import JUDGE_PROMPT_VERSION
 
+    judge_version = JUDGE_PROMPT_VERSION
     with get_db_session() as session:
         labels, expected = {}, {}
         for gid in generation_ids:
@@ -144,11 +153,18 @@ def run_grid(
             for search_type in search_types:
                 models = answer_models if search_type in ANSWER_SEARCH_TYPES else [None]
                 for answer_model in models:
-                    names = [grid_run_name(prefix, search_type, labels[gid], answer_model, j) for j in judge_models]
+                    names = [grid_run_name(prefix, search_type, labels[gid], answer_model, j, judge_version)
+                             for j in judge_models]
                     answers_from = None
-                    if search_type in ANSWER_SEARCH_TYPES and len(judge_models) > 1:
-                        answers_from = next(
-                            (n for n in names if _run_has_results(session, n, expected[gid])), names[0])
+                    if search_type in ANSWER_SEARCH_TYPES:
+                        # Answers made under an earlier judge prompt are reused too:
+                        # a new judge version re-judges them rather than answering again.
+                        earlier = [grid_run_name(prefix, search_type, labels[gid], answer_model, j, v)
+                                   for v in range(judge_version - 1, 0, -1) for j in judge_models if j]
+                        existing = next((n for n in names + earlier
+                                         if _run_has_results(session, n, expected[gid])), None)
+                        if existing or len(judge_models) > 1:
+                            answers_from = existing or names[0]
                     for name, judge_model in zip(names, judge_models):
                         source = answers_from if answers_from and answers_from != name else None
                         cells.append((name, gid, search_type, answer_model, judge_model, source))
@@ -195,7 +211,8 @@ def run_grid(
             search_type=search_type,
             max_results=max_results,
             answer_model=answer_model if search_type in ANSWER_SEARCH_TYPES else None,
-            judge_strategy={"enabled": True, "model": judge_model} if judge_model else None,
+            judge_strategy=({"enabled": True, "model": judge_model, "prompt_version": judge_version}
+                            if judge_model else None),
             use_llm_judge=judge_model is not None,
             workers=workers,
             meta=run_meta if search_type == "agentic" else None,
@@ -239,10 +256,26 @@ def _result_rows(session, run_id: str):
             meta["entry_hit_rank"].as_string().label("entry_hit_rank"),
             meta["llm_answer_time"].as_float().label("answer_time"),
             meta["agentic_trace"].label("trace"),
+            meta["judge_source_relation"].as_string().label("source_relation"),
+            meta["judge_acknowledges_conflict"].as_string().label("acknowledges_conflict"),
         )
         .filter(EvalResult.run_id == run_id)
         .all()
     )
+
+
+def _source_counts(results) -> Dict:
+    """Counts of judge source relations and acknowledged conflicts in a run."""
+    relations = [r.source_relation for r in results if r.source_relation]
+    if not relations:
+        return {"newer_source": None, "older_source": None, "conflicting_source": None,
+                "acknowledges_conflict": None}
+    return {
+        "newer_source": relations.count("newer_source"),
+        "older_source": relations.count("older_source"),
+        "conflicting_source": relations.count("conflicting_source"),
+        "acknowledges_conflict": sum(1 for r in results if (r.acknowledges_conflict or "").lower() == "true"),
+    }
 
 
 def compare_runs(name_prefix: Optional[str] = None, run_ids: Optional[Iterable[str]] = None) -> List[Dict]:
@@ -293,6 +326,8 @@ def compare_runs(name_prefix: Optional[str] = None, run_ids: Optional[Iterable[s
                 "turn_limit": sum(1 for s in summaries if s.get("hit_turn_limit")) if summaries else None,
                 "stopped": sum(1 for s in summaries if s.get("stopped_by")) if summaries else None,
                 "avg_answer_seconds": sum(answer_times) / len(answer_times) if answer_times else None,
+                # Source relations exist only for judge prompt v2+ (None before).
+                **_source_counts(results),
                 "answer_tokens": int(tokens.get(STAGE_EVAL_ANSWER) or 0) or None,
                 "judge_tokens": int(tokens.get(STAGE_EVAL_JUDGE) or 0) or None,
             })

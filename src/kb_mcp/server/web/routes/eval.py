@@ -112,7 +112,9 @@ def _render_compare_table(rows, prefix) -> str:
         f'<th {_TH.format(align=a)}>{h}</th>' for h, a in (
             ("Run", "left"), ("Type", "left"), ("Answer model", "left"), ("Judge", "left"), ("Q", "right"),
             ("Exact", "right"), ("Entry", "right"), ("Judge ✓", "right"), ("Saw", "right"), ("Opened", "right"),
-            ("Limit", "right"), ("Stop", "right"), ("Ans s", "right"), ("Ans tokens", "right"), ("Judge tokens", "right"),
+            ("Limit", "right"), ("Stop", "right"), ("Ans s", "right"),
+            ("Newer", "right"), ("Older", "right"), ("Conflict", "right"), ("Ack.", "right"),
+            ("Ans tokens", "right"), ("Judge tokens", "right"),
         )
     )
     body = ""
@@ -132,6 +134,8 @@ def _render_compare_table(rows, prefix) -> str:
             + _plain_cell(r["agent_saw_source"]) + _plain_cell(r["agent_opened_source"])
             + _plain_cell(r["turn_limit"]) + _plain_cell(r["stopped"])
             + _plain_cell(r["avg_answer_seconds"], "{:.0f}")
+            + _plain_cell(r.get("newer_source")) + _plain_cell(r.get("older_source"))
+            + _plain_cell(r.get("conflicting_source")) + _plain_cell(r.get("acknowledges_conflict"))
             + _plain_cell(r["answer_tokens"], "{:,}") + _plain_cell(r["judge_tokens"], "{:,}")
             + "</tr>"
         )
@@ -147,6 +151,9 @@ def _render_compare_table(rows, prefix) -> str:
         <b>Judge ✓</b>: answers the judge accepted; <b>Saw / Opened</b>: the agent saw the source in a tool result /
         opened it with kb_get; <b>Limit / Stop</b>: the agent hit the turn limit / the endpoint stopped it (e.g. context
         overflow). For agentic and llm_only runs, Exact and Entry come from a separate search the agent never sees.
+        <b>Newer / Older / Conflict / Ack.</b> (judge prompt v2+): answers whose value differs from the reference
+        because it came from a newer document (counted correct), an older document (wrong), or another document
+        of unclear age (wrong unless the answer gives both values); Ack. = answers that point out the conflict.
         Shading: green ≥ 80%, yellow ≥ 50%, red below.
     </p>
     """

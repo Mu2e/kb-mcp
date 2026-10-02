@@ -14,6 +14,7 @@ from ..eval import (
 )
 from ..eval.db_models import get_eval_generation, get_eval_questions, get_eval_run
 from ...config import get_eval_config
+from ...eval_utils.judge import JUDGE_PROMPT_VERSION
 
 
 def cmd_eval_generate(args):
@@ -241,6 +242,7 @@ def cmd_eval_run(args):
                 "enabled": True,
                 # Resolved here so the run records which model judged it.
                 "model": args.judge_model or get_eval_config()["judge_model"],
+                "prompt_version": JUDGE_PROMPT_VERSION,
             }
 
         # Determine rerank setting
@@ -426,6 +428,14 @@ def cmd_eval_load_benchmark(args):
         sys.exit(1)
 
 
+def _source_cell(row):
+    """"newer/older/conflicting/acknowledged" counts, or "-" for judge prompt v1 runs."""
+    if row.get("newer_source") is None:
+        return "-"
+    return (f"{row['newer_source']}/{row['older_source']}/"
+            f"{row['conflicting_source']}/{row['acknowledges_conflict']}")
+
+
 def _print_compare_table(rows, strip_prefix=None):
     """Print compare_runs() rows as a fixed-width table."""
     def frac(n, d):
@@ -434,7 +444,7 @@ def _print_compare_table(rows, strip_prefix=None):
     def opt(v, fmt="{}"):
         return fmt.format(v) if v is not None else "-"
 
-    header = f"{'Run':<58}{'Q':>5}{'Exact':>9}{'Entry':>9}{'Judge':>9}{'Saw':>6}{'Open':>6}{'Limit':>6}{'Stop':>5}{'Ans s':>7}{'Ans tok':>13}{'Jdg tok':>11}"
+    header = f"{'Run':<58}{'Q':>5}{'Exact':>9}{'Entry':>9}{'Judge':>9}{'Saw':>6}{'Open':>6}{'Limit':>6}{'Stop':>5}{'Ans s':>7}{'New/Old/Cnf/Ack':>17}{'Ans tok':>13}{'Jdg tok':>11}"
     print(header)
     print("-" * len(header))
     for r in rows:
@@ -449,12 +459,15 @@ def _print_compare_table(rows, strip_prefix=None):
             f"{opt(r['agent_saw_source']):>6}{opt(r['agent_opened_source']):>6}"
             f"{opt(r['turn_limit']):>6}{opt(r['stopped']):>5}"
             f"{opt(r['avg_answer_seconds'], '{:.0f}'):>7}"
+            f"{_source_cell(r):>17}"
             f"{opt(r['answer_tokens'], '{:,}'):>13}{opt(r['judge_tokens'], '{:,}'):>11}"
         )
     print()
     print("Exact: source row in the retrieved list; Entry: any file/figure of the source's DocDB entry;")
     print("Judge: answers judged correct; Saw/Open: agent saw the source in a tool result / opened it with kb_get;")
     print("Limit/Stop: agent hit the turn limit / was stopped by the endpoint (e.g. context overflow).")
+    print("New/Old/Cnf/Ack (judge v2+): answers whose value came from a newer source (counted correct) / an older")
+    print("source (wrong) / another source of unclear age (wrong unless both values given) / that note the conflict.")
     print("For agentic and llm_only runs, Exact/Entry come from a separate search the agent never sees.")
 
 

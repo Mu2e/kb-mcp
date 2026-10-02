@@ -17,7 +17,9 @@ from tqdm import tqdm
 
 from .db_models import EvalDataset, EvalResult, EvalRun
 from ..database import get_db_session
-from ...eval_utils.judge import llm_judge_answer
+from ..db_models import Document
+from .runner import describe_reference_source, record_judge_fields
+from ...eval_utils.judge import JUDGE_PROMPT_VERSION, llm_judge_answer
 from ...llm import GatewayLimitExceeded
 
 logger = logging.getLogger(__name__)
@@ -97,7 +99,7 @@ def rejudge_run(
                 chunking_strategy=source.chunking_strategy,
                 max_results=source.max_results,
                 search_filters=source.search_filters,
-                judge_strategy={"enabled": True, "model": judge_model},
+                judge_strategy={"enabled": True, "model": judge_model, "prompt_version": JUDGE_PROMPT_VERSION},
                 meta={**(source.meta or {}), "rejudged_from_run_id": source.id},
             )
             session.add(run)
@@ -116,6 +118,7 @@ def rejudge_run(
         result_id, question_id, is_hit, hit_rank, retrieval_time, best_similarity, meta = item
         with get_db_session() as session:
             question = session.get(EvalDataset, question_id)
+            source_doc = session.get(Document, question.source_document_id) if question.source_document_id else None
             answer = meta.get("llm_answer")
             verdict = None
             if answer is not None:
@@ -126,7 +129,14 @@ def rejudge_run(
                         expected_answer=question.answer,
                         model=judge_model,
                         mode="answer",
+                        reference_source=describe_reference_source(source_doc),
                     )
+            new_meta = {**meta, "answer_result_id": result_id}
+            # Verdict fields belong to this judge, not the answer's original one.
+            new_meta.pop("judge_source_relation", None)
+            new_meta.pop("judge_acknowledges_conflict", None)
+            if verdict:
+                record_judge_fields(new_meta, verdict)
             session.add(EvalResult(
                 run_id=run_id,
                 question_id=question_id,
@@ -138,7 +148,7 @@ def rejudge_run(
                 retrieval_time_seconds=retrieval_time,
                 hostname=socket.gethostname(),
                 best_similarity=best_similarity,
-                meta={**meta, "answer_result_id": result_id},
+                meta=new_meta,
             ))
             session.commit()
             return bool(verdict and verdict["is_hit"])

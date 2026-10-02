@@ -58,3 +58,22 @@ def test_rejudge_refuses_retrieval_runs(monkeypatch):
     monkeypatch.setattr(rejudge, "get_db_session", _session)
     with pytest.raises(ValueError, match="only answer-mode runs"):
         rejudge.rejudge_run("r1", "argo:claude-opus-5")
+
+
+def test_judge_version_is_part_of_new_run_names():
+    assert grid_run_name("p", "agentic", "q1", "argo:claude-sonnet-5", "argo:gpt-5.5", 2) == \
+        "p-agentic-claude-sonnet-5-qq1-judge-gpt-5.5-v2"
+    # Version-1 names stay as they were, so existing runs are still found.
+    assert grid_run_name("p", "agentic", "q1", "argo:claude-sonnet-5", "argo:gpt-5.5", 1) == \
+        "p-agentic-claude-sonnet-5-qq1-judge-gpt-5.5"
+
+
+def test_reference_source_line():
+    from datetime import datetime
+    from types import SimpleNamespace
+    from kb_mcp.kb.eval.runner import describe_reference_source
+
+    doc = SimpleNamespace(source_id="mu2e-docdb", doc_id="52249-intro", title="Trigger meeting",
+                          creating_time=datetime(2025, 4, 1))
+    assert describe_reference_source(doc) == "mu2e-docdb 52249-intro 'Trigger meeting', 2025-04-01"
+    assert describe_reference_source(None) is None

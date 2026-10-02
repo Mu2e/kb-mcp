@@ -53,7 +53,7 @@ def test_unparseable_reply_still_raises():
 
 def _completion(text):
     from types import SimpleNamespace
-    return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=text))])
+    return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=text))], usage=None)
 
 
 def test_gateway_notice_is_raised_not_returned():
@@ -76,3 +76,39 @@ def test_judge_errors_are_unjudged_not_wrong(monkeypatch):
     monkeypatch.setattr(judge, "get_openai_client", lambda model=None: client)
     monkeypatch.setattr(judge, "record_llm_usage", lambda *a, **k: None)
     assert judge.llm_judge_answer("q?", "a", model="m", mode="answer")["is_hit"] is None
+
+
+@pytest.mark.parametrize("reply, expected", [
+    ('{"is_hit": true, "source_relation": "older_source", "acknowledges_conflict": false, "justification": "x"}',
+     (False, "older_source", False)),
+    ('{"is_hit": true, "source_relation": "conflicting_source", "acknowledges_conflict": false, "justification": "x"}',
+     (False, "conflicting_source", False)),
+    ('{"is_hit": true, "source_relation": "conflicting_source", "acknowledges_conflict": true, "justification": "x"}',
+     (True, "conflicting_source", True)),
+    ('{"is_hit": true, "source_relation": "newer_source", "acknowledges_conflict": false, "justification": "x"}',
+     (True, "newer_source", False)),
+    ('{"is_hit": false, "source_relation": "made_up", "justification": "x"}',
+     (False, "none", False)),
+])
+def test_judge_v2_source_rules(monkeypatch, reply, expected):
+    import kb_mcp.eval_utils.judge as judge
+
+    client = type("C", (), {})()
+    client.chat = type("Ch", (), {})()
+    client.chat.completions = type("Co", (), {"create": lambda self, **k: _completion(reply)})()
+    monkeypatch.setattr(judge, "get_openai_client", lambda model=None: client)
+    monkeypatch.setattr(judge, "record_llm_usage", lambda *a, **k: None)
+    v = judge.llm_judge_answer("q?", "a", expected_answer="b", model="m", mode="answer", reference_source="mu2e-docdb 1")
+    assert (v["is_hit"], v["source_relation"], v["acknowledges_conflict"]) == expected
+
+
+def test_retrieval_mode_has_no_source_fields(monkeypatch):
+    import kb_mcp.eval_utils.judge as judge
+
+    client = type("C", (), {})()
+    client.chat = type("Ch", (), {})()
+    client.chat.completions = type("Co", (), {"create": lambda self, **k: _completion('{"is_hit": true, "justification": "x"}')})()
+    monkeypatch.setattr(judge, "get_openai_client", lambda model=None: client)
+    monkeypatch.setattr(judge, "record_llm_usage", lambda *a, **k: None)
+    v = judge.llm_judge_answer("q?", "context", model="m", mode="retrieval")
+    assert v["source_relation"] is None and v["acknowledges_conflict"] is None
