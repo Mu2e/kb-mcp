@@ -161,8 +161,11 @@ def run_grid(
                         # a new judge version re-judges them rather than answering again.
                         earlier = [grid_run_name(prefix, search_type, labels[gid], answer_model, j, v)
                                    for v in range(judge_version - 1, 0, -1) for j in judge_models if j]
-                        existing = next((n for n in names + earlier
-                                         if _run_has_results(session, n, expected[gid])), None)
+                        # A complete run under the current judge version wins; otherwise
+                        # an earlier version's run is reused even if incomplete (it is
+                        # resumed before re-judging) -- answers are the expensive part.
+                        existing = (next((n for n in names if _run_has_results(session, n, expected[gid])), None)
+                                    or next((n for n in earlier if _run_result_count(session, n) > 0), None))
                         if existing or len(judge_models) > 1:
                             answers_from = existing or names[0]
                     for name, judge_model in zip(names, judge_models):
@@ -184,11 +187,20 @@ def run_grid(
 
         if answers_from:
             from .rejudge import rejudge_run
+            from .runner import execute_eval_run
 
             with get_db_session() as session:
-                source = session.query(EvalRun).filter_by(name=answers_from).order_by(EvalRun.created_time.desc()).first()
+                source_count = _run_result_count(session, answers_from)
+                source_id = _most_complete_run_id(session, answers_from)
+                source = session.get(EvalRun, source_id) if source_id else None
             if source is None:
                 raise RuntimeError(f"Answer run {answers_from} missing; cannot re-judge for {name}")
+            if source_count < expected[gid]:
+                # Finish the answers first; the re-judge below then covers them all.
+                logger.info(f"[{i}/{len(cells)}] completing answer run {answers_from} "
+                            f"({source_count}/{expected[gid]}) before re-judging")
+                execute_eval_run(source.id, use_llm_judge=bool((source.judge_strategy or {}).get("enabled")),
+                                 workers=workers, resume=True)
             logger.info(f"[{i}/{len(cells)}] {'resuming' if resume_id else 're-judging'} {answers_from} as: {name}")
             stats = rejudge_run(source.id, judge_model, name=name, workers=workers, resume_run_id=resume_id)
             outcomes.append({"name": name, "status": "ran", "how": how, **stats})
