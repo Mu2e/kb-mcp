@@ -77,3 +77,21 @@ def test_reference_source_line():
                           creating_time=datetime(2025, 4, 1))
     assert describe_reference_source(doc) == "mu2e-docdb 52249-intro 'Trigger meeting', 2025-04-01"
     assert describe_reference_source(None) is None
+
+
+
+def test_record_judge_fields_verifies_cited_docs(monkeypatch):
+    import kb_mcp.kb.eval.runner as runner
+
+    seen = {}
+    def fake_verify(numbers, reference_doc=None):
+        seen["numbers"] = numbers
+        return [{"docdb": 53560, "exists": True, "age": "newer"}, {"docdb": 99999, "exists": False, "age": "newer"}]
+    monkeypatch.setattr(runner, "verify_cited_docs", fake_verify)
+    meta = {}
+    runner.record_judge_fields(meta, {"source_relation": "newer_source", "acknowledges_conflict": False,
+                                      "differing_docs": [53560, 99999]})
+    assert seen["numbers"] == [53560, 99999]
+    assert meta["judge_source_relation"] == "newer_source"
+    assert meta["judge_source_verified"] is True
+    assert [d["exists"] for d in meta["judge_differing_docs"]] == [True, False]

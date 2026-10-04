@@ -17,18 +17,23 @@ logger = logging.getLogger(__name__)
 #: Version of the answer-mode judge prompt; recorded in each run's
 #: judge_strategy (and run name) so verdicts from different prompts never mix.
 #: 2 added source_relation / acknowledges_conflict and stopped penalising
-#: extra correct detail.
-JUDGE_PROMPT_VERSION = 2
+#: extra correct detail; it also counted a value from a newer document as
+#: correct, which proved gameable (any cited newer document was accepted).
+#: 3 scores strictly against the reference again and keeps the source fields,
+#: plus the DocDB numbers a differing value is attributed to, as flags only.
+JUDGE_PROMPT_VERSION = 3
 
 #: How an answer's key facts relate to the question's reference source. DocDB
 #: is a living archive -- the same quantity is often reported differently in
-#: talks and notes from different months -- so a value that differs from the
-#: reference is not necessarily wrong; these keep that case visible.
+#: talks and notes from different months -- so these flag a value that
+#: differs from the reference because it came from another document. They do
+#: not change the verdict: deciding that a reference is outdated takes human
+#: research (see `kb eval conflicts`).
 SOURCE_RELATIONS = (
     "matches_reference",   # agrees with the expected answer
-    "newer_source",        # differs, taken from a document newer than the reference: correct
-    "older_source",        # differs, taken from an older (outdated) document: wrong
-    "conflicting_source",  # differs, from another document of unclear age
+    "newer_source",        # differs, attributed to a document newer than the reference
+    "older_source",        # differs, attributed to an older document
+    "conflicting_source",  # differs, attributed to another document of unclear age
     "none",                # no other source involved (plainly wrong, or no answer)
 )
 
@@ -65,6 +70,7 @@ def llm_judge_answer(
             "time_seconds": float,  # Time taken for judgment
             "source_relation": str | None,  # answer mode: one of SOURCE_RELATIONS
             "acknowledges_conflict": bool | None,  # answer mode: answer notes disagreeing sources
+            "differing_docs": list[int] | None,  # answer mode: DocDB numbers a differing value is attributed to
         }
     """
     if model is None:
@@ -90,32 +96,31 @@ def llm_judge_answer(
             "Judge the facts the question asks for. Extra correct detail or context beyond the expected",
             "answer does not make an answer wrong; a missing or incorrect requested fact does.",
             "",
-            "The knowledge base is a living archive: the same quantity is often reported differently in",
-            "documents from different times. DocDB document numbers increase over time, so a higher",
-            "DocDB number means a newer document. When the answer's key value differs from the expected",
-            "answer, decide from the documents the answer cites:",
-            "- taken from a document NEWER than the expected answer's source: correct (newer_source)",
-            "- taken from a document OLDER than the expected answer's source: incorrect (older_source)",
-            "- taken from another document whose age relative to the source is unclear: incorrect",
-            "  (conflicting_source) -- UNLESS the answer states both values, says the documents disagree,",
-            "  and one of the stated values matches the expected answer; then it is correct.",
-            "Set acknowledges_conflict to true whenever the answer itself points out that documents give",
-            "different values, whichever value it ends up favouring.",
+            "Score strictly against the expected answer: a key value that differs from it is incorrect,",
+            "even if the answer attributes it to another document -- UNLESS the answer also states the",
+            "expected value and says the documents disagree; then it is correct.",
             "",
-            "Choosing source_relation:",
-            "- matches_reference: the answer's key values agree with the expected answer (extra detail,",
-            "  or citing other documents for the same values, is still matches_reference).",
+            "Independently of the verdict, record where a differing value comes from. The knowledge base is",
+            "a living archive: the same quantity is often reported differently in documents from different",
+            "times. DocDB document numbers increase over time (a higher number is newer).",
+            "- matches_reference: the answer's key values agree with the expected answer (extra detail, or",
+            "  citing other documents for the same values, is still matches_reference).",
             "- newer_source / older_source / conflicting_source: ONLY when a key value DIFFERS from the",
-            "  expected answer because the answer took it from a different document. Compare DocDB",
-            "  numbers digit by digit: e.g. 52276 is LOWER (older) than 54648.",
-            "- none: the answer is wrong or incomplete for any other reason (missing facts, misreading,",
-            "  no answer) -- this is not a source conflict.",
+            "  expected answer and the answer attributes it to a specific other document: newer or older",
+            "  than the expected answer's source (compare DocDB numbers digit by digit: 52276 is LOWER,",
+            "  i.e. older, than 54648), or of unclear age.",
+            "- none: wrong or incomplete for any other reason (missing facts, misreading, no answer).",
+            "List in differing_docs the DocDB numbers the answer attributes the DIFFERING value to (only",
+            "those, as integers; empty if none).",
+            "Set acknowledges_conflict to true whenever the answer itself points out that documents give",
+            "different values.",
             "",
             "Respond with ONLY a valid JSON object:",
             "{",
             '  "is_hit": true or false,',
             '  "source_relation": "matches_reference" | "newer_source" | "older_source" | "conflicting_source" | "none",',
             '  "acknowledges_conflict": true or false,',
+            '  "differing_docs": [DocDB numbers],',
             '  "justification": "Brief explanation of your assessment"',
             "}",
         ])
@@ -175,16 +180,19 @@ def llm_judge_answer(
         is_hit = result.get("is_hit", False)
         justification = result.get("justification", "")
         source_relation = acknowledges_conflict = None
+        differing_docs = []
         if mode == "answer":
             source_relation = result.get("source_relation")
             if source_relation not in SOURCE_RELATIONS:
                 source_relation = "none"
             acknowledges_conflict = bool(result.get("acknowledges_conflict", False))
-            # The source rules decide these cases; a verdict contradicting its
-            # own relation (seen with weaker judges) is overridden.
-            if source_relation == "older_source":
-                is_hit = False
-            elif source_relation == "conflicting_source" and not acknowledges_conflict:
+            differing_docs = sorted({int(d) for d in (result.get("differing_docs") or [])
+                                     if str(d).strip().isdigit()})
+            # Strict scoring: a value attributed to another document is wrong
+            # unless the answer also gives the reference value (acknowledged);
+            # a verdict contradicting its own relation is overridden.
+            if source_relation in ("newer_source", "older_source", "conflicting_source") \
+                    and not acknowledges_conflict:
                 is_hit = False
 
         # Validate is_hit is boolean
@@ -198,6 +206,7 @@ def llm_judge_answer(
             "time_seconds": judge_time,
             "source_relation": source_relation,
             "acknowledges_conflict": acknowledges_conflict,
+            "differing_docs": differing_docs if mode == "answer" else None,
         }
 
     except GatewayLimitExceeded:

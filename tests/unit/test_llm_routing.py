@@ -85,12 +85,16 @@ def test_judge_errors_are_unjudged_not_wrong(monkeypatch):
      (False, "conflicting_source", False)),
     ('{"is_hit": true, "source_relation": "conflicting_source", "acknowledges_conflict": true, "justification": "x"}',
      (True, "conflicting_source", True)),
+    # v3 scores strictly: a value from another document, even a newer one, is wrong...
     ('{"is_hit": true, "source_relation": "newer_source", "acknowledges_conflict": false, "justification": "x"}',
-     (True, "newer_source", False)),
+     (False, "newer_source", False)),
+    # ...unless the answer also gives the reference value and notes the conflict.
+    ('{"is_hit": true, "source_relation": "newer_source", "acknowledges_conflict": true, "justification": "x"}',
+     (True, "newer_source", True)),
     ('{"is_hit": false, "source_relation": "made_up", "justification": "x"}',
      (False, "none", False)),
 ])
-def test_judge_v2_source_rules(monkeypatch, reply, expected):
+def test_judge_source_rules(monkeypatch, reply, expected):
     import kb_mcp.eval_utils.judge as judge
 
     client = type("C", (), {})()
@@ -112,3 +116,18 @@ def test_retrieval_mode_has_no_source_fields(monkeypatch):
     monkeypatch.setattr(judge, "record_llm_usage", lambda *a, **k: None)
     v = judge.llm_judge_answer("q?", "context", model="m", mode="retrieval")
     assert v["source_relation"] is None and v["acknowledges_conflict"] is None
+
+
+
+def test_judge_lists_differing_docs_as_integers(monkeypatch):
+    import kb_mcp.eval_utils.judge as judge
+
+    reply = ('{"is_hit": false, "source_relation": "newer_source", "acknowledges_conflict": false, '
+             '"differing_docs": [53560, "52276", "not-a-number", 53560], "justification": "x"}')
+    client = type("C", (), {})()
+    client.chat = type("Ch", (), {})()
+    client.chat.completions = type("Co", (), {"create": lambda self, **k: _completion(reply)})()
+    monkeypatch.setattr(judge, "get_openai_client", lambda model=None: client)
+    monkeypatch.setattr(judge, "record_llm_usage", lambda *a, **k: None)
+    v = judge.llm_judge_answer("q?", "a", expected_answer="b", model="m", mode="answer")
+    assert v["differing_docs"] == [52276, 53560]

@@ -440,11 +440,53 @@ def describe_reference_source(doc) -> Optional[str]:
     return f"{line}, {created:%Y-%m-%d}" if created else line
 
 
-def record_judge_fields(result_meta: Dict, judge_result: Dict) -> None:
-    """Store an answer-mode verdict's source fields in a result's meta."""
+def verify_cited_docs(numbers, reference_doc=None) -> List[Dict]:
+    """Check DocDB numbers a judge attributed a differing value to.
+
+    For each number: does the knowledge base hold that DocDB entry, and is it
+    newer or older than the question's source (DocDB numbers increase over
+    time)? This does not prove the document states the value -- it filters
+    out invented or misremembered citations, so a flagged conflict can be
+    reported (and reviewed) with some confidence.
+    """
+    from sqlalchemy import or_
+
+    from ..db_models import Document
+
+    reference_number = None
+    if reference_doc is not None:
+        match = _ENTRY_NUMBER.match(reference_doc.doc_id or "")
+        reference_number = int(match.group(1)) if match else None
+    checked = []
+    with get_db_session() as session:
+        for number in numbers or []:
+            n = str(int(number))
+            exists = session.query(Document.id).filter(
+                Document.source_id == "mu2e-docdb",
+                or_(Document.doc_id == n, Document.doc_id.like(f"{n}-%"),
+                    Document.doc_id.like(f"{n}/%"), Document.doc_id.like(f"{n}\\_%", escape="\\")),
+            ).first() is not None
+            age = None
+            if reference_number is not None:
+                age = "newer" if int(n) > reference_number else "older" if int(n) < reference_number else "same"
+            checked.append({"docdb": int(n), "exists": exists, "age": age})
+    return checked
+
+
+def record_judge_fields(result_meta: Dict, judge_result: Dict, reference_doc=None) -> None:
+    """Store an answer-mode verdict's source fields in a result's meta.
+
+    The DocDB numbers a differing value is attributed to are verified against
+    the knowledge base (see verify_cited_docs); judge_source_verified is true
+    when at least one of them exists there.
+    """
     if judge_result.get("source_relation") is not None:
         result_meta["judge_source_relation"] = judge_result["source_relation"]
         result_meta["judge_acknowledges_conflict"] = judge_result.get("acknowledges_conflict")
+    if judge_result.get("differing_docs"):
+        checked = verify_cited_docs(judge_result["differing_docs"], reference_doc)
+        result_meta["judge_differing_docs"] = checked
+        result_meta["judge_source_verified"] = any(d["exists"] for d in checked)
 
 
 _TOOL_RESULT_DOC_IDS = (
@@ -649,7 +691,7 @@ def evaluate_single_question(
             is_judge_hit = judge_result["is_hit"]
             justification = judge_result["justification"]
             judge_time_seconds = judge_result["time_seconds"]
-            record_judge_fields(result_meta, judge_result)
+            record_judge_fields(result_meta, judge_result, source_doc)
 
         elif search_type in ("semantic", "fulltext", "hybrid"):
             # Retrieval-only: optionally judge whether context contains the answer
@@ -664,7 +706,7 @@ def evaluate_single_question(
                 is_judge_hit = judge_result["is_hit"]
                 justification = judge_result["justification"]
                 judge_time_seconds = judge_result["time_seconds"]
-                record_judge_fields(result_meta, judge_result)
+                record_judge_fields(result_meta, judge_result, source_doc)
 
         elif search_type == "rag":
             # Single-shot RAG: one real kb_search, then one answer (see _rag_answer)
@@ -691,7 +733,7 @@ def evaluate_single_question(
                 is_judge_hit = judge_result["is_hit"]
                 justification = judge_result["justification"]
                 judge_time_seconds = judge_result["time_seconds"]
-                record_judge_fields(result_meta, judge_result)
+                record_judge_fields(result_meta, judge_result, source_doc)
 
         elif search_type == "agentic":
             # Agentic: LLM answers through the real MCP tools (see _agentic_answer)
@@ -723,7 +765,7 @@ def evaluate_single_question(
                 is_judge_hit = judge_result["is_hit"]
                 justification = judge_result["justification"]
                 judge_time_seconds = judge_result["time_seconds"]
-                record_judge_fields(result_meta, judge_result)
+                record_judge_fields(result_meta, judge_result, source_doc)
 
         # Create result record
         result = EvalResult(

@@ -133,10 +133,11 @@ def rejudge_run(
                     )
             new_meta = {**meta, "answer_result_id": result_id}
             # Verdict fields belong to this judge, not the answer's original one.
-            new_meta.pop("judge_source_relation", None)
-            new_meta.pop("judge_acknowledges_conflict", None)
+            for key in ("judge_source_relation", "judge_acknowledges_conflict",
+                        "judge_differing_docs", "judge_source_verified"):
+                new_meta.pop(key, None)
             if verdict:
-                record_judge_fields(new_meta, verdict)
+                record_judge_fields(new_meta, verdict, source_doc)
             session.add(EvalResult(
                 run_id=run_id,
                 question_id=question_id,

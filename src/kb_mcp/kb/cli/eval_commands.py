@@ -549,6 +549,32 @@ def cmd_eval_compare(args):
                 print(f"  {marks}  {row['question'][:100]}")
 
 
+def cmd_eval_conflicts(args):
+    """List questions whose answers differ from the reference because of another document."""
+    from ..eval.grid import conflict_findings
+
+    findings = conflict_findings(args.prefix)
+    if args.json:
+        import json
+        print(json.dumps(findings, indent=2, default=str))
+        return
+    if not findings:
+        print("No source conflicts flagged (needs runs judged with judge prompt v3 or later).")
+        return
+    print(f"{len(findings)} questions with answers that differ from the reference because of another document")
+    print("(most corroborated first; input for human review, not verdicts)\n")
+    for i, f in enumerate(findings[: args.limit or None], 1):
+        print(f"{i}. {f['question']}")
+        print(f"   reference: {f['reference_answer']}   [{f['reference_source']}]")
+        if f["models_citing_same_newer_doc"] > 1:
+            print(f"   ** {f['models_citing_same_newer_doc']} models cite the same existing newer document **")
+        for a in f["answers"]:
+            docs = ", ".join(f"{d['docdb']} ({d['age']}{'' if d['exists'] else ', NOT FOUND'})" for d in a["differing_docs"]) or "none named"
+            ack = ", notes the conflict" if a["acknowledges_conflict"] else ""
+            print(f"   - {a['answer_model']}: {a['source_relation']}{ack}; cites {docs}")
+        print()
+
+
 def cmd_eval_overlap(args):
     """Report how much of each question's wording comes from its source document."""
     from ...eval_utils.overlap import question_overlap
@@ -663,6 +689,14 @@ def setup_commands(subparsers):
     eval_compare_parser.add_argument("--json", action="store_true", help="Output as JSON")
     eval_compare_parser.add_argument("--per-question", action="store_true", help="Also show a question-by-run matrix of verdicts, per question set")
     eval_compare_parser.set_defaults(func=cmd_eval_compare)
+
+    # eval conflicts
+    eval_conflicts_parser = eval_subparsers.add_parser(
+        "conflicts", help="Questions whose answers differ from the reference because of another document (judge v3+ runs)")
+    eval_conflicts_parser.add_argument("--prefix", required=True, help="Runs whose name starts with this")
+    eval_conflicts_parser.add_argument("--limit", type=int, default=0, help="Show at most N questions (default: all)")
+    eval_conflicts_parser.add_argument("--json", action="store_true", help="Output as JSON (e.g. for a review tool)")
+    eval_conflicts_parser.set_defaults(func=cmd_eval_conflicts)
 
     # eval overlap
     eval_overlap_parser = eval_subparsers.add_parser("overlap", help="How much of each question's wording comes from its source document")

@@ -414,3 +414,65 @@ def run_groups(limit: int = 50) -> List[Dict]:
                 group["latest"] = created
     ordered = sorted(groups.values(), key=lambda g: g["latest"] or 0, reverse=True)
     return ordered[:limit]
+
+
+def conflict_findings(name_prefix: str, min_judge_version: int = 3) -> List[Dict]:
+    """Questions whose answers differ from the reference because of another document.
+
+    Collected from judge-v3+ runs (whose verdicts carry source fields): every
+    answer flagged newer_source / older_source / conflicting_source, with the
+    DocDB numbers the differing value is attributed to and whether those exist
+    in the knowledge base. One entry per question, most corroborated first: a
+    reference that several models independently contradict with the same
+    existing newer document is the likeliest to be outdated. These findings
+    are input for human review, not verdicts.
+    """
+    from .db_models import EvalDataset
+    from ..db_models import Document
+
+    findings: Dict[str, Dict] = {}
+    with get_db_session() as session:
+        runs = [r for r in _select_runs(session, name_prefix, None)
+                if ((r.judge_strategy or {}).get("prompt_version") or 1) >= min_judge_version]
+        for run in runs:
+            model = (run.meta or {}).get("answer_model")
+            for result in session.query(EvalResult).filter_by(run_id=run.id):
+                meta = result.meta or {}
+                relation = meta.get("judge_source_relation")
+                if relation not in ("newer_source", "older_source", "conflicting_source"):
+                    continue
+                entry = findings.get(result.question_id)
+                if entry is None:
+                    question = session.get(EvalDataset, result.question_id)
+                    source = session.get(Document, question.source_document_id) if question.source_document_id else None
+                    entry = findings[result.question_id] = {
+                        "question_id": result.question_id,
+                        "question": question.question,
+                        "reference_answer": question.answer,
+                        "reference_source": f"{source.source_id} {source.doc_id}" if source else None,
+                        "answers": [],
+                    }
+                entry["answers"].append({
+                    "run": run.name,
+                    "answer_model": model,
+                    "judge_model": (run.judge_strategy or {}).get("model"),
+                    "source_relation": relation,
+                    "acknowledges_conflict": meta.get("judge_acknowledges_conflict"),
+                    "judged_correct": result.is_judge_hit,
+                    "differing_docs": meta.get("judge_differing_docs") or [],
+                    "justification": result.justification,
+                    "answer_excerpt": " ".join((meta.get("llm_answer") or "").split())[:600],
+                })
+
+    def corroboration(entry):
+        newer_verified = {}
+        for a in entry["answers"]:
+            for d in a["differing_docs"]:
+                if d.get("exists") and d.get("age") == "newer":
+                    newer_verified.setdefault(d["docdb"], set()).add(a["answer_model"])
+        return max((len(models) for models in newer_verified.values()), default=0)
+
+    ordered = sorted(findings.values(), key=lambda e: (-corroboration(e), -len(e["answers"])))
+    for entry in ordered:
+        entry["models_citing_same_newer_doc"] = corroboration(entry)
+    return ordered
