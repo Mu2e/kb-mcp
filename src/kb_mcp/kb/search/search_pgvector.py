@@ -24,6 +24,7 @@ def _search_pgvector(
     embedding_time: float = 0.0,
     start_time: Optional[float] = None,
     max_chunks_per_doc: Optional[int] = None,
+    enforce_visibility: bool = False,
     **kwargs,
 ) -> Dict[str, Any]:
     """
@@ -82,6 +83,20 @@ def _search_pgvector(
     # Ranking inside the top candidates gives the same ranks as ranking all
     # chunks: every chunk of a document that is closer than a candidate is a
     # candidate too. So only the index's approximation can change results.
+    #
+    # enforce_visibility (opt-in, see kb_search/the search() family): an
+    # extra LEFT JOIN + condition inside this same per-row scalar subquery,
+    # not a join at the outer query level -- keeps the index-friendly shape
+    # above intact. No document_visibility_current row, or a row with
+    # visible_search left NULL, means visible (COALESCE ... TRUE).
+    visibility_join = ""
+    visibility_condition = ""
+    if enforce_visibility:
+        visibility_join = """
+                LEFT JOIN document_visibility_current dvc
+                    ON dvc.raw_document_id = d.raw_document_id
+                   AND dvc.group_name = '*'"""
+        visibility_condition = "\n                  AND COALESCE(dvc.visible_search, TRUE)"
     vector_query = f"""
         WITH knn AS MATERIALIZED (
             SELECT
@@ -91,8 +106,8 @@ def _search_pgvector(
             WHERE (
                 SELECT TRUE
                 FROM chunks c
-                JOIN documents d ON c.document_id = d.id
-                WHERE c.id = e.chunk_id AND {where_clause_sql}
+                JOIN documents d ON c.document_id = d.id{visibility_join}
+                WHERE c.id = e.chunk_id AND {where_clause_sql}{visibility_condition}
                 LIMIT 1
             )
             ORDER BY e.embedding <=> CAST(:query_embedding AS vector)

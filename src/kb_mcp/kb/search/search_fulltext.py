@@ -20,6 +20,7 @@ def search_fulltext(
     session=None,
     explain_analyse: bool = False,
     max_chunks_per_doc: Optional[int] = None,
+    enforce_visibility: bool = False,
     **kwargs
 ) -> Dict[str, Any]:
     """
@@ -122,6 +123,21 @@ def search_fulltext(
         # Use websearch_to_tsquery for natural language queries
         # Use ts_rank_cd (cover density) which rewards proximity of matching terms
         # Deduplicate to top documents in SQL using window functions
+        #
+        # enforce_visibility (opt-in, see kb_search/the search() family): a
+        # plain LEFT JOIN is fine here, unlike the pgvector path -- full-text
+        # search already goes through a normal GIN index scan, not an
+        # approximate one sensitive to join-vs-subquery shape. No
+        # document_visibility_current row, or visible_search left NULL,
+        # means visible (COALESCE ... TRUE).
+        visibility_join = ""
+        visibility_condition = ""
+        if enforce_visibility:
+            visibility_join = """
+                LEFT JOIN document_visibility_current dvc
+                    ON dvc.raw_document_id = d.raw_document_id
+                   AND dvc.group_name = '*'"""
+            visibility_condition = "\n                  AND COALESCE(dvc.visible_search, TRUE)"
         fulltext_query = f"""
             WITH query AS (
                 SELECT websearch_to_tsquery('english', :query) AS tsq
@@ -140,9 +156,9 @@ def search_fulltext(
                     ROW_NUMBER() OVER (PARTITION BY c.document_id ORDER BY ts_rank_cd(c.text_search_vector, query.tsq) DESC) AS rank_in_doc
                 FROM chunks c
                 CROSS JOIN query
-                JOIN documents d ON c.document_id = d.id
+                JOIN documents d ON c.document_id = d.id{visibility_join}
                 WHERE c.text_search_vector @@ query.tsq
-                  AND {where_clause_sql}
+                  AND {where_clause_sql}{visibility_condition}
                 ORDER BY score DESC
                 LIMIT :initial_limit
             ),

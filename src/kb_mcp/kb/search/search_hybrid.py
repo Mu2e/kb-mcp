@@ -28,6 +28,7 @@ def search_hybrid(
     chunk_strategy_boost: Optional[Dict[str, float]] = None,
     expand_context: bool = False,
     expand_context_window: int = 1,
+    enforce_visibility: bool = False,
     **kwargs
 ) -> Dict[str, Any]:
     """
@@ -142,6 +143,7 @@ def search_hybrid(
                     session=session,
                     explain_analyse=explain_analyse,
                     max_chunks_per_doc=max_chunks_per_doc,
+                    enforce_visibility=enforce_visibility,
                     **sub_kwargs
                 )
         except Exception as e:
@@ -169,6 +171,7 @@ def search_hybrid(
                     session=session,
                     explain_analyse=explain_analyse,
                     max_chunks_per_doc=max_chunks_per_doc,
+                    enforce_visibility=enforce_visibility,
                     **sub_kwargs
                 )
         except Exception as e:

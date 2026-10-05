@@ -425,6 +425,7 @@ def kb_search(
             query=query,
             max_results=DEFAULT_MAX_RESULTS if max_results is None else max_results,
             filter=filter_dict,
+            enforce_visibility=True,
         )
         # Only pass rerank / doc_type_boost / chunk_strategy_boost to hybrid
         # search (which supports them).

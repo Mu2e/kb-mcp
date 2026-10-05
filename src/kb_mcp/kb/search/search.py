@@ -168,6 +168,7 @@ def search_semantic(
     session=None,
     explain_analyse: bool = False,
     max_chunks_per_doc: Optional[int] = None,
+    enforce_visibility: bool = False,
     **kwargs
 ) -> Dict[str, Any]:
     """
@@ -193,6 +194,9 @@ def search_semantic(
                 - bool: {"bool": {"must": [...], "should": [...], "must_not": [...]}} - boolean logic
         session: Optional database session
         explain_analyse: If True, print EXPLAIN ANALYZE output for the query (PostgreSQL only)
+        enforce_visibility: If True, exclude documents hidden via DocumentVisibilityCurrent
+                (visible_search=False). Default False: only the agent-facing MCP tools
+                (kb_search) pass True; internal/admin callers see everything.
         **kwargs: Simple metadata filters (backward compatible). Direct field names are treated
                  as metadata filters. Example: author="John" filters meta.author == "John"
     
@@ -319,9 +323,10 @@ def search_semantic(
             session=session,
             explain_analyse=explain_analyse,
             max_chunks_per_doc=max_chunks_per_doc,
+            enforce_visibility=enforce_visibility,
             **kwargs
         )
-        
+
         # Update metadata with query and embedding time
         result['metadata']['query'] = query
         result['metadata']['time_embedding'] = embedding_time
@@ -371,6 +376,7 @@ def search(
     explain_analyse: bool = False,
     max_chunks_per_doc: Optional[int] = None,
     rerank: Optional[bool] = None,
+    enforce_visibility: bool = False,
     **kwargs
 ) -> Dict[str, Any]:
     """
@@ -402,6 +408,9 @@ def search(
         rrf_k: Constant for Reciprocal Rank Fusion (default 60). Higher values make
                fusion more conservative.
         explain_analyse: If True, print EXPLAIN ANALYZE output for both queries
+        enforce_visibility: If True, exclude documents hidden via DocumentVisibilityCurrent
+                (visible_search=False). Default False: only the agent-facing MCP tools
+                (kb_search) pass True; internal/admin callers see everything.
         **kwargs: Simple metadata filters (backward compatible)
 
     Returns:
@@ -462,6 +471,7 @@ def search(
         explain_analyse=explain_analyse,
         max_chunks_per_doc=max_chunks_per_doc,
         rerank=rerank,
+        enforce_visibility=enforce_visibility,
         **kwargs
     )
 
