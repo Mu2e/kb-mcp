@@ -542,12 +542,18 @@ def get_search_config() -> dict:
             * `initial_limit_multiplier` (int): Multiplier for initial chunk retrieval (Env: `SEARCH_INITIAL_LIMIT_MULTIPLIER`, default: 50).
             * `rrf_k` (int): Reciprocal Rank Fusion constant (Env: `SEARCH_RRF_K`, default: 60).
             * `ivfflat_probes` (int): IVFFlat lists searched per semantic query (Env: `SEARCH_IVFFLAT_PROBES`, default: 128).
+            * `ivfflat_max_probes` (int): Most lists a filtered semantic query's iterative index scan may read (Env: `SEARCH_IVFFLAT_MAX_PROBES`, default: 256).
+            * `exact_max_chunks` (int): A filtered semantic query that at most this many embedded chunks pass ranks them exactly instead of through the index (Env: `SEARCH_EXACT_MAX_CHUNKS`, default: 50000).
+            * `vector_timeout_ms` (int): Statement timeout for a semantic query, in ms; 0 means none (Env: `SEARCH_VECTOR_TIMEOUT_MS`, default: 30000).
     """
     return {
         'max_chunks_per_doc': _get_int("SEARCH_MAX_CHUNKS_PER_DOC", 10),
         'initial_limit_multiplier': _get_int("SEARCH_INITIAL_LIMIT_MULTIPLIER", 50),
         'rrf_k': _get_int("SEARCH_RRF_K", 60),
         'ivfflat_probes': _get_int("SEARCH_IVFFLAT_PROBES", 128),
+        'ivfflat_max_probes': _get_int("SEARCH_IVFFLAT_MAX_PROBES", 256),
+        'exact_max_chunks': _get_int("SEARCH_EXACT_MAX_CHUNKS", 50000),
+        'vector_timeout_ms': _get_int("SEARCH_VECTOR_TIMEOUT_MS", 30000),
         'router_enabled': _get_bool("ROUTER_ENABLED", False),
     }
 

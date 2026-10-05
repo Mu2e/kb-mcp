@@ -133,3 +133,63 @@ def test_fulltext_join_keys_on_raw_document_id_not_document_id():
     _run_fulltext(s, enforce_visibility=True)
     (query,) = s.main_queries("base_candidates AS")
     assert "dvc.raw_document_id = d.raw_document_id" in query
+
+
+# --- the count and exact paths from the filtered-vector-search fix -----
+
+class CountingSession(FakeSession):
+    """Also answers the filtered-chunk count with a fixed number."""
+
+    def __init__(self, count):
+        super().__init__()
+        self.count = count
+
+    def execute(self, stmt, params=None):
+        sql = str(stmt)
+        self.sql.append(sql)
+        if "count(*)" in sql:
+            return SimpleNamespace(scalar=lambda: self.count)
+        return SimpleNamespace(all=lambda: [], scalar=lambda: None, rowcount=0)
+
+
+def _run_pgvector_filtered(session, enforce_visibility):
+    return _search_pgvector(
+        session, TABLE, [0.1, 0.2, 0.3], max_results=5, source_id=None,
+        doc_type=None, chunking_strategy=None,
+        filter={"term": {"source_id": "mu2e-docdb"}},
+        enforce_visibility=enforce_visibility,
+    )
+
+
+def test_pgvector_count_query_excludes_hidden_chunks():
+    """Otherwise a filter whose only matches are hidden would count them,
+    skip the no_match shortcut, and run a vector query for nothing."""
+    s = CountingSession(count=5)
+    _run_pgvector_filtered(s, enforce_visibility=True)
+    (count_sql,) = [q for q in s.sql if "count(*)" in q]
+    assert "LEFT JOIN document_visibility_current dvc" in count_sql
+    assert "COALESCE(dvc.visible_search, TRUE)" in count_sql
+
+
+def test_pgvector_exact_path_excludes_hidden_chunks():
+    s = CountingSession(count=5)
+    out = _run_pgvector_filtered(s, enforce_visibility=True)
+    assert out["metadata"]["vector_path"] == "exact"
+    (query,) = s.main_queries("nearest AS")
+    filtered_cte = query[query.index("filtered AS MATERIALIZED"):query.index("knn AS MATERIALIZED")]
+    assert "LEFT JOIN document_visibility_current dvc" in filtered_cte
+    assert "COALESCE(dvc.visible_search, TRUE)" in filtered_cte
+
+
+def test_pgvector_exact_path_default_has_no_visibility_join():
+    s = CountingSession(count=5)
+    _run_pgvector_filtered(s, enforce_visibility=False)
+    assert not [q for q in s.sql if "document_visibility_current" in q]
+
+
+def test_pgvector_index_path_with_a_broad_filter_still_excludes_hidden_chunks():
+    s = CountingSession(count=10**9)
+    out = _run_pgvector_filtered(s, enforce_visibility=True)
+    assert out["metadata"]["vector_path"] == "index"
+    (query,) = s.main_queries("nearest AS")
+    assert "LEFT JOIN document_visibility_current dvc" in query
