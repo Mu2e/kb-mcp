@@ -484,7 +484,7 @@ def kb_get(identifier: str) -> str:
     from ..kb import get
 
     try:
-        result = get(identifier=identifier)
+        result = get(identifier=identifier, enforce_visibility=True)
 
         if result is None:
             return "ERROR: Document not found"
@@ -594,7 +594,7 @@ def kb_get_image(identifier: str, image_filename: Optional[str] = None) -> Image
             image_identifier = identifier
 
         # Try to get the image document directly using identifier
-        image_doc = get(image_identifier)
+        image_doc = get(image_identifier, enforce_visibility=True)
 
         if not image_doc:
             raise ValueError(f"Image not found: {image_filename}")
@@ -914,7 +914,7 @@ def register_resources(mcp, oauth_provider, base_url):
         from ..kb import get
 
         try:
-            doc = get(uid=doc_id)
+            doc = get(uid=doc_id, enforce_visibility=True)
             if doc is None:
                 return json.dumps({"error": "Document not found"}, indent=2)
 

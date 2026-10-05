@@ -1100,6 +1100,50 @@ def _get(
             return documents
 
 
+def _drop_hidden_get(
+    result: Document | list[Document] | None,
+    session,
+) -> Document | list[Document] | None:
+    """Drop documents whose visible_get is explicitly False from a get() result.
+
+    Opt-in (see `get`'s `enforce_visibility`): internal/admin callers (CLI,
+    web admin routes, eval, dedup, ...) never call this, only the
+    agent-facing MCP entry points do. A document with no raw_document_id
+    (not all documents come from raw files) has no visibility row to check
+    and is always kept. No row for a (raw_document_id, "*") pair means
+    visible, same default as everywhere else in the visibility feature.
+    """
+    if result is None:
+        return None
+
+    from ..db_models import DocumentVisibilityCurrent, DOCUMENT_VISIBILITY_DEFAULT_GROUP
+
+    single = not isinstance(result, list)
+    docs = [result] if single else result
+
+    raw_ids = {d.raw_document_id for d in docs if d.raw_document_id}
+    if not raw_ids:
+        return result
+
+    with get_db_session(session) as s:
+        hidden_raw_ids = {
+            row.raw_document_id
+            for row in s.query(DocumentVisibilityCurrent.raw_document_id).filter(
+                DocumentVisibilityCurrent.raw_document_id.in_(raw_ids),
+                DocumentVisibilityCurrent.group_name == DOCUMENT_VISIBILITY_DEFAULT_GROUP,
+                DocumentVisibilityCurrent.visible_get.is_(False),
+            ).all()
+        }
+
+    if not hidden_raw_ids:
+        return result
+
+    visible_docs = [d for d in docs if d.raw_document_id not in hidden_raw_ids]
+    if single:
+        return visible_docs[0] if visible_docs else None
+    return visible_docs if visible_docs else None
+
+
 def get(
     identifier: str | None = None,
     *,
@@ -1112,6 +1156,7 @@ def get(
     offset: int | None = None,
     defer_content: bool = False,
     session = None,
+    enforce_visibility: bool = False,
 ) -> Document | list[Document] | None:
     """Get document(s) by various criteria.
 
@@ -1179,6 +1224,13 @@ def get(
                 caller might still touch them.
         session: Optional database session. If provided, documents remain attached to session.
                 If None, creates a new session and detaches documents.
+        enforce_visibility: If True, drop documents whose visible_get has been
+                explicitly set to False (see DocumentVisibilityCurrent). Default
+                False: internal/admin callers (CLI, web admin routes, eval,
+                dedup, ...) see everything. Only the agent-facing MCP entry
+                points (kb_get, kb_get_image, the kb://document resource) pass
+                True — an admin needs unrestricted access to review and manage
+                what's hidden.
 
     Returns:
         - Single Document if one match found
@@ -1197,7 +1249,10 @@ def get(
                 for doc in docs:
                     session.expunge(doc)
 
-            return docs if docs else None
+            result = docs if docs else None
+            if enforce_visibility:
+                result = _drop_hidden_get(result, session)
+            return result
 
     result = _get(
         identifier=identifier,
@@ -1215,6 +1270,8 @@ def get(
     # Type narrowing: when count_only=False, result is never int
     if isinstance(result, int):
         return None  # Should never happen, but handle for type safety
+    if enforce_visibility:
+        result = _drop_hidden_get(result, session)
     return result
 
 
