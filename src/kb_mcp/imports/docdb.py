@@ -343,7 +343,11 @@ class DocDBSource(Source):
         response = self.session.get(url, stream=True, timeout=self.timeout)
         self._check_response(response)
         content_type = response.headers.get("Content-Type", "")
-        if "text/html" in content_type:
+        # An HTML body is normally the SSO login page, but an attached .html
+        # file (e.g. an exported notebook) is HTML too. DocDB names a real
+        # attachment in Content-Disposition; the login redirect does not.
+        is_attachment = "filename=" in response.headers.get("Content-Disposition", "")
+        if "text/html" in content_type and not is_attachment:
             logger.warning(f"Got HTML instead of file from {url} — session may have expired")
             return None
         file_type = content_type.split("/")[-1].split(";")[0].strip()

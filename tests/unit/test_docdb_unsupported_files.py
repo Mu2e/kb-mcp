@@ -4,6 +4,8 @@ Entries like 58432 (a lone .zip) and 58450 (an .m4a plus an .mp4) used to
 come back with an error, so every cron run that saw them was marked
 "partial" until they aged out of the --days window.
 """
+import io
+
 from kb_mcp.imports.docdb import DocDBSource
 
 
@@ -43,3 +45,53 @@ def test_supported_file_that_fails_is_still_a_failure(monkeypatch, tmp_path):
     result = src.process_item({"id": 1}, tmp_path, session=None)
     assert not result.get("skipped")
     assert result["error"]
+
+
+class _Response:
+    ok = True
+    url = "https://docdb.example/RetrieveFile"
+
+    def __init__(self, headers, body=b"<html><head><title>x</title></head></html>"):
+        self.headers = headers
+        self.content = body
+        self.text = body.decode()
+
+
+class _Session:
+    def __init__(self, response):
+        self.get = lambda *a, **k: response
+
+
+def test_html_attachment_is_downloaded():
+    # An exported notebook arrives as text/html, named in Content-Disposition.
+    src = DocDBSource(login=False)
+    resp = _Response({"Content-Type": "text/html; charset=UTF-8",
+                      "Content-Disposition": 'filename="ResamplerVD101Comparison.html"'})
+    src.session = _Session(resp)
+    file_data = src._get_file(resp.url)
+    assert file_data is not None
+    assert file_data["document"].getvalue() == resp.content
+
+
+def test_unnamed_html_is_still_treated_as_a_login_page():
+    src = DocDBSource(login=False)
+    resp = _Response({"Content-Type": "text/html;charset=utf-8"})
+    src.session = _Session(resp)
+    assert src._get_file(resp.url) is None
+
+
+def test_html_file_reaches_add_document(monkeypatch, tmp_path):
+    from kb_mcp.imports import docdb
+
+    src = _source(monkeypatch, [_file("ResamplerVD101Comparison.html")])
+    monkeypatch.setattr(src, "_get_file", lambda link: {"type": "html", "document": io.BytesIO(b"<html></html>")})
+    added = []
+
+    def fake_add_document(path, **kwargs):
+        added.append(path.name)
+        return {"document_ids": ["d1"], "raw_document_id": "r1"}
+
+    monkeypatch.setattr(docdb, "add_document", fake_add_document)
+    result = src.process_item({"id": 58263}, tmp_path, session=None)
+    assert added == ["docdb-58263-ResamplerVD101Comparison.html"]
+    assert result["error"] is None
