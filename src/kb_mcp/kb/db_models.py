@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 
 from sqlalchemy import (
     JSON,
+    Boolean,
     Column,
     DateTime,
     ForeignKey,
@@ -1316,3 +1317,254 @@ class ParserCategories(Base):
 
     def __repr__(self) -> str:
         return f"<ParserCategories(id={self.id}, source_id={self.source_id}, n={self.num_comparisons})>"
+
+
+# Sentinel `group_name` meaning "applies to everyone" — used until per-group
+# visibility (e.g. different suppression for different user groups) exists.
+# Not NULL: NULL behaves inconsistently in the unique index/composite key
+# DocumentVisibilityCurrent relies on for its upsert.
+DOCUMENT_VISIBILITY_DEFAULT_GROUP = "*"
+
+
+class DocumentVisibilityRun(Base):
+    """Table 'document_visibility_runs': one row per visibility-sweep run.
+
+    Mirrors `ImportRun`'s split between a run-level overview and the
+    per-item work it did: a sweep (`kb tools visibility-sweep` or similar)
+    scans raw documents for ones that should be hidden (or explicitly
+    confirmed visible) from search/get, and this row records what it did,
+    separately from the individual decisions it wrote (see
+    `DocumentVisibilityDecision.run_id`).
+
+    Inserted with status "running" when the run starts and updated when it
+    ends, so a run killed outright stays visible as "running" rather than
+    leaving no trace.
+
+    Attributes:
+        id (str): Primary key (UUID).
+        status (str): "running", "success", "partial" or "failed".
+        started_time / finished_time (datetime): Run start and end.
+        hostname (str), pid (int): Where the run executed.
+        trigger (str): How it was started (e.g. "cron-script"), else "manual".
+        log_path (str): Log file of the run, if any.
+        args (dict): Command line / sweep parameters.
+        documents_scanned (int): Raw documents the sweep considered.
+        already_decided_skipped (int): Skipped because a decision already
+            existed (either polarity) — the sweep never re-litigates a
+            document once it has an explicit decision.
+        newly_hidden (int): Documents the sweep marked hidden (search and/or
+            get) this run.
+        newly_visible (int): Documents the sweep explicitly confirmed
+            visible this run (e.g. a borderline case a human cleared).
+        errors (int): Documents the sweep failed to classify.
+        error (str): Exception that ended the run, if status is "failed".
+        failures (list): [{"raw_document_id", "error"}] for each failure.
+        meta (dict): Anything else.
+    """
+
+    __tablename__ = "document_visibility_runs"
+
+    id = Column(
+        String(36),
+        primary_key=True,
+        default=lambda: str(uuid.uuid4()),
+    )
+    status = Column(String(16), nullable=False, default="running", index=True)
+    started_time = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=func.now(),
+        server_default=func.now(),
+        index=True,
+    )
+    finished_time = Column(DateTime(timezone=True), nullable=True)
+    hostname = Column(String(256), nullable=True)
+    pid = Column(Integer, nullable=True)
+    trigger = Column(String(64), nullable=True)
+    log_path = Column(String(2048), nullable=True)
+    args = Column(JSONB, nullable=True, default=dict)
+
+    documents_scanned = Column(Integer, nullable=True)
+    already_decided_skipped = Column(Integer, nullable=True)
+    newly_hidden = Column(Integer, nullable=True)
+    newly_visible = Column(Integer, nullable=True)
+    errors = Column(Integer, nullable=True)
+
+    error = Column(Text, nullable=True)
+    failures = Column(JSONB, nullable=True, default=list)
+    meta = Column(JSONB, nullable=True, default=dict)
+
+    def __repr__(self) -> str:
+        return (
+            f"<DocumentVisibilityRun(id={self.id}, status={self.status}, "
+            f"started={self.started_time}, scanned={self.documents_scanned})>"
+        )
+
+
+class DocumentVisibilityDecision(Base):
+    """Table 'document_visibility_decisions': append-only log of visibility decisions.
+
+    Each row is one decision about whether a raw document (and everything
+    parsed from it) should be visible in search results and/or direct `kb
+    get` lookups, for a given group. Rows are never updated — a later
+    decision for the same (raw_document_id, group_name) is a new row, so the
+    full history survives (which run made which call, and why). The
+    resolved "current" state is `DocumentVisibilityCurrent`, which an upsert
+    keeps in sync with the latest decision here.
+
+    No row for a (raw_document_id, group_name) pair means "visible" — this
+    table (and `DocumentVisibilityCurrent`) only ever holds exceptions, not
+    one row per document. An explicit `visible_search=True` decision still
+    has a purpose even though it matches the no-row default: it marks a
+    document as reviewed, so a sweep's `already_decided_skipped` check (see
+    `DocumentVisibilityRun`) stops re-flagging it every run.
+
+    Attributes:
+        id (str): Primary key (UUID).
+        raw_document_id (str): FK → documents_raw.id — the file this
+            decision covers (and everything parsed from it, regardless of
+            parser).
+        group_name (str): Which group this decision applies to.
+            `DOCUMENT_VISIBILITY_DEFAULT_GROUP` ("*") until per-group
+            visibility exists, meaning "everyone".
+        visible_search (bool): Whether matching documents may appear in
+            search results.
+        visible_get (bool): Whether matching documents may be fetched
+            directly (e.g. `kb get`).
+        reason (str): Why this decision was made (free text).
+        run_id (str): FK → document_visibility_runs.id — the sweep that
+            wrote this decision, if any (null for a manual one-off).
+        model (str): LLM model used, if the decision was LLM-assisted.
+        created_time (datetime): When this decision was recorded.
+        meta (dict): Additional metadata (e.g. the heuristic/score that
+            triggered it).
+    """
+
+    __tablename__ = "document_visibility_decisions"
+
+    id = Column(
+        String(36),
+        primary_key=True,
+        default=lambda: str(uuid.uuid4()),
+    )
+    raw_document_id = Column(
+        String(36),
+        ForeignKey("documents_raw.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    group_name = Column(
+        String(128),
+        nullable=False,
+        default=DOCUMENT_VISIBILITY_DEFAULT_GROUP,
+        index=True,
+    )
+    visible_search = Column(Boolean, nullable=False, default=True)
+    visible_get = Column(Boolean, nullable=False, default=True)
+    reason = Column(Text, nullable=True)
+    run_id = Column(
+        String(36),
+        ForeignKey("document_visibility_runs.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    model = Column(String(256), nullable=True)
+    created_time = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=func.now(),
+        server_default=func.now(),
+        index=True,
+    )
+    meta = Column(JSONB, nullable=True, default=dict)
+
+    raw_document = relationship("RawDocument")
+    run = relationship("DocumentVisibilityRun")
+
+    def __repr__(self) -> str:
+        return (
+            f"<DocumentVisibilityDecision(raw_document_id={self.raw_document_id}, "
+            f"group={self.group_name}, search={self.visible_search}, "
+            f"get={self.visible_get})>"
+        )
+
+
+class DocumentVisibilityCurrent(Base):
+    """Table 'document_visibility_current': resolved visibility state, upserted.
+
+    One row per (raw_document_id, group_name) exception — kept in sync with
+    the latest row in `DocumentVisibilityDecision` for that key (an upsert,
+    not an insert: this table has no history of its own). Exists
+    separately from the decision log specifically so search can join
+    against a small, indexed table instead of resolving "latest decision"
+    with a window function on every query — this table sits on the search
+    hot path, unlike `PrivacyFilter`, which nothing queries at search time.
+
+    No row for a key means "visible" (search and get both) — see
+    `DocumentVisibilityDecision` for why that default holds and why an
+    explicit visible=True row still gets written sometimes.
+
+    The upsert is latest-decision-wins, not a merge toward the more
+    restrictive value: an explicit decision to un-hide a document must take
+    effect, the same way `PrivacyFilter` lets a later, less restrictive
+    label override an earlier one. What the upsert must guard against is
+    out-of-order writes from concurrent sweep workers, not the direction of
+    the change — it should only overwrite this row if the incoming decision
+    is newer than whatever produced the current state, not unconditionally
+    on wall-clock `created_time` (which can skew across workers).
+
+    Attributes:
+        raw_document_id (str): FK → documents_raw.id (part of the composite
+            primary key).
+        group_name (str): Which group this row applies to (part of the
+            composite primary key). `DOCUMENT_VISIBILITY_DEFAULT_GROUP` ("*")
+            until per-group visibility exists.
+        visible_search (bool): Whether matching documents may appear in
+            search results.
+        visible_get (bool): Whether matching documents may be fetched
+            directly (e.g. `kb get`).
+        reason (str): Denormalized copy of the latest decision's reason, for
+            display without joining the history table.
+        decision_id (str): FK → document_visibility_decisions.id — the
+            decision that produced this state, for jumping to the full
+            history (model, run, meta) behind it.
+        updated_time (datetime): When this row last changed.
+    """
+
+    __tablename__ = "document_visibility_current"
+
+    raw_document_id = Column(
+        String(36),
+        ForeignKey("documents_raw.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    group_name = Column(
+        String(128),
+        primary_key=True,
+        default=DOCUMENT_VISIBILITY_DEFAULT_GROUP,
+    )
+    visible_search = Column(Boolean, nullable=False)
+    visible_get = Column(Boolean, nullable=False)
+    reason = Column(Text, nullable=True)
+    decision_id = Column(
+        String(36),
+        ForeignKey("document_visibility_decisions.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    updated_time = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=func.now(),
+        onupdate=func.now(),
+        server_default=func.now(),
+    )
+
+    raw_document = relationship("RawDocument")
+    decision = relationship("DocumentVisibilityDecision")
+
+    def __repr__(self) -> str:
+        return (
+            f"<DocumentVisibilityCurrent(raw_document_id={self.raw_document_id}, "
+            f"group={self.group_name}, search={self.visible_search}, "
+            f"get={self.visible_get})>"
+        )
