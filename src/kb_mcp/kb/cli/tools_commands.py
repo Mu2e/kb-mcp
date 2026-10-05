@@ -1351,6 +1351,176 @@ def cmd_filter_stats(args):
         sys.exit(1)
 
 
+def _resolve_raw_document(session, identifier):
+    """The one RawDocument an identifier names: a raw document UUID, a parsed
+    document UUID, "source_id/doc_id", or a bare doc_id.
+
+    Visibility is decided per raw file, so a parsed document resolves to its
+    raw document. Raises ValueError when nothing matches, or when a doc_id
+    matches several raw documents (it is not unique across sources, and a
+    re-staged file can leave duplicates) -- pass the raw UUID then.
+    """
+    from ..db_models import Document, RawDocument
+
+    raw = session.get(RawDocument, identifier)
+    if raw is not None:
+        return raw
+    doc = session.get(Document, identifier)
+    if doc is not None:
+        if not doc.raw_document_id:
+            raise ValueError(
+                f"document {identifier} has no raw document; visibility is decided per raw file"
+            )
+        return session.get(RawDocument, doc.raw_document_id)
+
+    query = session.query(RawDocument)
+    if "/" in identifier:
+        source_id, doc_id = identifier.split("/", 1)
+        query = query.filter(RawDocument.source_id == source_id, RawDocument.doc_id == doc_id)
+    else:
+        query = query.filter(RawDocument.doc_id == identifier)
+    matches = query.limit(11).all()
+    if not matches:
+        raise ValueError(f"no raw document matches {identifier!r}")
+    if len(matches) > 1:
+        listing = "\n".join(f"  {r.id}  {r.source_id}/{r.doc_id}" for r in matches[:10])
+        raise ValueError(
+            f"{identifier!r} matches several raw documents; pass one raw document UUID:\n{listing}"
+        )
+    return matches[0]
+
+
+def cmd_visibility_set(args):
+    """Record an explicit hide/show decision for one raw document."""
+    import getpass
+    from ..tools import record_visibility_decision
+
+    if args.visibility_command == "hide":
+        visible_search, visible_get = False, args.search_only
+    else:
+        visible_search, visible_get = True, True
+
+    try:
+        with get_db_session() as session:
+            raw = _resolve_raw_document(session, args.identifier)
+            result = record_visibility_decision(
+                raw.id,
+                visible_search=visible_search,
+                visible_get=visible_get,
+                reason=args.reason,
+                group_name=args.group,
+                meta={"origin": "cli", "user": getpass.getuser()},
+                session=session,
+            )
+            label = f"{raw.source_id}/{raw.doc_id}"
+    except ValueError as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+
+    print(
+        f"{label} ({raw.id}): search={'visible' if visible_search else 'hidden'}, "
+        f"get={'visible' if visible_get else 'hidden'}, group={args.group}"
+    )
+    if not result["applied"]:
+        print("  note: a newer decision already holds this document; recorded in history only")
+
+
+def cmd_visibility_list(args):
+    """List the current visibility exceptions."""
+    from ..db_models import DocumentVisibilityCurrent, RawDocument
+
+    with get_db_session() as session:
+        query = (
+            session.query(DocumentVisibilityCurrent, RawDocument)
+            .join(RawDocument, DocumentVisibilityCurrent.raw_document_id == RawDocument.id)
+            .filter(DocumentVisibilityCurrent.group_name == args.group)
+        )
+        if args.hidden:
+            query = query.filter(
+                (DocumentVisibilityCurrent.visible_search.is_(False))
+                | (DocumentVisibilityCurrent.visible_get.is_(False))
+            )
+        if args.source_id:
+            query = query.filter(RawDocument.source_id == args.source_id)
+        query = query.order_by(RawDocument.source_id, RawDocument.doc_id)
+        if args.limit:
+            query = query.limit(args.limit)
+        rows = [
+            {
+                "raw_document_id": cur.raw_document_id,
+                "source_id": raw.source_id,
+                "doc_id": raw.doc_id,
+                "visible_search": cur.visible_search,
+                "visible_get": cur.visible_get,
+                "reason": cur.reason,
+                "updated_time": str(cur.updated_time)[:19] if cur.updated_time else None,
+            }
+            for cur, raw in query.all()
+        ]
+
+    if args.json:
+        print(json.dumps(rows, indent=2))
+        return
+    if not rows:
+        print("No visibility exceptions.")
+        return
+    print(f"{'Search':<7} {'Get':<7} {'Source/Doc ID':<60} Reason")
+    print("-" * 120)
+    for r in rows:
+        print(
+            f"{'yes' if r['visible_search'] else 'HIDDEN':<7} {'yes' if r['visible_get'] else 'HIDDEN':<7} "
+            f"{(r['source_id'] or '') + '/' + (r['doc_id'] or ''):<60} {(r['reason'] or '')[:60]}"
+        )
+
+
+def cmd_visibility_history(args):
+    """Show every recorded decision for one raw document, oldest first."""
+    from ..db_models import DocumentVisibilityDecision
+
+    try:
+        with get_db_session() as session:
+            raw = _resolve_raw_document(session, args.identifier)
+            decisions = (
+                session.query(DocumentVisibilityDecision)
+                .filter(DocumentVisibilityDecision.raw_document_id == raw.id)
+                .order_by(DocumentVisibilityDecision.seq)
+                .all()
+            )
+            label = f"{raw.source_id}/{raw.doc_id} ({raw.id})"
+            rows = [
+                {
+                    "seq": d.seq,
+                    "group_name": d.group_name,
+                    "visible_search": d.visible_search,
+                    "visible_get": d.visible_get,
+                    "reason": d.reason,
+                    "run_id": d.run_id,
+                    "model": d.model,
+                    "meta": d.meta,
+                    "created_time": str(d.created_time)[:19] if d.created_time else None,
+                }
+                for d in decisions
+            ]
+    except ValueError as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+
+    if args.json:
+        print(json.dumps(rows, indent=2))
+        return
+    print(label)
+    if not rows:
+        print("  no decisions recorded (visible)")
+        return
+    for r in rows:
+        origin = (r["meta"] or {}).get("origin") or ("sweep" if r["run_id"] else "")
+        print(
+            f"  #{r['seq']:<5} {r['created_time']}  group={r['group_name']}  "
+            f"search={'yes' if r['visible_search'] else 'HIDDEN'}  get={'yes' if r['visible_get'] else 'HIDDEN'}  "
+            f"{origin:<6} {r['reason'] or ''}"
+        )
+
+
 def cmd_export(args):
     """Export documents from a source into a folder hierarchy."""
     try:
@@ -1861,6 +2031,53 @@ def setup_commands(subparsers):
         help="Output as JSON"
     )
     filter_stats_parser.set_defaults(func=cmd_filter_stats)
+
+    visibility_parser = tools_subparsers.add_parser(
+        "visibility",
+        help="Hide documents from, or explicitly keep them in, the agent-facing MCP tools",
+        description=(
+            "Explicit per-raw-document visibility decisions. No decision means visible. "
+            "Only kb_search / kb_get (the MCP tools) apply them; the CLI and web UI "
+            "always see everything."
+        ),
+    )
+    visibility_subparsers = visibility_parser.add_subparsers(
+        dest="visibility_command", help="Visibility commands"
+    )
+    for name, help_text in (
+        ("hide", "Hide a document from kb_search and kb_get"),
+        ("show", "Mark a document reviewed and visible (un-hides it, and keeps sweeps from re-flagging it)"),
+    ):
+        p = visibility_subparsers.add_parser(name, help=help_text)
+        p.add_argument(
+            "identifier",
+            help="Raw document UUID, document UUID, source_id/doc_id, or doc_id",
+        )
+        p.add_argument("--reason", required=True, help="Why (stored with the decision)")
+        p.add_argument("--group", default="*", help="Group the decision applies to (default: * = everyone)")
+        if name == "hide":
+            p.add_argument(
+                "--search-only", action="store_true",
+                help="Hide from kb_search only; kb_get can still fetch it",
+            )
+        p.set_defaults(func=cmd_visibility_set)
+
+    vis_list_parser = visibility_subparsers.add_parser("list", help="List current visibility exceptions")
+    vis_list_parser.add_argument("--hidden", action="store_true", help="Only documents hidden from search or get")
+    vis_list_parser.add_argument("--source-id", help="Filter to a single source")
+    vis_list_parser.add_argument("--group", default="*", help="Group (default: *)")
+    vis_list_parser.add_argument("--limit", type=int, help="Maximum number of results")
+    vis_list_parser.add_argument("--json", action="store_true", help="Output as JSON")
+    vis_list_parser.set_defaults(func=cmd_visibility_list)
+
+    vis_history_parser = visibility_subparsers.add_parser(
+        "history", help="Show every decision recorded for one document"
+    )
+    vis_history_parser.add_argument(
+        "identifier", help="Raw document UUID, document UUID, source_id/doc_id, or doc_id",
+    )
+    vis_history_parser.add_argument("--json", action="store_true", help="Output as JSON")
+    vis_history_parser.set_defaults(func=cmd_visibility_history)
 
     export_parser = tools_subparsers.add_parser(
         "export",
