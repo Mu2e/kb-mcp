@@ -42,7 +42,7 @@ MODES = [("llm_only", "LlmOnly", "Model alone"), ("rag", "Rag", "One search + an
 #: Retrieval variants (run name part) with display names.
 RETRIEVAL = [("semantic", "Semantic"), ("fulltext", "Full-text"), ("hybrid", "Hybrid (MCP default)"),
              ("hybrid-rerank", "Hybrid + reranker"), ("hybrid-section512", "Hybrid, section chunks only"),
-             ("hybrid-tokens512", "Hybrid, token chunks only")]
+             ("hybrid-summary512", "Hybrid, summary chunks only"), ("hybrid-tokens512", "Hybrid, token chunks only")]
 
 #: Validated categorical palette (dataviz reference, slots 1-4, light surface):
 #: one fixed color per model, the same in every figure.
@@ -217,7 +217,7 @@ def write_numbers(data, path):
         for k in ("newer", "older", "conflicting", "acknowledged"):
             m(f"Src{key}{k.capitalize()}", c[k])
     names = {"semantic": "Semantic", "fulltext": "Fulltext", "hybrid": "Hybrid", "hybrid-rerank": "Rerank",
-             "hybrid-section512": "Section", "hybrid-tokens512": "Tokens"}
+             "hybrid-section512": "Section", "hybrid-summary512": "Summary", "hybrid-tokens512": "Tokens"}
     for variant, r in data["retrieval"].items():
         for k in (1, 5, 10, 20):
             m(f"Hit{names[variant]}{['One', 'Five', 'Ten', 'Twenty'][[1, 5, 10, 20].index(k)]}", _pct(r[f"hit_at_{k}"]))
@@ -267,7 +267,7 @@ def write_figures(data, out):
 
     # 2. Retrieval ablations: hit@5 and hit@20 per variant, horizontal bars.
     variants = [(v, r) for v, _ in RETRIEVAL for vv, r in data["retrieval"].items() if vv == v]
-    fig, ax = plt.subplots(figsize=(6.2, 2.6))
+    fig, ax = plt.subplots(figsize=(6.2, 2.9))
     for k, color, dy in ((5, "#2a78d6", -0.2), (20, "#eb6834", 0.2)):
         ys = [i + dy for i in range(len(variants))]
         vals = [100 * r[f"hit_at_{k}"] for _, r in variants]
