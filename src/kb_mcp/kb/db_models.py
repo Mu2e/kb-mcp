@@ -16,6 +16,7 @@ from sqlalchemy import (
     Index,
     Integer,
     LargeBinary,
+    Sequence,
     String,
     Text,
     func,
@@ -1421,6 +1422,16 @@ class DocumentVisibilityDecision(Base):
 
     Attributes:
         id (str): Primary key (UUID).
+        seq (int): DB-assigned monotonic sequence number, separate from the
+            UUID primary key. UUIDs aren't sortable, so `DocumentVisibilityCurrent`
+            uses this (mirrored as `decision_seq`) to tell whether an
+            incoming decision is newer than whatever produced its current
+            state — a plain `nextval()`, immune to wall-clock skew across
+            concurrent writers. Not a correctness issue if two decisions
+            race for the same sequence slot ordering vs. commit order: the
+            upsert's guard only needs "was this decision issued after the
+            one current reflects," which an allocated sequence value
+            answers regardless of which transaction commits first.
         raw_document_id (str): FK → documents_raw.id — the file this
             decision covers (and everything parsed from it, regardless of
             parser).
@@ -1446,6 +1457,12 @@ class DocumentVisibilityDecision(Base):
         String(36),
         primary_key=True,
         default=lambda: str(uuid.uuid4()),
+    )
+    seq = Column(
+        Integer,
+        Sequence("document_visibility_decisions_seq"),
+        nullable=False,
+        unique=True,
     )
     raw_document_id = Column(
         String(36),
@@ -1528,6 +1545,9 @@ class DocumentVisibilityCurrent(Base):
         decision_id (str): FK → document_visibility_decisions.id — the
             decision that produced this state, for jumping to the full
             history (model, run, meta) behind it.
+        decision_seq (int): Mirrors that decision's `seq`. The upsert's
+            ordering guard compares against this directly rather than
+            joining back to document_visibility_decisions.
         updated_time (datetime): When this row last changed.
     """
 
@@ -1551,6 +1571,7 @@ class DocumentVisibilityCurrent(Base):
         ForeignKey("document_visibility_decisions.id", ondelete="SET NULL"),
         nullable=True,
     )
+    decision_seq = Column(Integer, nullable=True)
     updated_time = Column(
         DateTime(timezone=True),
         nullable=False,

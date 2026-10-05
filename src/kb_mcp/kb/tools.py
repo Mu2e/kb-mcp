@@ -12,7 +12,13 @@ from sqlalchemy import inspect as sqlalchemy_inspect
 from tqdm import tqdm
 
 from .database import get_db_session
-from .db_models import Document, PrivacyFilter
+from .db_models import (
+    Document,
+    PrivacyFilter,
+    DocumentVisibilityDecision,
+    DocumentVisibilityCurrent,
+    DOCUMENT_VISIBILITY_DEFAULT_GROUP,
+)
 from .embedding.db_models import Chunk, get_embedding_table
 from .embedding.chunking import resolve_strategy_name
 from ..config import get_embedding_config
@@ -1631,6 +1637,102 @@ def summarize_all(
     )
 
     return result
+
+
+def record_visibility_decision(
+    raw_document_id: str,
+    visible_search: bool = True,
+    visible_get: bool = True,
+    reason: Optional[str] = None,
+    group_name: str = DOCUMENT_VISIBILITY_DEFAULT_GROUP,
+    run_id: Optional[str] = None,
+    model: Optional[str] = None,
+    meta: Optional[Dict[str, Any]] = None,
+    session=None,
+) -> Dict[str, Any]:
+    """Record a document visibility decision and resolve it into the current-state table.
+
+    Inserts an immutable row into `document_visibility_decisions`, then upserts
+    `document_visibility_current` for (raw_document_id, group_name) — but only
+    if this decision is newer than whatever currently holds that key. "Newer"
+    is decided by the decision's DB-assigned `seq`, not wall-clock time, so a
+    decision that was issued earlier can't clobber one issued later just
+    because its transaction happened to commit second (see
+    `DocumentVisibilityDecision.seq`).
+
+    No row in either table means "visible" (see `DocumentVisibilityDecision`'s
+    docstring) — pass explicit True values to record that a document was
+    reviewed and confirmed visible (stops a sweep from re-flagging it), or
+    False to hide it.
+
+    Args:
+        raw_document_id: The documents_raw.id this decision covers.
+        visible_search: Whether matching documents may appear in search results.
+        visible_get: Whether matching documents may be fetched directly (e.g. `kb get`).
+        reason: Free-text reason for this decision.
+        group_name: Which group this applies to (default: everyone).
+        run_id: The document_visibility_runs.id that produced this decision, if any.
+        model: LLM model used, if this decision was LLM-assisted.
+        meta: Additional metadata to store on the decision row.
+        session: Optional existing session to write within.
+
+    Returns:
+        Dictionary with the new decision's `decision_id` / `seq`, and
+        `applied` (False means a decision with a higher `seq` already held
+        that key, so this one lost the race and left current state alone —
+        the decision row itself is still recorded either way).
+    """
+    from sqlalchemy import func
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+    with get_db_session(session) as session:
+        decision = DocumentVisibilityDecision(
+            raw_document_id=raw_document_id,
+            group_name=group_name,
+            visible_search=visible_search,
+            visible_get=visible_get,
+            reason=reason,
+            run_id=run_id,
+            model=model,
+            meta=meta or {},
+        )
+        session.add(decision)
+        session.flush()  # assigns decision.id / decision.seq via the DB sequence
+
+        upsert = pg_insert(DocumentVisibilityCurrent).values(
+            raw_document_id=raw_document_id,
+            group_name=group_name,
+            visible_search=visible_search,
+            visible_get=visible_get,
+            reason=reason,
+            decision_id=decision.id,
+            decision_seq=decision.seq,
+        )
+        upsert = upsert.on_conflict_do_update(
+            index_elements=[
+                DocumentVisibilityCurrent.raw_document_id,
+                DocumentVisibilityCurrent.group_name,
+            ],
+            set_={
+                "visible_search": upsert.excluded.visible_search,
+                "visible_get": upsert.excluded.visible_get,
+                "reason": upsert.excluded.reason,
+                "decision_id": upsert.excluded.decision_id,
+                "decision_seq": upsert.excluded.decision_seq,
+                "updated_time": func.now(),
+            },
+            where=(
+                DocumentVisibilityCurrent.decision_seq.is_(None)
+                | (DocumentVisibilityCurrent.decision_seq < upsert.excluded.decision_seq)
+            ),
+        )
+        result = session.execute(upsert)
+
+        return {
+            "decision_id": decision.id,
+            "seq": decision.seq,
+            "applied": result.rowcount > 0,
+        }
 
 
 def filter_all(
