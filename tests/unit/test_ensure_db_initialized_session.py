@@ -1,61 +1,67 @@
-"""_ensure_db_initialized must never touch the global engine when a caller
-passes its own session.
+"""_ensure_db_initialized must not touch the global engine for a session bound elsewhere.
 
 init_db() prepares the globally *configured* engine (get_engine(), from
 whatever .env/KB_ENV_FILE the process resolves) -- not any particular
-session object. Before this fix, every get()/add_document()/etc. call ran
-_ensure_db_initialized() unconditionally on first use in a process,
-regardless of whether the caller had passed an explicit `session` bound to
-a completely different (even unrelated) engine -- e.g. an isolated test
-database. In a checkout whose real .env points at a production database,
-this meant calling get(uid=..., session=my_own_sqlite_session) still tried
-to reach the real production database as a side effect: CREATE EXTENSION,
-create_all, and schema-patching, over the network, every single time, with
-no way for the caller to opt out short of it already having run once
-earlier in the process.
+session. It used to run on first use in a process regardless of the session
+a caller passed, so get(uid=..., session=my_own_sqlite_session) in a checkout
+whose .env points at production still reached out to production
+(CREATE EXTENSION, create_all, schema patching) as a side effect.
+
+A session opened from the global engine itself must still trigger the lazy
+init: web routes pass their own such sessions and the servers never call
+init_db() at startup.
 """
+
+import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session
 
 import kb_mcp.kb.documents.operations as ops
 
 
-def test_no_session_still_initializes_the_global_engine_once(monkeypatch):
-    """The common case (CLI, server, no explicit session) is unchanged: the
-    function is about to open its own session from the global engine via
-    get_db_session(), which is exactly what init_db() must prepare first."""
+@pytest.fixture()
+def init_calls(monkeypatch):
+    global_engine = create_engine("sqlite://")
+    monkeypatch.setattr(ops, "get_engine", lambda: global_engine)
     monkeypatch.setattr(ops, "_db_initialized", False)
     calls = []
     monkeypatch.setattr(ops, "init_db", lambda create_tables=True: calls.append(create_tables))
+    return global_engine, calls
 
+
+def test_no_session_initializes_the_global_engine_once(init_calls):
+    _, calls = init_calls
+    ops._ensure_db_initialized(session=None)
     ops._ensure_db_initialized(session=None)
     assert calls == [True]
 
-    # Second call in the same process: already initialized, must not repeat.
-    ops._ensure_db_initialized(session=None)
-    assert calls == [True]
 
-
-def test_an_explicit_session_skips_the_global_engine_entirely(monkeypatch):
-    """The bug: a caller-provided session must never trigger init_db()
-    against the unrelated globally configured engine, regardless of whether
-    the global flag has tripped yet in this process."""
-    monkeypatch.setattr(ops, "_db_initialized", False)
-    calls = []
-    monkeypatch.setattr(ops, "init_db", lambda create_tables=True: calls.append(create_tables))
-
-    ops._ensure_db_initialized(session=object())
-
-    assert calls == [], "init_db() must not run when the caller supplied its own session"
-    # And it must not have consumed the one-time global flag either -- a
-    # later call with no session still needs to do the real work.
+def test_a_session_on_another_engine_skips_init(init_calls):
+    _, calls = init_calls
+    other = Session(bind=create_engine("sqlite://"))
+    ops._ensure_db_initialized(session=other)
+    assert calls == []
+    # The one-time flag must stay untripped for a later global-engine call.
     assert ops._db_initialized is False
 
 
-def test_a_later_call_with_no_session_still_initializes_after_a_session_call(monkeypatch):
-    monkeypatch.setattr(ops, "_db_initialized", False)
-    calls = []
-    monkeypatch.setattr(ops, "init_db", lambda create_tables=True: calls.append(create_tables))
+def test_a_session_on_another_engines_connection_skips_init(init_calls):
+    """Test fixtures bind sessions to a Connection, not an Engine."""
+    _, calls = init_calls
+    conn = create_engine("sqlite://").connect()
+    ops._ensure_db_initialized(session=Session(bind=conn))
+    conn.close()
+    assert calls == []
 
-    ops._ensure_db_initialized(session=object())
+
+def test_a_session_on_the_global_engine_still_initializes(init_calls):
+    global_engine, calls = init_calls
+    ops._ensure_db_initialized(session=Session(bind=global_engine))
+    assert calls == [True]
+
+
+def test_a_later_call_with_no_session_still_initializes(init_calls):
+    _, calls = init_calls
+    ops._ensure_db_initialized(session=Session(bind=create_engine("sqlite://")))
     ops._ensure_db_initialized(session=None)
-
     assert calls == [True]

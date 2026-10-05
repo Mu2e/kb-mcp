@@ -7,7 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
-from ..database import get_db_session, init_db
+from ..database import get_db_session, get_engine, init_db
 from ..db_models import Document, DocumentParserOutput, Source
 
 logger = logging.getLogger(__name__)
@@ -209,12 +209,15 @@ def _ensure_db_initialized(session=None) -> None:
     purpose, e.g. an isolated test database); running init_db() against the
     unrelated global engine in that case is a surprising side effect at
     best, and a real network call to a possibly-unrelated (even production)
-    database at worst. Only skip when a session was actually provided here —
-    when it wasn't, the caller is about to open one from the global engine
-    via get_db_session(), which is exactly what init_db() needs to prepare.
+    database at worst. So skip only when the session is bound to a different
+    engine than the global one. A session opened from the global engine
+    (web routes pass their own, and the servers never call init_db() at
+    startup) still relies on this lazy init, as does no session at all.
     """
     if session is not None:
-        return
+        bind = session.get_bind()
+        if getattr(bind, "engine", bind) is not get_engine():
+            return
     global _db_initialized
     if not _db_initialized:
         init_db(create_tables=True)
