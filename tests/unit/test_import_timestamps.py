@@ -101,7 +101,7 @@ def _run_add_document(monkeypatch, tmp_path, *, already_ingested, force_reparse)
         return documents
 
     monkeypatch.setattr(operations, "add_parsed_many", fake_add_parsed_many)
-    monkeypatch.setattr(operations, "_ensure_db_initialized", lambda: None)
+    monkeypatch.setattr(operations, "_ensure_db_initialized", lambda session=None: None)
     # insert_raw_document returns None when the content_hash already exists.
     monkeypatch.setattr(
         operations,
