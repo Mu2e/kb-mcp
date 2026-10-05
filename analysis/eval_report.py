@@ -108,6 +108,20 @@ def collect(prefix, generation_ids, judge="argo:gpt-5.5", judge_version=3):
             data["paired"]["opus_only"] = sum(1 for q in common if o[q].is_judge_hit and not s[q].is_judge_hit)
             data["paired"]["sonnet_only"] = sum(1 for q in common if s[q].is_judge_hit and not o[q].is_judge_hit)
 
+        # Every mode on the paired question set, for like-for-like comparisons
+        # with a model run on that set only.
+        paired_modes = {}
+        for mode, mkey, _ in MODES:
+            mode_runs = {key: _results(session, f"{prefix}{mode}-{model_label(m)}-{qsets[paired_gid]}-{judge_part}")[1]
+                         for m, key, _ in MODELS}
+            mode_runs = {k: v for k, v in mode_runs.items() if v}
+            if not mode_runs:
+                continue
+            qs = set.intersection(*(set(v) for v in mode_runs.values()))
+            paired_modes[mkey] = {"n": len(qs), "correct": {k: sum(1 for q in qs if v[q].is_judge_hit)
+                                                            for k, v in mode_runs.items()}}
+        data["paired_modes"] = paired_modes
+
         # Agent behaviour per model (from the answers; judged runs copy them).
         behaviour, conflicts_by_model = {}, {}
         for model, key, _ in MODELS:
@@ -206,6 +220,9 @@ def write_numbers(data, path):
         m(f"Paired{key}", f"{100 * ok / p['n']:.1f}\\%")
     if "opus_only" in p:
         m("PairedOpusOnly", p["opus_only"]); m("PairedSonnetOnly", p["sonnet_only"])
+    for mkey, pm in data.get("paired_modes", {}).items():
+        for key, ok in pm["correct"].items():
+            m(f"Paired{mkey}{key}", f"{100 * ok / pm['n']:.1f}\\%")
     for key, b in data["behaviour"].items():
         if b["seconds_per_answer"] is not None:
             m(f"Sec{key}", f"{b['seconds_per_answer']:.0f}")
