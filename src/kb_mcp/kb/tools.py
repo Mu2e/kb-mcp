@@ -1764,6 +1764,191 @@ def record_visibility_decision(
         }
 
 
+SPREADSHEET_SOURCE_TYPES = (
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "application/vnd.ms-excel",
+    "application/csv",
+    "text/csv",
+)
+
+
+def _rule_oversized_spreadsheet(
+    session,
+    *,
+    source_id: Optional[str] = None,
+    max_chars: int = 500_000,
+    hide_get: bool = False,
+) -> List[Dict[str, Any]]:
+    """Spreadsheet raw documents whose longest parsed text exceeds max_chars.
+
+    The default matches the DocDB cron job's --max-embed-chars: these are
+    the financial spreadsheets (up to ~13M chars) it never chunks, which
+    otherwise reach search through their summary chunk alone. Limited to
+    spreadsheet source types on purpose -- the long PDFs above the same
+    size are real reports. Hidden from search; kb_get can still fetch them
+    unless hide_get.
+    """
+    from sqlalchemy import func
+
+    longest = func.max(func.length(Document.text)).label("chars")
+    query = (
+        session.query(Document.raw_document_id, Document.source_id, Document.source_type, longest)
+        .filter(
+            Document.raw_document_id.isnot(None),
+            Document.source_type.in_(SPREADSHEET_SOURCE_TYPES),
+        )
+        .group_by(Document.raw_document_id, Document.source_id, Document.source_type)
+        .having(longest > max_chars)
+    )
+    if source_id:
+        query = query.filter(Document.source_id == source_id)
+
+    return [
+        {
+            "raw_document_id": raw_id,
+            "visible_search": False,
+            "visible_get": not hide_get,
+            "reason": f"oversized spreadsheet: {chars:,} chars > {max_chars:,}",
+            "meta": {"rule": "oversized-spreadsheet", "chars": chars, "max_chars": max_chars,
+                     "source_type": source_type},
+        }
+        for raw_id, _source, source_type, chars in query.all()
+    ]
+
+
+VISIBILITY_RULES = {
+    "oversized-spreadsheet": _rule_oversized_spreadsheet,
+}
+
+
+def _already_decided(session, raw_document_ids, group_name: str) -> set:
+    """Raw documents with any decision for this group, either polarity.
+
+    A sweep never re-litigates a document once someone (or an earlier sweep)
+    has decided -- including an explicit `show`, which is how a reviewed
+    document stays visible.
+    """
+    if not raw_document_ids:
+        return set()
+    rows = (
+        session.query(DocumentVisibilityDecision.raw_document_id)
+        .filter(
+            DocumentVisibilityDecision.raw_document_id.in_(list(raw_document_ids)),
+            DocumentVisibilityDecision.group_name == group_name,
+        )
+        .distinct()
+        .all()
+    )
+    return {r[0] for r in rows}
+
+
+def visibility_sweep(
+    rule: str,
+    *,
+    apply: bool = False,
+    source_id: Optional[str] = None,
+    limit: Optional[int] = None,
+    group_name: str = DOCUMENT_VISIBILITY_DEFAULT_GROUP,
+    rule_options: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Run one visibility rule over the corpus; write its decisions only if `apply`.
+
+    Without `apply` nothing is written -- not even a run row -- and the
+    result lists what would change. With it, a DocumentVisibilityRun row
+    records the run (status, counts, trigger, log path) and every decision
+    points back to it through run_id.
+
+    Returns a dict with `rule`, `applied`, `matched` (raw documents the rule
+    selected), `already_decided` (skipped: they have a decision already),
+    `decisions` (the ones written, or that would be), `errors`, `run_id`.
+    """
+    import os
+    import socket
+    from .db_models import DocumentVisibilityRun
+
+    if rule not in VISIBILITY_RULES:
+        raise ValueError(f"unknown rule {rule!r}; available: {', '.join(sorted(VISIBILITY_RULES))}")
+    rule_options = rule_options or {}
+
+    with get_db_session() as session:
+        matched = VISIBILITY_RULES[rule](session, source_id=source_id, **rule_options)
+        decided = _already_decided(session, {m["raw_document_id"] for m in matched}, group_name)
+    pending = [m for m in matched if m["raw_document_id"] not in decided]
+    if limit is not None:
+        pending = pending[:limit]
+
+    result: Dict[str, Any] = {
+        "rule": rule,
+        "applied": apply,
+        "matched": len(matched),
+        "already_decided": len(decided),
+        "decisions": pending,
+        "errors": [],
+        "run_id": None,
+    }
+    if not apply:
+        return result
+
+    args = {"rule": rule, "source_id": source_id, "limit": limit, "group_name": group_name, **rule_options}
+    with get_db_session() as session:
+        run = DocumentVisibilityRun(
+            hostname=socket.gethostname(),
+            pid=os.getpid(),
+            trigger=os.getenv("KB_RUN_TRIGGER") or "manual",
+            log_path=os.getenv("KB_RUN_LOG"),
+            args=args,
+            documents_scanned=len(matched),
+            already_decided_skipped=len(decided),
+        )
+        session.add(run)
+        session.flush()
+        run_id = run.id
+    result["run_id"] = run_id
+
+    hidden = visible = 0
+    status = "success"
+    try:
+        # One transaction per decision: a failure loses that document only.
+        for d in pending:
+            try:
+                record_visibility_decision(
+                    d["raw_document_id"],
+                    visible_search=d["visible_search"],
+                    visible_get=d["visible_get"],
+                    reason=d["reason"],
+                    group_name=group_name,
+                    run_id=run_id,
+                    meta=d["meta"],
+                )
+            except Exception as e:  # noqa: BLE001 - recorded on the run, sweep continues
+                logger.error(f"visibility sweep: {d['raw_document_id']}: {e}")
+                result["errors"].append({"raw_document_id": d["raw_document_id"], "error": str(e)})
+                continue
+            if d["visible_search"] and d["visible_get"]:
+                visible += 1
+            else:
+                hidden += 1
+        if result["errors"]:
+            status = "partial"
+    except BaseException as e:
+        status = "failed"
+        with get_db_session() as session:
+            session.query(DocumentVisibilityRun).filter_by(id=run_id).update({"error": str(e)})
+        raise
+    finally:
+        from sqlalchemy import func
+        with get_db_session() as session:
+            session.query(DocumentVisibilityRun).filter_by(id=run_id).update({
+                "status": status,
+                "finished_time": func.now(),
+                "newly_hidden": hidden,
+                "newly_visible": visible,
+                "errors": len(result["errors"]),
+                "failures": result["errors"],
+            })
+    return result
+
+
 def filter_all(
     source_id: Optional[str] = None,
     parser_name: str = "marker",

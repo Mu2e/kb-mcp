@@ -1521,6 +1521,58 @@ def cmd_visibility_history(args):
         )
 
 
+def cmd_visibility_sweep(args):
+    """Run a visibility rule; dry run unless --apply."""
+    from ..tools import visibility_sweep
+
+    rule_options = {}
+    if args.rule == "oversized-spreadsheet":
+        rule_options = {"max_chars": args.max_chars, "hide_get": args.hide_get}
+
+    try:
+        result = visibility_sweep(
+            args.rule,
+            apply=args.apply,
+            source_id=args.source_id,
+            limit=args.limit,
+            group_name=args.group,
+            rule_options=rule_options,
+        )
+    except ValueError as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+
+    if args.json:
+        print(json.dumps(result, indent=2, default=str))
+        return
+
+    with get_db_session() as session:
+        from ..db_models import RawDocument
+        ids = [d["raw_document_id"] for d in result["decisions"]]
+        labels = {
+            r.id: f"{r.source_id}/{r.doc_id}"
+            for r in session.query(RawDocument).filter(RawDocument.id.in_(ids)).all()
+        } if ids else {}
+
+    verb = "Recorded" if result["applied"] else "Would record (dry run, nothing written)"
+    print(f"Rule {result['rule']}: {result['matched']} matched, "
+          f"{result['already_decided']} already decided (skipped)")
+    print(f"{verb}: {len(result['decisions'])} decision(s)")
+    for d in result["decisions"]:
+        search = "visible" if d["visible_search"] else "HIDDEN"
+        get_ = "visible" if d["visible_get"] else "HIDDEN"
+        print(f"  search={search:<7} get={get_:<7} {labels.get(d['raw_document_id'], d['raw_document_id'])}"
+              f"  -- {d['reason']}")
+    if result["errors"]:
+        print(f"{len(result['errors'])} error(s):")
+        for e in result["errors"]:
+            print(f"  {e['raw_document_id']}: {e['error']}")
+    if result["run_id"]:
+        print(f"Run: {result['run_id']}")
+    elif not result["applied"] and result["decisions"]:
+        print("Re-run with --apply to write these decisions.")
+
+
 def cmd_export(args):
     """Export documents from a source into a folder hierarchy."""
     try:
@@ -2078,6 +2130,33 @@ def setup_commands(subparsers):
     )
     vis_history_parser.add_argument("--json", action="store_true", help="Output as JSON")
     vis_history_parser.set_defaults(func=cmd_visibility_history)
+
+    vis_sweep_parser = visibility_subparsers.add_parser(
+        "sweep",
+        help="Apply a rule across the corpus (dry run unless --apply)",
+        description=(
+            "Select documents with a rule and record a visibility decision for each one "
+            "that has no decision yet. Prints what it would do unless --apply is given."
+        ),
+    )
+    vis_sweep_parser.add_argument(
+        "--rule", required=True, choices=["oversized-spreadsheet"],
+        help="oversized-spreadsheet: spreadsheets over --max-chars, hidden from search",
+    )
+    vis_sweep_parser.add_argument("--apply", action="store_true", help="Write the decisions (default: dry run)")
+    vis_sweep_parser.add_argument("--source-id", help="Restrict to a single source")
+    vis_sweep_parser.add_argument("--limit", type=int, help="Record at most N decisions")
+    vis_sweep_parser.add_argument("--group", default="*", help="Group (default: *)")
+    vis_sweep_parser.add_argument(
+        "--max-chars", type=int, default=500_000,
+        help="oversized-spreadsheet threshold in characters (default: 500000, as the DocDB job's --max-embed-chars)",
+    )
+    vis_sweep_parser.add_argument(
+        "--hide-get", action="store_true",
+        help="oversized-spreadsheet: also hide from kb_get (default: search only)",
+    )
+    vis_sweep_parser.add_argument("--json", action="store_true", help="Output as JSON")
+    vis_sweep_parser.set_defaults(func=cmd_visibility_sweep)
 
     export_parser = tools_subparsers.add_parser(
         "export",

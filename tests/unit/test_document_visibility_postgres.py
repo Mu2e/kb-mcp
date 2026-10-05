@@ -111,3 +111,14 @@ def test_a_decision_issued_earlier_cannot_clobber_one_issued_later(db_session, r
 
 def test_no_row_means_visible_until_a_decision_is_recorded(db_session, raw_document_id):
     assert _current(db_session, raw_document_id) is None
+
+
+def test_already_decided_is_scoped_to_the_group(db_session, raw_document_id):
+    from kb_mcp.kb.tools import _already_decided
+
+    record_visibility_decision(
+        raw_document_id, visible_search=True, visible_get=True,
+        reason="reviewed", session=db_session,
+    )
+    assert _already_decided(db_session, {raw_document_id}, "*") == {raw_document_id}
+    assert _already_decided(db_session, {raw_document_id}, "some-group") == set()
