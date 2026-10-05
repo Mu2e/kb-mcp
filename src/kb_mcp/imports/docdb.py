@@ -598,6 +598,7 @@ class DocDBSource(Source):
 
         document_ids: List[str] = []
         raw_document_ids: List[str] = []
+        unsupported: List[str] = []
 
         for file_info in meta["files"]:
             filename = file_info.get("filename") or file_info.get("text", "unknown")
@@ -611,6 +612,7 @@ class DocDBSource(Source):
             file_ext = Path(filename).suffix.lstrip(".").lower()
             if file_ext not in PARSER_MAP:
                 logger.info(f"Skipping unsupported file type '{file_ext}': {filename}")
+                unsupported.append(file_ext or "no extension")
                 continue
 
             logger.debug(f"Downloading {filename} from doc {doc_id_str}")
@@ -660,6 +662,22 @@ class DocDBSource(Source):
         # skip_parse leaves document_ids empty by design (only RawDocument
         # rows exist yet) — raw_document_ids is the success signal there.
         success_ids = raw_document_ids if self.skip_parse else document_ids
+
+        # Nothing here we can parse (a zip, a recording): a skip, not a
+        # failure. Reported as an error it marked every run that saw such an
+        # entry "partial", until the entry aged out of the --days window.
+        if meta["files"] and len(unsupported) == len(meta["files"]):
+            logger.info(
+                f"Skipping doc {doc_id_str} — no supported file types "
+                f"({', '.join(sorted(set(unsupported)))})"
+            )
+            return {
+                "document_ids": [],
+                "num_documents": 0,
+                "parsed": False,
+                "skipped": True,
+                "error": None,
+            }
         return {
             "document_ids": document_ids,
             "raw_document_ids": raw_document_ids,
