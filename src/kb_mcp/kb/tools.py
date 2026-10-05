@@ -1639,6 +1639,56 @@ def summarize_all(
     return result
 
 
+def _build_visibility_current_upsert(
+    raw_document_id: str,
+    group_name: str,
+    visible_search: bool,
+    visible_get: bool,
+    reason: Optional[str],
+    decision_id: str,
+    decision_seq: int,
+):
+    """Build the ON CONFLICT upsert into document_visibility_current for one decision.
+
+    Pulled out of `record_visibility_decision` as a pure function (takes the
+    already-flushed decision's id/seq as plain values, builds no session) so
+    the statement shape — in particular the ordering guard in `where=` — can
+    be compiled and inspected without a database. See
+    `DocumentVisibilityCurrent`'s docstring for why the guard compares `seq`
+    rather than merging toward the more restrictive value.
+    """
+    from sqlalchemy import func
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+    upsert = pg_insert(DocumentVisibilityCurrent).values(
+        raw_document_id=raw_document_id,
+        group_name=group_name,
+        visible_search=visible_search,
+        visible_get=visible_get,
+        reason=reason,
+        decision_id=decision_id,
+        decision_seq=decision_seq,
+    )
+    return upsert.on_conflict_do_update(
+        index_elements=[
+            DocumentVisibilityCurrent.raw_document_id,
+            DocumentVisibilityCurrent.group_name,
+        ],
+        set_={
+            "visible_search": upsert.excluded.visible_search,
+            "visible_get": upsert.excluded.visible_get,
+            "reason": upsert.excluded.reason,
+            "decision_id": upsert.excluded.decision_id,
+            "decision_seq": upsert.excluded.decision_seq,
+            "updated_time": func.now(),
+        },
+        where=(
+            DocumentVisibilityCurrent.decision_seq.is_(None)
+            | (DocumentVisibilityCurrent.decision_seq < upsert.excluded.decision_seq)
+        ),
+    )
+
+
 def record_visibility_decision(
     raw_document_id: str,
     visible_search: bool = True,
@@ -1682,9 +1732,6 @@ def record_visibility_decision(
         that key, so this one lost the race and left current state alone —
         the decision row itself is still recorded either way).
     """
-    from sqlalchemy import func
-    from sqlalchemy.dialects.postgresql import insert as pg_insert
-
     with get_db_session(session) as session:
         decision = DocumentVisibilityDecision(
             raw_document_id=raw_document_id,
@@ -1699,7 +1746,7 @@ def record_visibility_decision(
         session.add(decision)
         session.flush()  # assigns decision.id / decision.seq via the DB sequence
 
-        upsert = pg_insert(DocumentVisibilityCurrent).values(
+        upsert = _build_visibility_current_upsert(
             raw_document_id=raw_document_id,
             group_name=group_name,
             visible_search=visible_search,
@@ -1707,24 +1754,6 @@ def record_visibility_decision(
             reason=reason,
             decision_id=decision.id,
             decision_seq=decision.seq,
-        )
-        upsert = upsert.on_conflict_do_update(
-            index_elements=[
-                DocumentVisibilityCurrent.raw_document_id,
-                DocumentVisibilityCurrent.group_name,
-            ],
-            set_={
-                "visible_search": upsert.excluded.visible_search,
-                "visible_get": upsert.excluded.visible_get,
-                "reason": upsert.excluded.reason,
-                "decision_id": upsert.excluded.decision_id,
-                "decision_seq": upsert.excluded.decision_seq,
-                "updated_time": func.now(),
-            },
-            where=(
-                DocumentVisibilityCurrent.decision_seq.is_(None)
-                | (DocumentVisibilityCurrent.decision_seq < upsert.excluded.decision_seq)
-            ),
         )
         result = session.execute(upsert)
 
