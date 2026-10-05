@@ -189,8 +189,41 @@ def collect(prefix, generation_ids, judge="argo:gpt-5.5", judge_version=3):
                                    "questions_disagreeing": sum(1 for q in qs if len({r[q].is_judge_hit for r in reps}) > 1)}
 
     findings = conflict_findings(prefix, min_judge_version=judge_version)
-    data["conflicts"] = {"questions": len(findings),
-                         "corroborated": sum(1 for f in findings if f["models_citing_same_newer_doc"] > 1)}
+    corroborated = {f["question_id"] for f in findings if f["models_citing_same_newer_doc"] > 1}
+    data["conflicts"] = {"questions": len(findings), "corroborated": len(corroborated)}
+
+    # What the wrong agentic answers are, per model, and accuracy adjusted for
+    # source conflicts: (a) answers from a verified newer document counted as
+    # correct (an upper bound -- the document is not proven to state the value),
+    # (b) questions several models contradict with the same newer document left
+    # out for every model (likely outdated references).
+    breakdown = {}
+    with get_db_session() as session:
+        for model, key, _ in MODELS:
+            rows = []
+            for gid in generation_ids:
+                _, res = _results(session, f"{prefix}agentic-{model_label(model)}-{qsets[gid]}-{judge_part}")
+                rows += list((res or {}).values())
+            rows = [r for r in rows if r.is_judge_hit is not None]
+            if not rows:
+                continue
+            wrong = [r for r in rows if not r.is_judge_hit]
+            rel = lambda r: (r.meta or {}).get("judge_source_relation")
+            newer = [r for r in wrong if rel(r) == "newer_source"]
+            newer_verified = [r for r in newer if (r.meta or {}).get("judge_source_verified")]
+            older = [r for r in wrong if rel(r) == "older_source"]
+            conflicting = [r for r in wrong if rel(r) == "conflicting_source"]
+            kept = [r for r in rows if r.question_id not in corroborated]
+            n, ok = len(rows), len(rows) - len(wrong)
+            breakdown[key] = {
+                "n": n, "wrong": len(wrong), "newer": len(newer), "newer_verified": len(newer_verified),
+                "older": len(older), "conflicting": len(conflicting),
+                "other": len(wrong) - len(newer) - len(older) - len(conflicting),
+                "accuracy": ok / n, "accuracy_newer_ok": (ok + len(newer_verified)) / n,
+                "n_without_corroborated": len(kept),
+                "accuracy_without_corroborated": sum(1 for r in kept if r.is_judge_hit) / len(kept) if kept else None,
+            }
+    data["wrong_breakdown"] = breakdown
     return data
 
 
@@ -243,6 +276,14 @@ def write_numbers(data, path):
         m("NoiseN", j["n"]); m("NoiseFlip", f"{100 * j['pairwise_flip_rate']:.1f}\\%")
         m("NoiseDisagree", j["questions_disagreeing"])
     m("ConflictQuestions", data["conflicts"]["questions"]); m("ConflictCorroborated", data["conflicts"]["corroborated"])
+    for key, b in data.get("wrong_breakdown", {}).items():
+        for k, name in (("n", "N"), ("wrong", "Wrong"), ("newer", "Newer"), ("newer_verified", "NewerVerified"),
+                        ("older", "Older"), ("conflicting", "Conflicting"), ("other", "Other"),
+                        ("n_without_corroborated", "NClean")):
+            m(f"Wrong{key}{name}", b[k])
+        m(f"Acc{key}Strict", _pct(b["accuracy"])); m(f"Acc{key}NewerOk", _pct(b["accuracy_newer_ok"]))
+        if b["accuracy_without_corroborated"] is not None:
+            m(f"Acc{key}Clean", _pct(b["accuracy_without_corroborated"]))
     path.write_text("\n".join(lines) + "\n")
 
 
