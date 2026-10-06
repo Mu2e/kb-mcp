@@ -1573,6 +1573,182 @@ def cmd_visibility_sweep(args):
         print("Re-run with --apply to write these decisions.")
 
 
+def _text_document_ids(session, identifiers):
+    """Text document IDs for --document arguments (each resolved to its raw file)."""
+    from ..db_models import Document
+
+    ids = []
+    for identifier in identifiers:
+        raw = _resolve_raw_document(session, identifier)
+        ids += [
+            r[0] for r in session.query(Document.id).filter(
+                Document.raw_document_id == raw.id, Document.doc_type == "text"
+            )
+        ]
+    return ids
+
+
+def cmd_visibility_scan(args):
+    """Run the LLM sensitivity scan; findings go to review, nothing is hidden."""
+    import signal
+    import time
+    from ..tools import sensitivity_scan
+    from ...privacy import sensitivity
+
+    # `timeout` and service stops send SIGTERM: finish like Ctrl-C, so the
+    # run row is closed as partial instead of left "running".
+    signal.signal(signal.SIGTERM, signal.default_int_handler)
+
+    document_ids = None
+    if args.document:
+        try:
+            with get_db_session() as session:
+                document_ids = _text_document_ids(session, args.document)
+        except ValueError as e:
+            print(f"Error: {e}")
+            sys.exit(1)
+
+    last_summary = [time.time()]
+
+    def progress(p):
+        row = p["last"]
+        done = p["scanned"] + p["errors"]
+        if row["status"] == "ok":
+            sev = row["max_severity"] or "-"
+            print(f"[{done}/{p['selected']}] {sev:<6} {row.get('label', row['document_id'])} "
+                  f"({row['windows']} win, {row['seconds']:.0f}s)", flush=True)
+        else:
+            print(f"[{done}/{p['selected']}] ERROR  {row.get('label', row['document_id'])}: {row['error']}", flush=True)
+        if time.time() - last_summary[0] >= 60 or done == p["selected"]:
+            last_summary[0] = time.time()
+            rate = p["prompt_tokens"] / p["seconds"] if p["seconds"] else 0
+            left = p["selected"] - done
+            eta = p["seconds"] / done * left / 60 if done else 0
+            print(f"  -- {done}/{p['selected']} docs in {p['seconds'] / 60:.1f} min, "
+                  f"{rate:,.0f} prompt tok/s, flagged high/medium/low "
+                  f"{p['by_severity']['high']}/{p['by_severity']['medium']}/{p['by_severity']['low']}, "
+                  f"errors {p['errors']}, ~{eta:.0f} min left", flush=True)
+
+    allowed = tuple(sensitivity.DEFAULT_ALLOWED_HOSTS) + tuple(args.allow_endpoint or ())
+    print(f"Sensitivity scan, prompt {sensitivity.PROMPT_VERSION} (findings for review; nothing is hidden)", flush=True)
+    try:
+        result = sensitivity_scan(
+            model=args.model,
+            source_id=args.source_id,
+            document_ids=document_ids,
+            sample=args.sample,
+            seed=args.seed,
+            limit=args.limit,
+            max_minutes=args.max_minutes,
+            concurrency=args.concurrency,
+            max_chars=args.max_chars,
+            window_chars=args.window_chars,
+            reasoning_effort=None if args.reasoning_effort == "none" else args.reasoning_effort,
+            rescan=args.rescan,
+            allowed_hosts=allowed,
+            progress=progress,
+        )
+    except ValueError as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+    except KeyboardInterrupt:
+        print("\nInterrupted: documents in flight finish and are saved; the next run resumes.", flush=True)
+        sys.exit(130)
+
+    if args.json:
+        print(json.dumps(result, indent=2, default=str))
+        return
+    print()
+    print(f"Run {result['run_id']}: {result['status']}"
+          + (f" ({result['stopped']})" if result["stopped"] else ""))
+    print(f"  Model {result['model']} at {result['endpoint']}")
+    print(f"  Selected {result['selected']}, scanned {result['scanned']}, errors {result['errors']}; "
+          f"skipped {result['already_scanned']} already scanned, {result['too_large']} over --max-chars")
+    print(f"  Documents by highest severity: high {result['by_severity']['high']}, "
+          f"medium {result['by_severity']['medium']}, low {result['by_severity']['low']}")
+    print(f"  Tokens: {result['prompt_tokens']:,} in, {result['completion_tokens']:,} out, "
+          f"{result['seconds'] / 60:.1f} min")
+    print("Review with: kb tools visibility findings")
+
+
+def cmd_visibility_findings(args):
+    """List documents the sensitivity scan flagged, with the quoted evidence."""
+    from sqlalchemy import func
+    from ..db_models import Document, DocumentSensitivityScan, DocumentVisibilityCurrent, RawDocument
+    from ...privacy import sensitivity
+
+    version = args.prompt_version or sensitivity.PROMPT_VERSION
+    min_rank = sensitivity.SEVERITY_RANK[args.min_severity]
+    wanted = [s for s in sensitivity.SEVERITIES if sensitivity.SEVERITY_RANK[s] >= min_rank]
+
+    with get_db_session() as session:
+        base = session.query(DocumentSensitivityScan).filter(DocumentSensitivityScan.prompt_version == version)
+        if args.run:
+            base = base.filter(DocumentSensitivityScan.run_id == args.run)
+        outcome = func.coalesce(DocumentSensitivityScan.max_severity, DocumentSensitivityScan.status)
+        counts = dict(base.with_entities(outcome, func.count()).group_by(outcome).all())
+        query = (
+            base.filter(DocumentSensitivityScan.status == "ok",
+                        DocumentSensitivityScan.max_severity.in_(wanted))
+            .join(Document, Document.id == DocumentSensitivityScan.document_id)
+            .outerjoin(RawDocument, RawDocument.id == DocumentSensitivityScan.raw_document_id)
+            .outerjoin(DocumentVisibilityCurrent,
+                       (DocumentVisibilityCurrent.raw_document_id == DocumentSensitivityScan.raw_document_id)
+                       & (DocumentVisibilityCurrent.group_name == "*"))
+            .with_entities(DocumentSensitivityScan, Document.source_id, Document.doc_id,
+                           Document.title, Document.title_gen, DocumentVisibilityCurrent)
+        )
+        rows = []
+        for scan, source_id, doc_id, title, title_gen, current in query.all():
+            findings = [f for f in scan.findings or []
+                        if sensitivity.SEVERITY_RANK.get(f.get("severity"), 1) >= min_rank
+                        and (not args.category or f.get("category") == args.category)]
+            if not findings:
+                continue
+            rows.append({
+                "document_id": scan.document_id,
+                "raw_document_id": scan.raw_document_id,
+                "label": f"{source_id}/{doc_id}",
+                "title": title or title_gen or "",
+                "max_severity": scan.max_severity,
+                "visibility": None if current is None else
+                    {"search": current.visible_search, "get": current.visible_get},
+                "findings": findings,
+                "run_id": scan.run_id,
+                "created_time": str(scan.created_time)[:19],
+            })
+    rows.sort(key=lambda r: (-sensitivity.SEVERITY_RANK[r["max_severity"]], r["label"]))
+    if args.limit:
+        rows = rows[:args.limit]
+
+    if args.json:
+        print(json.dumps({"prompt_version": version, "counts": counts, "documents": rows}, indent=2))
+        return
+
+    print(f"Sensitivity scans, prompt {version}" + (f", run {args.run}" if args.run else "") + ": "
+          + ", ".join(f"{k} {counts.get(k, 0)}" for k in ("high", "medium", "low", "ok", "error")
+                      if counts.get(k)) + ("" if counts else "none yet"))
+    print("(ok = scanned, nothing found; error = scan failed, retried on the next run)")
+    print()
+    for r in rows:
+        vis = ""
+        if r["visibility"]:
+            vis = (f"  [already decided: search={'yes' if r['visibility']['search'] else 'HIDDEN'}, "
+                   f"get={'yes' if r['visibility']['get'] else 'HIDDEN'}]")
+        print(f"{r['max_severity'].upper():<6} {r['label']}  {r['title'][:80]}{vis}")
+        print(f"       raw document {r['raw_document_id']}")
+        for f in r["findings"]:
+            mark = "" if f.get("evidence_found") else "  (quote NOT found in text)"
+            print(f"   - {f['severity']:<6} {f['category']}: {f.get('subject', '')}{mark}")
+            print(f"       \"{f.get('evidence', '')[:300]}\"")
+            if f.get("reason"):
+                print(f"       {f['reason']}")
+        print()
+    if rows:
+        print("Decide with: kb tools visibility hide <raw document> --reason ... [--search-only]"
+              " or show <raw document> --reason ...")
+
+
 def cmd_export(args):
     """Export documents from a source into a folder hierarchy."""
     try:
@@ -2157,6 +2333,66 @@ def setup_commands(subparsers):
     )
     vis_sweep_parser.add_argument("--json", action="store_true", help="Output as JSON")
     vis_sweep_parser.set_defaults(func=cmd_visibility_sweep)
+
+    vis_scan_parser = visibility_subparsers.add_parser(
+        "scan",
+        help="LLM scan for content agents should not surface; writes findings for review, hides nothing",
+        description=(
+            "Read every text document (image descriptions and tables are inline in it) in "
+            "overlapping windows with an LLM, and record passages that an agent should not "
+            "pass to an external LLM: personnel matters, assessments of people, personal "
+            "data, credentials, security details, explicitly restricted material. "
+            "Resumable: documents already scanned with the current prompt are skipped. "
+            "Document text only goes to allowed endpoints (vllm.fnal.gov and ALCF by default)."
+        ),
+    )
+    vis_scan_parser.add_argument("--model", help="LLM (default: PRIVACY_FILTER_MODEL / DEFAULT_LLM_MODEL)")
+    vis_scan_parser.add_argument("--source-id", help="Restrict to a single source")
+    vis_scan_parser.add_argument(
+        "--document", action="append",
+        help="Scan only this document (raw/document UUID, source_id/doc_id or doc_id); repeatable",
+    )
+    vis_scan_parser.add_argument("--sample", type=int, help="Scan a random sample of N documents")
+    vis_scan_parser.add_argument("--seed", type=int, default=0, help="Seed for --sample (default: 0)")
+    vis_scan_parser.add_argument("--limit", type=int, help="Scan at most N documents")
+    vis_scan_parser.add_argument(
+        "--max-minutes", type=float,
+        help="Stop starting new documents after this many minutes (in-flight ones finish)",
+    )
+    vis_scan_parser.add_argument("--concurrency", type=int, default=8, help="Parallel documents (default: 8)")
+    vis_scan_parser.add_argument(
+        "--max-chars", type=int, default=500_000,
+        help="Skip documents with more text than this (default: 500000; the giant spreadsheets)",
+    )
+    vis_scan_parser.add_argument(
+        "--window-chars", type=int, default=24000,
+        help="Characters per LLM call (default: 24000, about 6k tokens)",
+    )
+    vis_scan_parser.add_argument(
+        "--reasoning-effort", choices=["low", "medium", "high", "none"], default="low",
+        help="Reasoning effort for reasoning models (default: low; none = do not send)",
+    )
+    vis_scan_parser.add_argument("--rescan", action="store_true", help="Scan again documents already scanned")
+    vis_scan_parser.add_argument(
+        "--allow-endpoint", action="append", metavar="HOST",
+        help="Also allow sending document text to HOST (only for local/approved endpoints); repeatable",
+    )
+    vis_scan_parser.add_argument("--json", action="store_true", help="Output the summary as JSON")
+    vis_scan_parser.set_defaults(func=cmd_visibility_scan)
+
+    vis_findings_parser = visibility_subparsers.add_parser(
+        "findings", help="List documents the sensitivity scan flagged, with quoted evidence",
+    )
+    vis_findings_parser.add_argument(
+        "--min-severity", choices=["low", "medium", "high"], default="low",
+        help="Lowest severity to show (default: low)",
+    )
+    vis_findings_parser.add_argument("--category", help="Only findings of this category")
+    vis_findings_parser.add_argument("--run", help="Only scans from this run ID")
+    vis_findings_parser.add_argument("--prompt-version", help="Prompt version (default: current)")
+    vis_findings_parser.add_argument("--limit", type=int, help="Maximum number of documents")
+    vis_findings_parser.add_argument("--json", action="store_true", help="Output as JSON")
+    vis_findings_parser.set_defaults(func=cmd_visibility_findings)
 
     export_parser = tools_subparsers.add_parser(
         "export",

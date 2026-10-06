@@ -9,6 +9,7 @@ from .usage import (
     STAGE_GRAPH_MATCHING,
     STAGE_IMAGE_DESCRIPTION,
     STAGE_PRIVACY_FILTER,
+    STAGE_SENSITIVITY_SCAN,
     STAGE_TABLE_SUMMARY,
     UsageAccumulator,
     record_llm_usage,
@@ -29,5 +30,6 @@ __all__ = [
     'STAGE_GRAPH_EXTRACTION',
     'STAGE_GRAPH_MATCHING',
     'STAGE_PRIVACY_FILTER',
+    'STAGE_SENSITIVITY_SCAN',
     'STAGE_EMBEDDING',
 ]

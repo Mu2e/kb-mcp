@@ -1949,6 +1949,311 @@ def visibility_sweep(
     return result
 
 
+def sensitivity_candidates(
+    session,
+    *,
+    prompt_version: str,
+    source_id: Optional[str] = None,
+    max_chars: int = 500_000,
+    document_ids: Optional[List[str]] = None,
+    rescan: bool = False,
+) -> Dict[str, Any]:
+    """Text documents a sensitivity scan should read, without their text.
+
+    Only doc_type "text": image descriptions and tables are already inline
+    in their parent's text. Documents over `max_chars` (the giant
+    spreadsheets, decided separately) and empty ones are left out, as are
+    those already scanned successfully under `prompt_version` unless
+    `rescan`. Returns {"candidates": [{"document_id", "raw_document_id",
+    "chars"}], "already_scanned": int, "too_large": int}.
+    """
+    from sqlalchemy import func
+    from .db_models import DocumentSensitivityScan
+
+    chars = func.length(Document.text)
+    query = session.query(Document.id, Document.raw_document_id, chars).filter(
+        Document.doc_type == "text",
+        Document.text.isnot(None),
+        chars > 0,
+    )
+    if source_id:
+        query = query.filter(Document.source_id == source_id)
+    if document_ids:
+        query = query.filter(Document.id.in_(list(document_ids)))
+    rows = query.all()
+
+    scanned = set()
+    if not rescan:
+        scanned = {
+            r[0] for r in session.query(DocumentSensitivityScan.document_id).filter(
+                DocumentSensitivityScan.prompt_version == prompt_version,
+                DocumentSensitivityScan.status == "ok",
+            ).distinct()
+        }
+    candidates, too_large, already = [], 0, 0
+    for doc_id, raw_id, n in rows:
+        if doc_id in scanned:
+            already += 1
+        elif n > max_chars:
+            too_large += 1
+        else:
+            candidates.append({"document_id": doc_id, "raw_document_id": raw_id, "chars": n})
+    return {"candidates": candidates, "already_scanned": already, "too_large": too_large}
+
+
+def _scan_one_document(client, model: str, candidate: Dict[str, Any], run_id: str, scan_options: Dict[str, Any]):
+    """Scan one document and write its DocumentSensitivityScan row (ok or error)."""
+    from .db_models import DocumentSensitivityScan
+    from ..privacy import sensitivity
+
+    with get_db_session() as session:
+        doc = session.get(Document, candidate["document_id"])
+        text = doc.text or ""
+        title = doc.title or doc.title_gen or ""
+        label = f"{doc.source_id}/{doc.doc_id}"
+        source_type = doc.source_type
+
+    row = {
+        "document_id": candidate["document_id"],
+        "raw_document_id": candidate["raw_document_id"],
+        "run_id": run_id,
+        "prompt_version": sensitivity.PROMPT_VERSION,
+        "model": model,
+        "text_chars": len(text),
+    }
+    try:
+        result = sensitivity.scan_text(
+            client, model, text,
+            title=title, source=label, source_type=source_type,
+            document_id=candidate["document_id"],
+            raw_document_id=candidate["raw_document_id"],
+            **scan_options,
+        )
+        row.update(
+            status="ok",
+            windows=result["windows"],
+            n_findings=len(result["findings"]),
+            max_severity=sensitivity.max_severity(result["findings"]),
+            findings=result["findings"],
+            prompt_tokens=result["prompt_tokens"],
+            completion_tokens=result["completion_tokens"],
+            seconds=result["seconds"],
+        )
+    except Exception as e:  # noqa: BLE001 - recorded on the row, the scan continues
+        logger.error(f"sensitivity scan: {label} ({candidate['document_id']}): {e}")
+        row.update(status="error", error=f"{type(e).__name__}: {e}"[:2000], n_findings=0, findings=[])
+
+    with get_db_session() as session:
+        if row["status"] == "ok":
+            # A success replaces earlier failed attempts for this version.
+            session.query(DocumentSensitivityScan).filter_by(
+                document_id=row["document_id"], prompt_version=row["prompt_version"], status="error",
+            ).delete(synchronize_session=False)
+        session.add(DocumentSensitivityScan(**row))
+    row["label"] = label
+    return row
+
+
+def sensitivity_scan(
+    *,
+    model: Optional[str] = None,
+    source_id: Optional[str] = None,
+    document_ids: Optional[List[str]] = None,
+    sample: Optional[int] = None,
+    seed: int = 0,
+    limit: Optional[int] = None,
+    max_minutes: Optional[float] = None,
+    concurrency: int = 8,
+    max_chars: int = 500_000,
+    window_chars: int = 24000,
+    overlap_chars: int = 800,
+    reasoning_effort: Optional[str] = "low",
+    rescan: bool = False,
+    allowed_hosts=None,
+    progress=None,
+) -> Dict[str, Any]:
+    """Run the LLM sensitivity scan over text documents; findings go to review.
+
+    Writes one DocumentSensitivityScan row per document and a
+    DocumentVisibilityRun row for the run (args, status, counts, tokens).
+    Hides nothing. Resumable: documents already scanned under the current
+    prompt version are skipped, so a run stopped by `max_minutes`, `limit`
+    or Ctrl-C continues where it left off next time.
+
+    Args:
+        model: LLM (default: PRIVACY_FILTER_MODEL, i.e. DEFAULT_LLM_MODEL).
+        source_id / document_ids: Restrict the candidates.
+        sample: Scan a random sample of this many candidates (`seed` fixes it).
+        limit: Stop submitting after this many documents.
+        max_minutes: Stop submitting after this long; documents in flight finish.
+        concurrency: Parallel documents (each sends its windows in sequence).
+        max_chars: Skip documents with more text than this.
+        window_chars / overlap_chars / reasoning_effort: See sensitivity.scan_text.
+        rescan: Scan documents again even if already scanned at this version.
+        allowed_hosts: Endpoints document text may go to (default:
+            sensitivity.DEFAULT_ALLOWED_HOSTS).
+        progress: Optional callable(dict) called after every document.
+
+    Returns:
+        Dict with run_id, status, endpoint, model, selected, already_scanned,
+        too_large, scanned, errors, by_severity, prompt_tokens,
+        completion_tokens, seconds, stopped (why it stopped early, or None).
+    """
+    import os
+    import random
+    import socket
+    import time
+    from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+    from sqlalchemy import func
+    from .db_models import DocumentVisibilityRun
+    from ..config import get_llm_config
+    from ..llm import get_openai_client
+    from ..privacy import sensitivity
+
+    from .database import init_db
+
+    model = model or get_llm_config()["privacy_filter_model"]
+    client = get_openai_client(model)
+    endpoint = sensitivity.check_endpoint(
+        client.base_url, allowed_hosts or sensitivity.DEFAULT_ALLOWED_HOSTS
+    )
+
+    init_db(create_tables=True)  # creates document_sensitivity_scans on first use
+    with get_db_session() as session:
+        selection = sensitivity_candidates(
+            session,
+            prompt_version=sensitivity.PROMPT_VERSION,
+            source_id=source_id,
+            max_chars=max_chars,
+            document_ids=document_ids,
+            rescan=rescan,
+        )
+    candidates = selection["candidates"]
+    if sample is not None and sample < len(candidates):
+        candidates = random.Random(seed).sample(candidates, sample)
+    if limit is not None:
+        candidates = candidates[:limit]
+
+    args = {
+        "rule": "sensitivity-scan", "model": model, "endpoint": endpoint,
+        "prompt_version": sensitivity.PROMPT_VERSION, "source_id": source_id,
+        "document_ids": document_ids, "sample": sample, "seed": seed, "limit": limit,
+        "max_minutes": max_minutes, "concurrency": concurrency, "max_chars": max_chars,
+        "window_chars": window_chars, "overlap_chars": overlap_chars,
+        "reasoning_effort": reasoning_effort, "rescan": rescan,
+    }
+    with get_db_session() as session:
+        run = DocumentVisibilityRun(
+            hostname=socket.gethostname(),
+            pid=os.getpid(),
+            trigger=os.getenv("KB_RUN_TRIGGER") or "manual",
+            log_path=os.getenv("KB_RUN_LOG"),
+            args=args,
+            already_decided_skipped=selection["already_scanned"],
+            meta={"kind": "sensitivity-scan"},
+        )
+        session.add(run)
+        session.flush()
+        run_id = run.id
+
+    result: Dict[str, Any] = {
+        "run_id": run_id, "status": "running", "endpoint": endpoint, "model": model,
+        "prompt_version": sensitivity.PROMPT_VERSION,
+        "selected": len(candidates), "already_scanned": selection["already_scanned"],
+        "too_large": selection["too_large"], "scanned": 0, "errors": 0,
+        "by_severity": {s: 0 for s in sensitivity.SEVERITIES},
+        "prompt_tokens": 0, "completion_tokens": 0, "seconds": 0.0, "stopped": None,
+    }
+    scan_options = {
+        "window_chars": window_chars, "overlap_chars": overlap_chars,
+        "reasoning_effort": reasoning_effort,
+    }
+    start = time.time()
+    deadline = start + max_minutes * 60 if max_minutes else None
+    failures: List[Dict[str, str]] = []
+
+    def collect(row):
+        if row["status"] == "ok":
+            result["scanned"] += 1
+            result["prompt_tokens"] += row["prompt_tokens"] or 0
+            result["completion_tokens"] += row["completion_tokens"] or 0
+            if row["max_severity"]:
+                result["by_severity"][row["max_severity"]] += 1
+        else:
+            result["errors"] += 1
+            failures.append({"document_id": row["document_id"], "error": row["error"]})
+        result["seconds"] = time.time() - start
+        if progress:
+            progress(dict(result, last=row))
+
+    executor = ThreadPoolExecutor(max_workers=concurrency)
+    pending = set()
+    submitted: Dict[Any, str] = {}
+    queue = iter(candidates)
+    status = "failed"
+    try:
+        exhausted = False
+        while True:
+            while not exhausted and len(pending) < concurrency:
+                if deadline and time.time() >= deadline:
+                    result["stopped"] = f"time budget of {max_minutes} min reached"
+                    exhausted = True
+                    break
+                candidate = next(queue, None)
+                if candidate is None:
+                    exhausted = True
+                    break
+                future = executor.submit(_scan_one_document, client, model, candidate, run_id, scan_options)
+                submitted[future] = candidate["document_id"]
+                pending.add(future)
+            if not pending:
+                break
+            done, pending = wait(pending, timeout=30, return_when=FIRST_COMPLETED)
+            for future in done:
+                try:
+                    row = future.result()
+                except Exception as e:  # noqa: BLE001 - e.g. the DB write failed; counted, scan continues
+                    logger.error(f"sensitivity scan: {submitted[future]}: {e}")
+                    row = {"status": "error", "document_id": submitted[future],
+                           "error": f"{type(e).__name__}: {e}"[:2000]}
+                collect(row)
+        status = "partial" if (result["errors"] or result["stopped"]) else "success"
+    except KeyboardInterrupt:
+        result["stopped"] = "interrupted"
+        status = "partial"
+        raise
+    except BaseException as e:
+        result["stopped"] = f"{type(e).__name__}: {e}"
+        raise
+    finally:
+        # Documents in flight finish and write their rows; queued ones are dropped.
+        executor.shutdown(wait=False, cancel_futures=True)
+        result["status"] = status
+        result["seconds"] = time.time() - start
+        with get_db_session() as session:
+            session.query(DocumentVisibilityRun).filter_by(id=run_id).update({
+                "status": status,
+                "finished_time": func.now(),
+                "documents_scanned": result["scanned"],
+                "newly_hidden": 0,
+                "newly_visible": 0,
+                "errors": result["errors"],
+                "error": result["stopped"] if status == "failed" else None,
+                "failures": failures,
+                "meta": {
+                    "kind": "sensitivity-scan",
+                    "selected": result["selected"],
+                    "too_large": result["too_large"],
+                    "by_severity": result["by_severity"],
+                    "prompt_tokens": result["prompt_tokens"],
+                    "completion_tokens": result["completion_tokens"],
+                    "seconds": round(result["seconds"], 1),
+                    "stopped": result["stopped"],
+                },
+            })
+    return result
+
+
 def filter_all(
     source_id: Optional[str] = None,
     parser_name: str = "marker",

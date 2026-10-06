@@ -12,6 +12,7 @@ from sqlalchemy import (
     Boolean,
     Column,
     DateTime,
+    Float,
     ForeignKey,
     Index,
     Integer,
@@ -1588,4 +1589,96 @@ class DocumentVisibilityCurrent(Base):
             f"<DocumentVisibilityCurrent(raw_document_id={self.raw_document_id}, "
             f"group={self.group_name}, search={self.visible_search}, "
             f"get={self.visible_get})>"
+        )
+
+
+class DocumentSensitivityScan(Base):
+    """Table 'document_sensitivity_scans': one LLM sensitivity scan of one document.
+
+    Written by `kb tools visibility scan` (see `kb_mcp.privacy.sensitivity`):
+    the model read the document's whole text, window by window, and listed
+    passages an agent should not surface to an external LLM. A review queue,
+    not a decision: nothing reads this table at search time, and a human
+    turns findings into `DocumentVisibilityDecision`s with `hide`.
+
+    One row per (document_id, prompt_version) that succeeded; a scan is
+    resumable because documents with a row for the current prompt version
+    are skipped. Failed scans keep their row (status "error") so they show
+    up in the counts, and a later run retries them.
+
+    Attributes:
+        id (str): Primary key (UUID).
+        document_id (str): FK → documents.id — the parsed text scanned.
+        raw_document_id (str): FK → documents_raw.id — the file a hide
+            decision would apply to.
+        run_id (str): FK → document_visibility_runs.id — the scan run.
+        prompt_version (str): `sensitivity.PROMPT_VERSION` at scan time.
+        model (str): LLM that scanned it.
+        status (str): "ok" or "error".
+        error (str): Why the scan failed, if it did.
+        text_chars (int): Length of the text scanned.
+        windows (int): Number of windows it was split into.
+        n_findings (int): Number of findings.
+        max_severity (str): Highest finding severity ("low", "medium",
+            "high"), null when nothing was found.
+        findings (list): [{"window", "category", "severity", "subject",
+            "evidence", "evidence_found", "reason"}].
+        prompt_tokens / completion_tokens (int): Token usage over all windows.
+        seconds (float): Wall time of the scan.
+        created_time (datetime): When the scan finished.
+    """
+
+    __tablename__ = "document_sensitivity_scans"
+
+    id = Column(
+        String(36),
+        primary_key=True,
+        default=lambda: str(uuid.uuid4()),
+    )
+    document_id = Column(
+        String(36),
+        ForeignKey("documents.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    raw_document_id = Column(
+        String(36),
+        ForeignKey("documents_raw.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
+    run_id = Column(
+        String(36),
+        ForeignKey("document_visibility_runs.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    prompt_version = Column(String(32), nullable=False, index=True)
+    model = Column(String(256), nullable=True)
+    status = Column(String(16), nullable=False, index=True)
+    error = Column(Text, nullable=True)
+    text_chars = Column(Integer, nullable=True)
+    windows = Column(Integer, nullable=True)
+    n_findings = Column(Integer, nullable=False, default=0)
+    max_severity = Column(String(16), nullable=True, index=True)
+    findings = Column(JSONB, nullable=True, default=list)
+    prompt_tokens = Column(Integer, nullable=True)
+    completion_tokens = Column(Integer, nullable=True)
+    seconds = Column(Float, nullable=True)
+    created_time = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=func.now(),
+        server_default=func.now(),
+        index=True,
+    )
+
+    document = relationship("Document")
+    raw_document = relationship("RawDocument")
+    run = relationship("DocumentVisibilityRun")
+
+    def __repr__(self) -> str:
+        return (
+            f"<DocumentSensitivityScan(document_id={self.document_id}, "
+            f"version={self.prompt_version}, status={self.status}, max={self.max_severity})>"
         )
