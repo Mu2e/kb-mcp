@@ -390,31 +390,42 @@ def scan_text(
             window_text, title=title, source=source, source_type=source_type,
             window=i, windows=len(windows),
         )
-        response = call_with_backoff(
-            client.chat.completions.create,
-            model=model,
-            messages=messages,
-            max_tokens=max_tokens,
-            response_format={"type": "json_object"},
-            extra_body=extra_body,
-        )
-        record_llm_usage(
-            getattr(response, "usage", None),
-            stage=STAGE_SENSITIVITY_SCAN,
-            model=model,
-            document_id=document_id,
-            raw_document_id=raw_document_id,
-            meta={"window": i, "windows": len(windows), "prompt_version": PROMPT_VERSION},
-        )
-        usage = getattr(response, "usage", None)
-        if usage is not None:
-            prompt_tokens += usage.prompt_tokens or 0
-            completion_tokens += usage.completion_tokens or 0
+        # The model occasionally returns an empty or malformed answer; one
+        # more attempt almost always succeeds, so only a second failure
+        # fails the document.
+        for attempt in (1, 2):
+            response = call_with_backoff(
+                client.chat.completions.create,
+                model=model,
+                messages=messages,
+                max_tokens=max_tokens,
+                response_format={"type": "json_object"},
+                extra_body=extra_body,
+            )
+            record_llm_usage(
+                getattr(response, "usage", None),
+                stage=STAGE_SENSITIVITY_SCAN,
+                model=model,
+                document_id=document_id,
+                raw_document_id=raw_document_id,
+                meta={"window": i, "windows": len(windows), "prompt_version": PROMPT_VERSION},
+            )
+            usage = getattr(response, "usage", None)
+            if usage is not None:
+                prompt_tokens += usage.prompt_tokens or 0
+                completion_tokens += usage.completion_tokens or 0
 
-        choice = response.choices[0]
-        if choice.finish_reason == "length":
-            raise ValueError(f"window {i}/{len(windows)}: answer cut off at max_tokens={max_tokens}")
-        for f in parse_findings(choice.message.content):
+            choice = response.choices[0]
+            try:
+                if choice.finish_reason == "length":
+                    raise ValueError(f"window {i}/{len(windows)}: answer cut off at max_tokens={max_tokens}")
+                window_findings = parse_findings(choice.message.content)
+                break
+            except ValueError as e:  # json.JSONDecodeError is a ValueError too
+                if attempt == 2:
+                    raise
+                logger.warning(f"sensitivity scan: window {i}/{len(windows)}: {e}; retrying once")
+        for f in window_findings:
             f["window"] = i
             f["evidence_found"] = evidence_in_text(f["evidence"], window_text)
             findings.append(f)

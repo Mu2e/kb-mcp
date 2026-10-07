@@ -212,11 +212,19 @@ def test_scan_text_adds_markers_over_the_whole_text(no_usage_writes):
     assert client.calls[0]["extra_body"] == {"reasoning_effort": "low"}
 
 
-def test_scan_text_fails_on_cut_off_answer(no_usage_writes):
-    client = _FakeClient([('{"findings": [', "length")])
+def test_scan_text_fails_on_a_second_cut_off_answer(no_usage_writes):
+    client = _FakeClient([('{"findings": [', "length"), ('{"findings": [', "length")])
     with pytest.raises(ValueError, match="cut off"):
         sensitivity.scan_text(client, "m", "text", reasoning_effort=None)
+    assert len(client.calls) == 2
     assert client.calls[0]["extra_body"] is None
+
+
+def test_scan_text_retries_an_empty_answer_once(no_usage_writes):
+    client = _FakeClient([("", "stop"), ('{"findings": []}', "stop")])
+    result = sensitivity.scan_text(client, "m", "text")
+    assert result["findings"] == [] and len(client.calls) == 2
+    assert result["prompt_tokens"] == 200  # both attempts counted
 
 
 # --- candidate selection -------------------------------------------------------
