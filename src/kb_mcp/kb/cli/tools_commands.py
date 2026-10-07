@@ -1739,8 +1739,11 @@ def cmd_visibility_findings(args):
         print(f"       raw document {r['raw_document_id']}")
         for f in r["findings"]:
             mark = "" if f.get("evidence_found") else "  (quote NOT found in text)"
-            print(f"   - {f['severity']:<6} {f['category']}: {f.get('subject', '')}{mark}")
+            origin = "  [pattern]" if f.get("source") == "marker" else ""
+            print(f"   - {f['severity']:<6} {f['category']}: {f.get('subject', '')}{origin}{mark}")
             print(f"       \"{f.get('evidence', '')[:300]}\"")
+            if f.get("span") and f["span"] != f.get("evidence"):
+                print(f"       remove: \"{f['span'][:200]}\"")
             if f.get("reason"):
                 print(f"       {f['reason']}")
         print()

@@ -66,6 +66,7 @@ def test_parse_normalises_category_and_severity():
         ("other", "medium"),
     ]
     assert findings[0]["subject"] == "DAQ account"
+    assert findings[0]["source"] == "llm" and findings[0]["span"] == ""
 
 
 def test_parse_finds_json_after_preamble():
@@ -92,10 +93,50 @@ def test_evidence_found_ignores_case_and_whitespace():
     assert not sensitivity.evidence_in_text("", text)
 
 
+def test_stitched_evidence_needs_every_piece():
+    text = "Zoom passcode: mu2eops. Later on the page: Password: MCR3721 for the AD meeting."
+    assert sensitivity.evidence_in_text("Zoom passcode: mu2eops ... Password: MCR3721", text)
+    assert sensitivity.evidence_in_text("passcode: mu2eops \u2026 MCR3721", text)
+    assert not sensitivity.evidence_in_text("Zoom passcode: mu2eops ... Password: hunter2", text)
+
+
 def test_long_evidence_matches_on_a_stretch():
     text = "A" * 50 + " the committee found the candidate's work unconvincing and recommends against hiring " + "B" * 50
     quote = "the committee found the candidate's work unconvincing and recommends against hiring him at all"
     assert sensitivity.evidence_in_text(quote, text)
+
+
+# --- markers -----------------------------------------------------------------
+
+def test_markers_find_restriction_notices_once_each():
+    text = (
+        "Slide 3\nGeneral Atomics Proprietary Information\nSlide 4\nGeneral Atomics Proprietary Information\n"
+        "THIS DRAWING CONTAINS INFORMATION THAT IS PROPRIETARY TO MOLEX INC\n"
+        "Official Use Only\nCUI//PROPIN\nECCN: 3A001\nMu2e internal, not for public distribution\n"
+        "Excerpt from document labelled Internal Use Only\n"
+    )
+    found = {(f["subject"], f["severity"], f["span"]) for f in sensitivity.find_markers(text)}
+    assert found == {
+        ("proprietary notice", "medium", "Proprietary Information"),
+        ("proprietary notice", "medium", "CONTAINS INFORMATION THAT IS PROPRIETARY"),
+        ("official use only", "high", "Official Use Only"),
+        ("CUI banner", "high", "CUI//PROPIN"),
+        ("export control", "high", "ECCN: 3A001"),
+        ("confidentiality notice", "medium", "not for public distribution"),
+        ("confidentiality notice", "medium", "Internal Use Only"),
+    }
+    assert all(f["source"] == "marker" and f["category"] == "restricted" for f in sensitivity.find_markers(text))
+
+
+@pytest.mark.parametrize("text", [
+    "The braze alloy is proprietary, but non-magnetic.",
+    "Open-weight vs proprietary (closed) models.",
+    "Export Control Classification Number (ECCN) | EAR99 |",
+    "A training slide: Identifying CUI. CUI applies to federally owned data.",
+    "This e-mail may contain confidential information.",
+])
+def test_markers_ignore_ordinary_mentions(text):
+    assert sensitivity.find_markers(text) == []
 
 
 # --- endpoint guard ----------------------------------------------------------
@@ -159,6 +200,15 @@ def test_scan_text_tags_findings_with_window(no_usage_writes):
     assert result["prompt_tokens"] == 200
     [f] = result["findings"]
     assert f["window"] == 2 and f["evidence_found"]
+    assert f["source"] == "llm"
+
+
+def test_scan_text_adds_markers_over_the_whole_text(no_usage_writes):
+    text = "a\n" * 1500 + "General Atomics Proprietary Information\n"
+    client = _FakeClient([('{"findings": []}', "stop"), ('{"findings": []}', "stop")])
+    result = sensitivity.scan_text(client, "m", text, window_chars=3000, overlap_chars=100)
+    [f] = result["findings"]
+    assert f["source"] == "marker" and f["window"] is None
     assert client.calls[0]["extra_body"] == {"reasoning_effort": "low"}
 
 

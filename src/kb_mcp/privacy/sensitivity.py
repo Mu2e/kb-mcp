@@ -29,15 +29,15 @@ logger = logging.getLogger(__name__)
 
 # Bump whenever the prompt or the output contract changes: scans are keyed on
 # (document, prompt version), so a new version re-scans everything once.
-PROMPT_VERSION = "v2"
+PROMPT_VERSION = "v3"
 
 CATEGORIES = {
     "personnel": "HR and personnel matters about identifiable people",
     "individual_assessment": "evaluations, criticism or rankings of identifiable people",
     "personal_data": "private contact, identity, health or family information",
-    "credentials": "passwords, keys, tokens and other secrets",
+    "credentials": "passwords, passcodes, keys, tokens, payment card details and other secrets",
     "security": "details that would help someone attack Mu2e or Fermilab systems",
-    "restricted": "material explicitly marked confidential, embargoed, export controlled or under NDA",
+    "restricted": "proprietary, confidential, embargoed, export-controlled or CUI material",
     "other": "sensitive in a way none of the above covers",
 }
 SEVERITIES = ("low", "medium", "high")
@@ -53,8 +53,8 @@ You review documents from the internal knowledge base of Mu2e, a particle physic
 experiment at Fermilab. Collaboration members can read all of these documents. The \
 knowledge base is also searched by AI assistants that run on external, commercial \
 LLMs. Your job is to find the rare passages that such an assistant should never \
-surface or quote to anyone: content that would hurt a person, or the experiment, \
-if it were pasted into a chat with an outside AI service.
+surface or quote to anyone: content that would hurt a person, a partner company, \
+or the experiment, if it were pasted into a chat with an outside AI service.
 
 Almost every document is fine. Report a finding only when you can quote the \
 passage that causes it. Respond with JSON only."""
@@ -62,58 +62,75 @@ passage that causes it. Respond with JSON only."""
 _USER_PROMPT_TEMPLATE = """\
 Report passages in the text below that fall into one of these categories.
 
+restricted: any notice that restricts who may see the material, wherever it \
+appears (title block, footer, header, slide margin, repeated on every page): \
+"<Company> Proprietary Information", "proprietary to <company>", "proprietary \
+and confidential", "confidential", "do not distribute", "not for public \
+release", "collaboration internal only", embargoed results, export controlled, \
+ITAR/EAR, "Official Use Only" (OUO), Controlled Unclassified Information \
+(CUI), under NDA. Also drawings, specifications, quotes or bids from a \
+contractor or vendor that carry such a notice. Report the notice even if it \
+looks like boilerplate. Not restricted: the word "proprietary" describing \
+software or a product ("a proprietary alloy", "closed proprietary models"), \
+certification logos (ITAR-registered, ISO 9001), training material that \
+explains what CUI or export control is, and e-mail disclaimers ("this e-mail \
+may contain confidential information"), which are low at most.
+
+credentials: a secret that is actually present in the text: passwords, Zoom or \
+Teams meeting passcodes and links containing pwd=, API keys, tokens, private \
+keys, connection strings with passwords, door, lock or safe combinations, \
+payment card numbers or card identifiers (e.g. "Card#NAME 1234"). Not \
+credentials: instructions that mention a password without giving it ("log in \
+with your services account password"), placeholders such as <password> or ****.
+
 personnel: HR and personnel matters about an identifiable person: hiring or \
 firing decisions, performance problems, disciplinary action, complaints or \
 conflicts between people, the salary or pay of a named person, visa or \
-immigration status, leave and the personal reasons for it.
+immigration status, leave and the personal reasons for it. Not personnel: \
+roles, assignments, someone joining, leaving, retiring or volunteering, and \
+status markers in member lists (deceased, emeritus, retired, left).
 
 individual_assessment: evaluations of identifiable people: reference letters, \
 candidate rankings, review committee comments about a person's competence or \
 conduct, award or promotion deliberations.
 
-personal_data: private information about an identifiable person, i.e. \
-information that belongs to their private life, not their job: home address, \
-private mobile number or private email (e.g. gmail), date of birth, ID or \
-passport numbers, health or medical information, family circumstances.
-
-credentials: secrets that grant access: passwords (even if they look old or \
-like examples), API keys, tokens, private keys, database connection strings \
-with passwords, door or safe combinations.
+personal_data: information from a person's private life, not their job: home \
+address, a phone number explicitly labelled mobile, cell, home or private, or \
+given as "call or text me" by an individual, a private e-mail account (gmail, \
+yahoo, hotmail, outlook.com, qq.com, ...), date of birth, ID or passport \
+numbers, health, injury or medical information, family circumstances. Not \
+personal_data: collaboration lists, directories and contact sheets with \
+institutions, work e-mail and office phone numbers, even with direct lines; \
+company and vendor contact details. In a long list of people report at most \
+one finding per kind of private data, quoting one example.
 
 security: information that would help someone attack Mu2e or Fermilab \
 computing or control systems: unpatched vulnerabilities, how to bypass access \
-controls, internal network layouts presented as security information.
-
-restricted: material explicitly marked as confidential, embargoed, "do not \
-distribute", "collaboration internal only", export controlled (ITAR/EAR) or \
-under NDA, and vendor quotes or bids marked proprietary. Use this only when \
-the document itself carries such a marking or clearly states the restriction.
+controls, firewall rules, internal IP addresses or network layouts of control \
+or DAQ systems. Not security: hostnames, software versions, power or cooling \
+specifications.
 
 other: content that is clearly sensitive in a way the categories above miss. \
 Use rarely.
 
 Do NOT report ordinary collaboration content, even when it names people:
-- author lists, attendee lists, names with institution, role, work email or \
-work phone, collaboration directories and shift schedules;
-- business contact details of people or companies: work email addresses \
-(e.g. @fnal.gov, @anl.gov, university addresses), office or company phone \
-numbers, company addresses, email headers (From/To/Cc/Sent), vendor, \
-supplier and sales contacts, signatures;
+- author lists, attendee lists, names with institution and role, shift \
+schedules, e-mail headers (From/To/Cc/Sent) and signatures with work contact \
+details;
 - meeting minutes, action items, technical discussion and disagreements about \
 physics or engineering;
 - project-level budgets, cost estimates, WBS numbers, labor in FTEs or by \
 role, procurement of equipment, schedules and milestones;
-- physics results, plots and drafts that carry no explicit restriction;
-- hostnames, software versions or configuration that do not reveal a secret \
-or a weakness.
+- physics results, plots and drafts that carry no explicit restriction.
 
 Severity:
-- high: must never reach an outside service. Any real credential; health, \
-medical or family information; HR action or disciplinary matter about a named \
-person; ID numbers.
-- medium: should not come up in search results: assessments of named people, \
-personal contact data, material explicitly marked confidential or embargoed, \
-security details.
+- high: must never reach an outside service. A real password, key, token or \
+payment card detail; health, injury, medical or family information about a \
+named person; HR action or disciplinary matter about a named person; ID \
+numbers; CUI, OUO or export-controlled marking.
+- medium: should not come up in search results: meeting passcodes and pwd= \
+links, lock combinations, proprietary or confidential notices, assessments of \
+named people, private contact data, security details.
 - low: probably fine, but worth a human look.
 
 Document: {title}
@@ -127,8 +144,9 @@ Part {window} of {windows} of the document's text.
 
 Return a JSON object:
 {{"findings": [{{"category": "<one of: {categories}>", "severity": "<low|medium|high>", \
-"subject": "<who or what is affected, e.g. 'a named postdoc', 'DAQ server account'>", \
-"evidence": "<exact quote from the text, at most 300 characters>", \
+"subject": "<who or what is affected, e.g. 'General Atomics', 'a named postdoc', 'DAQ server account'>", \
+"evidence": "<one contiguous exact quote from the text, at most 300 characters>", \
+"span": "<the shortest exact substring of the evidence that would have to be removed, e.g. just the passcode or the phone number>", \
 "reason": "<one sentence>"}}]}}
 Return {{"findings": []}} if nothing qualifies, which is the usual case."""
 
@@ -195,21 +213,86 @@ def _normalize(s: str) -> str:
     return re.sub(r"\s+", " ", s).strip().lower()
 
 
+def _piece_in_text(piece: str, hay: str) -> bool:
+    if piece in hay:
+        return True
+    if len(piece) > 60:
+        return any(piece[i:i + 60] in hay for i in range(0, len(piece) - 59, 20))
+    return False
+
+
 def evidence_in_text(evidence: str, text: str) -> bool:
     """Whether the quoted evidence occurs in the text, ignoring whitespace and case.
 
-    Models trim or re-wrap quotes, so a long quote counts if any 60-character
-    stretch of it matches.
+    Models trim, re-wrap or stitch quotes together with "...", so each
+    stitched piece is checked on its own, and a long piece counts if any
+    60-character stretch of it matches.
     """
-    ev = _normalize(evidence or "")
-    if not ev:
+    pieces = [_normalize(p) for p in re.split(r"\.\.\.|\u2026", evidence or "")]
+    pieces = [p for p in pieces if p]
+    if not pieces:
         return False
     hay = _normalize(text)
-    if ev in hay:
-        return True
-    if len(ev) > 60:
-        return any(ev[i:i + 60] in hay for i in range(0, len(ev) - 59, 20))
-    return False
+    return all(_piece_in_text(p, hay) for p in pieces)
+
+
+# Restriction markings with fixed wording: a pattern finds them reliably (the
+# LLM missed "General Atomics Proprietary Information" in two slide decks), so
+# they are reported alongside the model's findings, not left to it.
+# (name, severity, pattern)
+MARKERS = [
+    ("proprietary notice", "medium", re.compile(
+        r"proprietary\s+(?:information|data|notice|(?:and|&)\s+confidential)\b"
+        r"|proprietary\s+to\s+\w"
+        r"|contains\s+(?:information|data)\s+(?:that\s+is\s+)?proprietary"
+        r"|considered\s+(?:to\s+be\s+)?proprietary",
+        re.IGNORECASE)),
+    ("official use only", "high", re.compile(r"official\s+use\s+only|\(OUO\)", re.IGNORECASE)),
+    ("CUI banner", "high", re.compile(r"\bCUI\s*//\s*\w+")),
+    ("export control", "high", re.compile(
+        r"export[- ]controlled|subject\s+to\s+(?:the\s+)?(?:ITAR|EAR)\b|ITAR[- ]controlled"
+        r"|\bECCN\b\W{0,5}(?!EAR99)[0-9][A-E][0-9]{3}",
+        re.IGNORECASE)),
+    ("confidentiality notice", "medium", re.compile(
+        r"\b(?:company|strictly|highly)\s+confidential\b"
+        r"|\bdo\s+not\s+(?:distribute|forward|copy)\b"
+        r"|\bnot\s+for\s+(?:public\s+)?(?:distribution|release)\b"
+        r"|\binternal\s+use\s+only\b"
+        r"|\b(?:mu2e|collaboration)[- ]internal\s+only\b"
+        r"|\binternal\s+to\s+the\s+(?:mu2e\s+)?collaboration\b",
+        re.IGNORECASE)),
+]
+
+
+def find_markers(text: str, max_per_marker: int = 3) -> List[Dict[str, Any]]:
+    """Restriction markings found by pattern, as findings (source "marker").
+
+    Each distinct matched wording is reported once, up to `max_per_marker`
+    per marker, since a notice usually repeats on every page.
+    """
+    findings = []
+    for name, severity, rx in MARKERS:
+        seen = set()
+        for m in rx.finditer(text):
+            key = _normalize(m.group(0))
+            if key in seen:
+                continue
+            seen.add(key)
+            context = re.sub(r"\s+", " ", text[max(0, m.start() - 80):m.end() + 80]).strip()
+            findings.append({
+                "category": "restricted",
+                "severity": severity,
+                "subject": name,
+                "evidence": context[:300],
+                "span": m.group(0),
+                "reason": f"Restriction marking ({name}) matched by pattern.",
+                "source": "marker",
+                "window": None,
+                "evidence_found": True,
+            })
+            if len(seen) >= max_per_marker:
+                break
+    return findings
 
 
 def parse_findings(content: str) -> List[Dict[str, Any]]:
@@ -244,7 +327,9 @@ def parse_findings(content: str) -> List[Dict[str, Any]]:
             "severity": severity if severity in SEVERITY_RANK else "medium",
             "subject": str(f.get("subject", "")).strip()[:300],
             "evidence": str(f.get("evidence", "")).strip()[:1000],
+            "span": str(f.get("span", "")).strip()[:300],
             "reason": str(f.get("reason", "")).strip()[:1000],
+            "source": "llm",
         })
     return findings
 
@@ -287,8 +372,9 @@ def scan_text(
 ) -> Dict[str, Any]:
     """Scan one document's text, window by window.
 
-    Returns a dict with `findings` (each tagged with its window and whether
-    the evidence was found in it), `windows`, `prompt_tokens`,
+    Returns a dict with `findings` (the model's, each tagged with its window
+    and whether the evidence was found in it, followed by `find_markers`'
+    pattern matches over the whole text), `windows`, `prompt_tokens`,
     `completion_tokens` and `seconds`. Raises on the first window that fails
     (after retries for throttling), so a document is either fully scanned or
     recorded as an error.
@@ -332,6 +418,7 @@ def scan_text(
             f["window"] = i
             f["evidence_found"] = evidence_in_text(f["evidence"], window_text)
             findings.append(f)
+    findings.extend(find_markers(text))
 
     return {
         "findings": findings,
