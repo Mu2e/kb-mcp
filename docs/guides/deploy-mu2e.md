@@ -295,6 +295,11 @@ The incremental DocDB import runs from a release, twice a day, from cron. It
 runs as a user, not the service account: DocDB has no service login, so login
 is only possible as a user.
 
+With `PRIVACY_HOLD_NEW_DOCUMENTS=true` (set in `deploy/mu2e.env`) each run also
+scans its new documents with the on-prem LLM and applies the privacy policy;
+new documents stay hidden from the MCP tools until then. See
+[Privacy](privacy.md).
+
 Same layout as the servers: deploy root `/exp/mu2e/app/users/<you>/mcp/kb`,
 data (logs, model cache, ALCF login) in `/exp/mu2e/data/users/<you>/kb-mcp-data`.
 Files in `<deploy-root>/config/`, all mode 600:
