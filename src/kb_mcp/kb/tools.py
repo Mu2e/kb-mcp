@@ -2254,6 +2254,125 @@ def sensitivity_scan(
     return result
 
 
+REDACTION_LABELS = {
+    "credentials": "credential",
+    "personal_data": "personal data",
+    "personnel": "personnel matter",
+    "individual_assessment": "assessment of a person",
+    "security": "security detail",
+    "other": "sensitive detail",
+}
+
+
+def add_redaction(
+    span: str,
+    *,
+    raw_document_id: Optional[str],
+    label: str,
+    reason: Optional[str] = None,
+    origin: str = "cli",
+    scan_id: Optional[str] = None,
+    created_by: Optional[str] = None,
+    session=None,
+) -> Dict[str, Any]:
+    """Store a span to redact from MCP output, for one raw document or (None) all.
+
+    Refuses spans too short to be specific (under 4 characters, or 6 for a
+    global span), which would redact unrelated text, and skips a span that
+    an active rule for the same scope already covers.
+
+    Returns {"id", "added"} -- added False when an identical active rule exists.
+    """
+    from sqlalchemy import func
+    from .db_models import DocumentRedaction
+    from ..privacy.redaction import clear_cache, span_regex
+
+    from .database import init_db
+
+    span = " ".join((span or "").split())
+    minimum = 4 if raw_document_id else 6
+    if len(span) < minimum:
+        raise ValueError(f"span {span!r} is too short to redact safely (minimum {minimum} characters)")
+    span_regex(span)
+
+    init_db(create_tables=True)  # creates document_redactions on first use
+    with get_db_session(session) as s:
+        existing = s.query(DocumentRedaction).filter(
+            DocumentRedaction.active.is_(True),
+            DocumentRedaction.raw_document_id.is_(None) if raw_document_id is None
+            else DocumentRedaction.raw_document_id == raw_document_id,
+            func.lower(DocumentRedaction.span) == span.lower(),
+        ).first()
+        if existing:
+            return {"id": existing.id, "added": False}
+        row = DocumentRedaction(
+            raw_document_id=raw_document_id, span=span, label=label, reason=reason,
+            origin=origin, scan_id=scan_id, created_by=created_by, active=True,
+        )
+        s.add(row)
+        s.flush()
+        rule_id = row.id
+    clear_cache()
+    return {"id": rule_id, "added": True}
+
+
+def redaction_candidates_from_findings(
+    session,
+    raw_document_id: str,
+    *,
+    prompt_version: str,
+    min_severity: str = "medium",
+    categories: Optional[List[str]] = None,
+) -> List[Dict[str, Any]]:
+    """Spans from the latest scans of a raw document's text that a redaction would cover.
+
+    Skips restriction notices (category "restricted": the notice is not the
+    secret; hide such documents instead), spans the global patterns already
+    redact, and spans that do not occur in the document text (the model
+    paraphrased). Returns [{"span", "label", "category", "severity", "scan_id", "reason"}].
+    """
+    from .db_models import DocumentSensitivityScan
+    from ..privacy import sensitivity
+    from ..privacy.redaction import redact, span_regex
+
+    rank = sensitivity.SEVERITY_RANK
+    scans = (
+        session.query(DocumentSensitivityScan, Document.text)
+        .join(Document, Document.id == DocumentSensitivityScan.document_id)
+        .filter(
+            DocumentSensitivityScan.raw_document_id == raw_document_id,
+            DocumentSensitivityScan.prompt_version == prompt_version,
+            DocumentSensitivityScan.status == "ok",
+        )
+        .all()
+    )
+    out, seen = [], set()
+    for scan, text in scans:
+        for f in scan.findings or []:
+            category = f.get("category")
+            if category == "restricted" or (categories and category not in categories):
+                continue
+            if rank.get(f.get("severity"), 1) < rank[min_severity]:
+                continue
+            span = " ".join((f.get("span") or "").split())
+            if len(span) < 4 or span.lower() in seen:
+                continue
+            if redact(span) != span:  # a global pattern already covers it
+                continue
+            if not span_regex(span).search(text or ""):
+                continue
+            seen.add(span.lower())
+            out.append({
+                "span": span,
+                "label": REDACTION_LABELS.get(category, "sensitive detail"),
+                "category": category,
+                "severity": f.get("severity"),
+                "scan_id": scan.id,
+                "reason": f.get("reason") or "",
+            })
+    return out
+
+
 def filter_all(
     source_id: Optional[str] = None,
     parser_name: str = "marker",

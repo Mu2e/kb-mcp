@@ -1671,6 +1671,19 @@ def cmd_visibility_scan(args):
     print("Review with: kb tools visibility findings")
 
 
+def _covered_by_redaction(finding, raw_document_id):
+    """Whether a redaction (global pattern or span rule) already removes the finding's span."""
+    from ...privacy.redaction import find_replacements, rules_for
+
+    if finding.get("category") == "restricted":
+        return False  # a notice is not redacted; the document needs a decision
+    span = (finding.get("span") or "").strip()
+    if not span:
+        return False
+    reps = find_replacements(span, rules_for(raw_document_id))
+    return sum(end - start for start, end, _ in reps) >= len(span.replace(" ", "")) * 0.5
+
+
 def cmd_visibility_findings(args):
     """List documents the sensitivity scan flagged, with the quoted evidence."""
     from sqlalchemy import func
@@ -1699,10 +1712,15 @@ def cmd_visibility_findings(args):
                            Document.title, Document.title_gen, DocumentVisibilityCurrent)
         )
         rows = []
+        covered = 0
         for scan, source_id, doc_id, title, title_gen, current in query.all():
             findings = [f for f in scan.findings or []
                         if sensitivity.SEVERITY_RANK.get(f.get("severity"), 1) >= min_rank
                         and (not args.category or f.get("category") == args.category)]
+            if not args.include_covered:
+                kept = [f for f in findings if not _covered_by_redaction(f, scan.raw_document_id)]
+                covered += len(findings) - len(kept)
+                findings = kept
             if not findings:
                 continue
             rows.append({
@@ -1729,6 +1747,8 @@ def cmd_visibility_findings(args):
           + ", ".join(f"{k} {counts.get(k, 0)}" for k in ("high", "medium", "low", "ok", "error")
                       if counts.get(k)) + ("" if counts else "none yet"))
     print("(ok = scanned, nothing found; error = scan failed, retried on the next run)")
+    if covered:
+        print(f"{covered} finding(s) not shown: a redaction already covers them (--include-covered shows them)")
     print()
     for r in rows:
         vis = ""
@@ -1750,6 +1770,162 @@ def cmd_visibility_findings(args):
     if rows:
         print("Decide with: kb tools visibility hide <raw document> --reason ... [--search-only]"
               " or show <raw document> --reason ...")
+
+
+def cmd_visibility_redact(args):
+    """Add spans to redact from MCP output: given with --span, or approved from scan findings."""
+    import getpass
+    from ..tools import add_redaction, redaction_candidates_from_findings
+    from ...privacy import sensitivity
+
+    if not args.span and not args.from_findings:
+        print("Error: give --span TEXT (repeatable) and/or --from-findings")
+        sys.exit(1)
+    user = getpass.getuser()
+    try:
+        with get_db_session() as session:
+            raw = None if args.all_documents else _resolve_raw_document(session, args.identifier)
+            raw_id = raw.id if raw else None
+            label = f"{raw.source_id}/{raw.doc_id}" if raw else "every document"
+            todo = [
+                {"span": s, "label": args.label, "scan_id": None, "origin": "cli", "reason": args.reason}
+                for s in (args.span or [])
+            ]
+            if args.from_findings:
+                if raw is None:
+                    print("Error: --from-findings needs a document, not --all-documents")
+                    sys.exit(1)
+                for c in redaction_candidates_from_findings(
+                    session, raw_id, prompt_version=sensitivity.PROMPT_VERSION,
+                    min_severity=args.min_severity, categories=args.category,
+                ):
+                    todo.append({
+                        "span": c["span"], "label": c["label"], "scan_id": c["scan_id"], "origin": "finding",
+                        "reason": args.reason or f"{c['severity']} {c['category']}: {c['reason']}",
+                    })
+    except ValueError as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+
+    if not todo:
+        print(f"{label}: nothing to redact (findings are restriction notices, already covered by "
+              f"a pattern, or not found verbatim in the text)")
+        return
+    print(f"{label}:")
+    for t in todo:
+        if args.dry_run:
+            print(f"  would redact  [{t['label']}]  {t['span']!r}")
+            continue
+        try:
+            r = add_redaction(
+                t["span"], raw_document_id=raw_id, label=t["label"], reason=t["reason"],
+                origin=t["origin"], scan_id=t["scan_id"], created_by=user,
+            )
+        except ValueError as e:
+            print(f"  skipped       {t['span']!r}: {e}")
+            continue
+        state = "redacted     " if r["added"] else "already rule "
+        print(f"  {state} [{t['label']}]  {t['span']!r}  (rule {r['id']})")
+    if args.dry_run:
+        print("Dry run: nothing written.")
+    else:
+        print("Running servers pick the rules up within a minute.")
+
+
+def cmd_visibility_unredact(args):
+    """Deactivate a redaction rule (kept in history)."""
+    from sqlalchemy import func
+    from ..db_models import DocumentRedaction
+    from ...privacy.redaction import clear_cache
+
+    with get_db_session() as session:
+        rule = session.get(DocumentRedaction, args.rule_id)
+        if rule is None:
+            print(f"Error: no redaction rule {args.rule_id}")
+            sys.exit(1)
+        if not rule.active:
+            print(f"Rule {rule.id} is already inactive")
+            return
+        rule.active = False
+        rule.deactivated_time = func.now()
+        span = rule.span
+    clear_cache()
+    print(f"Deactivated rule {args.rule_id} ({span!r}); servers stop applying it within a minute.")
+
+
+def cmd_visibility_redactions(args):
+    """List redaction rules."""
+    from ..db_models import DocumentRedaction, RawDocument
+
+    with get_db_session() as session:
+        query = (
+            session.query(DocumentRedaction, RawDocument.source_id, RawDocument.doc_id)
+            .outerjoin(RawDocument, RawDocument.id == DocumentRedaction.raw_document_id)
+        )
+        if not args.include_inactive:
+            query = query.filter(DocumentRedaction.active.is_(True))
+        if args.identifier:
+            try:
+                raw = _resolve_raw_document(session, args.identifier)
+            except ValueError as e:
+                print(f"Error: {e}")
+                sys.exit(1)
+            query = query.filter(DocumentRedaction.raw_document_id == raw.id)
+        rows = [
+            {
+                "id": r.id, "document": f"{src}/{doc}" if src else "* (every document)",
+                "raw_document_id": r.raw_document_id, "span": r.span, "label": r.label,
+                "active": r.active, "origin": r.origin, "reason": r.reason,
+                "created_by": r.created_by, "created_time": str(r.created_time)[:19],
+            }
+            for r, src, doc in query.order_by(DocumentRedaction.created_time).all()
+        ]
+    if args.json:
+        print(json.dumps(rows, indent=2))
+        return
+    from ...privacy.redaction import GLOBAL_PATTERNS
+    print("Global patterns (always on): " + ", ".join(f"{p.name} [{p.label}]" for p in GLOBAL_PATTERNS))
+    print(f"{len(rows)} span rule(s):")
+    for r in rows:
+        state = "" if r["active"] else "  (inactive)"
+        print(f"  {r['id']}  {r['document'][:55]:<55} [{r['label']}] {r['span']!r}{state}")
+
+
+def cmd_visibility_preview(args):
+    """Show what the MCP tools redact or withhold for one document."""
+    import re as _re
+    from ..db_models import Document
+    from ...privacy.redaction import clear_cache, find_replacements, rules_for
+
+    clear_cache()
+    try:
+        with get_db_session() as session:
+            raw = _resolve_raw_document(session, args.identifier)
+            docs = session.query(Document.doc_type, Document.doc_id, Document.text).filter(
+                Document.raw_document_id == raw.id).all()
+    except ValueError as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+    rules = rules_for(raw.id)
+    print(f"{raw.source_id}/{raw.doc_id}: {len([r for r in rules if r.raw_document_id])} document rule(s), "
+          f"{len([r for r in rules if not r.raw_document_id])} global span rule(s), plus the global patterns")
+    withheld = 0
+    for doc_type, doc_id, text in docs:
+        reps = find_replacements(text or "", rules)
+        if doc_type == "image":
+            withheld += bool(reps)
+            continue
+        if not reps:
+            continue
+        print(f"\n{doc_type} {doc_id}: {len(reps)} redaction(s)")
+        for start, end, placeholder in reps[:args.limit]:
+            before = _re.sub(r"\s+", " ", text[max(0, start - 60):start])
+            after = _re.sub(r"\s+", " ", text[end:end + 40])
+            print(f"  ...{before}{placeholder}{after}...")
+            print(f"       was: {text[start:end]!r}")
+        if len(reps) > args.limit:
+            print(f"  ... and {len(reps) - args.limit} more")
+    print(f"\nImages withheld from kb_get_image: {withheld} of {sum(1 for d in docs if d[0] == 'image')}")
 
 
 def cmd_export(args):
@@ -2394,8 +2570,64 @@ def setup_commands(subparsers):
     vis_findings_parser.add_argument("--run", help="Only scans from this run ID")
     vis_findings_parser.add_argument("--prompt-version", help="Prompt version (default: current)")
     vis_findings_parser.add_argument("--limit", type=int, help="Maximum number of documents")
+    vis_findings_parser.add_argument(
+        "--include-covered", action="store_true",
+        help="Also show findings a redaction already covers (global pattern or span rule)",
+    )
     vis_findings_parser.add_argument("--json", action="store_true", help="Output as JSON")
     vis_findings_parser.set_defaults(func=cmd_visibility_findings)
+
+    vis_redact_parser = visibility_subparsers.add_parser(
+        "redact",
+        help="Redact exact text from what the MCP tools return (stored data is unchanged)",
+        description=(
+            "Add spans to replace with '[redacted: <label>]' in kb_search/kb_get output. "
+            "Meeting passcodes, pwd= links, purchase cards and keys are covered by built-in "
+            "patterns already. --from-findings takes the spans of the document's latest "
+            "sensitivity-scan findings (except restriction notices: hide those documents)."
+        ),
+    )
+    vis_redact_parser.add_argument(
+        "identifier", nargs="?",
+        help="Raw document UUID, document UUID, source_id/doc_id, or doc_id",
+    )
+    vis_redact_parser.add_argument("--span", action="append", help="Exact text to redact; repeatable")
+    vis_redact_parser.add_argument("--from-findings", action="store_true", help="Redact the spans of the scan findings")
+    vis_redact_parser.add_argument(
+        "--min-severity", choices=["low", "medium", "high"], default="medium",
+        help="--from-findings: lowest severity to take (default: medium)",
+    )
+    vis_redact_parser.add_argument(
+        "--category", action="append",
+        help="--from-findings: only these categories (repeatable, e.g. personal_data)",
+    )
+    vis_redact_parser.add_argument("--label", default="private detail", help="Placeholder label for --span")
+    vis_redact_parser.add_argument("--reason", help="Why (stored with the rule)")
+    vis_redact_parser.add_argument(
+        "--all-documents", action="store_true",
+        help="Redact --span in every document instead of one (minimum 6 characters)",
+    )
+    vis_redact_parser.add_argument("--dry-run", action="store_true", help="Show what would be added")
+    vis_redact_parser.set_defaults(func=cmd_visibility_redact)
+
+    vis_unredact_parser = visibility_subparsers.add_parser(
+        "unredact", help="Deactivate a redaction rule (it stays in the history)",
+    )
+    vis_unredact_parser.add_argument("rule_id", help="Rule ID, from `redactions`")
+    vis_unredact_parser.set_defaults(func=cmd_visibility_unredact)
+
+    vis_redactions_parser = visibility_subparsers.add_parser("redactions", help="List redaction rules")
+    vis_redactions_parser.add_argument("identifier", nargs="?", help="Only rules for this document")
+    vis_redactions_parser.add_argument("--include-inactive", action="store_true", help="Also deactivated rules")
+    vis_redactions_parser.add_argument("--json", action="store_true", help="Output as JSON")
+    vis_redactions_parser.set_defaults(func=cmd_visibility_redactions)
+
+    vis_preview_parser = visibility_subparsers.add_parser(
+        "preview", help="Show what the MCP tools redact or withhold for one document",
+    )
+    vis_preview_parser.add_argument("identifier", help="Raw document UUID, document UUID, source_id/doc_id, or doc_id")
+    vis_preview_parser.add_argument("--limit", type=int, default=20, help="Redactions to show per text (default: 20)")
+    vis_preview_parser.set_defaults(func=cmd_visibility_preview)
 
     export_parser = tools_subparsers.add_parser(
         "export",

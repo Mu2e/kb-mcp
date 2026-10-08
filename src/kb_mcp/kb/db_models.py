@@ -1682,3 +1682,72 @@ class DocumentSensitivityScan(Base):
             f"<DocumentSensitivityScan(document_id={self.document_id}, "
             f"version={self.prompt_version}, status={self.status}, max={self.max_severity})>"
         )
+
+
+class DocumentRedaction(Base):
+    """Table 'document_redactions': an exact string to redact from MCP output.
+
+    Applied by `kb_mcp.privacy.redaction` wherever the agent-facing MCP tools
+    return text of the raw document (`raw_document_id`), or of every
+    document when `raw_document_id` is null. The stored documents, chunks and
+    summaries are never changed. Global formats (meeting passcodes, card
+    numbers, keys) need no row here: they are patterns in the redaction
+    module.
+
+    Rows are deactivated, not deleted, so the history of what was redacted
+    and why survives.
+
+    Attributes:
+        id (str): Primary key (UUID).
+        raw_document_id (str): FK → documents_raw.id; null for a span to
+            redact in every document.
+        span (str): The text to redact; matched ignoring case and with any
+            whitespace between its words.
+        label (str): Placeholder label, shown as "[redacted: <label>]".
+        reason (str): Why.
+        active (bool): Whether the rule applies.
+        origin (str): "cli", "finding" (approved from a sensitivity scan), ...
+        scan_id (str): FK → document_sensitivity_scans.id the span came from.
+        created_by (str): Who added it.
+        created_time / deactivated_time (datetime).
+    """
+
+    __tablename__ = "document_redactions"
+
+    id = Column(
+        String(36),
+        primary_key=True,
+        default=lambda: str(uuid.uuid4()),
+    )
+    raw_document_id = Column(
+        String(36),
+        ForeignKey("documents_raw.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
+    span = Column(Text, nullable=False)
+    label = Column(String(64), nullable=False, default="private detail")
+    reason = Column(Text, nullable=True)
+    active = Column(Boolean, nullable=False, default=True, index=True)
+    origin = Column(String(32), nullable=True)
+    scan_id = Column(
+        String(36),
+        ForeignKey("document_sensitivity_scans.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    created_by = Column(String(128), nullable=True)
+    created_time = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=func.now(),
+        server_default=func.now(),
+    )
+    deactivated_time = Column(DateTime(timezone=True), nullable=True)
+
+    raw_document = relationship("RawDocument")
+
+    def __repr__(self) -> str:
+        return (
+            f"<DocumentRedaction(raw_document_id={self.raw_document_id}, "
+            f"label={self.label}, active={self.active})>"
+        )
