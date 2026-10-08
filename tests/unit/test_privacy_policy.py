@@ -159,3 +159,14 @@ def test_only_unscanned_skips_documents_scanned_by_any_version(session):
     assert sorted(c["document_id"] for c in current["candidates"]) == ["r1-text", "r2-text", "r3-text"]
     new_only = tools.sensitivity_candidates(session, prompt_version="v4", only_unscanned=True)
     assert sorted(c["document_id"] for c in new_only["candidates"]) == ["r2-text", "r3-text"]
+
+
+def test_privacy_hold_hides_the_graph(monkeypatch):
+    """The graph tools apply neither visibility nor redaction, so they must go."""
+    from kb_mcp.config import get_server_config
+
+    monkeypatch.delenv("HIDE_GRAPH", raising=False)
+    monkeypatch.delenv("PRIVACY_HOLD_NEW_DOCUMENTS", raising=False)
+    assert get_server_config()["hide_graph"] is False
+    monkeypatch.setenv("PRIVACY_HOLD_NEW_DOCUMENTS", "true")
+    assert get_server_config()["hide_graph"] is True

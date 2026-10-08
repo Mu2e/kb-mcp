@@ -57,11 +57,18 @@ GLOBAL_PATTERNS: Sequence[Pattern] = (
     Pattern(
         "passcode-or-password", "credential",
         re.compile(
-            # "pw" only with a colon: "pw = shaping constant" is physics.
-            r"(?:\b(?:pass\s?code|password|passwd|pwd|pin)\b\s*[:=]|\bpw\s*:)\s*" + _NOT_A_SECRET
+            # "pw" only with a colon: "pw = shaping constant" is physics. No
+            # "pin" here: "Pin: GND" is a pinout (PIN codes are a separate pattern).
+            r"(?:\b(?:pass\s?code|password|passwd|pwd)\b\s*[:=]|\bpw\s*:)\s*" + _NOT_A_SECRET
             + r"([^\s,;\"'<>()\[\]]{3,40})",
             re.IGNORECASE,
         ), 1,
+    ),
+    Pattern(
+        # Only an upper-case PIN with a 4-8 digit value: pin numbers in a
+        # pinout ("Pin: 3", "PIN 12: VCC") stay as they are.
+        "pin-code", "credential",
+        re.compile(r"\bPIN\s*[:=]\s*(\d{4,8})\b"), 1,
     ),
     Pattern(
         "purchase-card", "payment card",
@@ -115,7 +122,10 @@ def span_regex(span: str) -> "re.Pattern[str]":
     digits = re.sub(r"\D", "", span)
     if _PHONE_LIKE.match(span.strip()) and len(digits) >= 7:
         return re.compile(r"(?<!\d)\(?" + r"[\s\-.()/]*".join(digits) + r"(?!\d)")
-    return re.compile(r"\s+".join(re.escape(w) for w in words), re.IGNORECASE)
+    # Whole words only: a span "Mark" must not redact inside "benchmark".
+    start = r"(?<!\w)" if words[0][0].isalnum() or words[0][0] == "_" else ""
+    end = r"(?!\w)" if words[-1][-1].isalnum() or words[-1][-1] == "_" else ""
+    return re.compile(start + r"\s+".join(re.escape(w) for w in words) + end, re.IGNORECASE)
 
 
 Replacement = Tuple[int, int, str]  # (start, end, placeholder) in the input text

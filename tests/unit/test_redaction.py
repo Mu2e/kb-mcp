@@ -32,6 +32,7 @@ def rule(span, raw_id="raw-1", label="personal data"):
      "?pwd=[redacted: meeting passcode] Meeting ID: 434"),
     ("Passcode: mu2eops - Phone passcode: 9682791#",
      "Passcode: [redacted: credential] - Phone passcode: [redacted: credential]"),
+    ("Door PIN: 4711 then turn left", "Door PIN: [redacted: credential] then turn left"),
     ("Zoom: 849 878 3372 pw: 631200 After the meeting",
      "Zoom: 849 878 3372 pw: [redacted: credential] After the meeting"),
     ("Zoom passcode:  631200 and Password: MCR3721.",
@@ -54,6 +55,9 @@ def test_global_patterns_redact(text, expected):
     "The pin assignment of the connector is in table 3.",
     "DocDB 56323, card reader test",
     "tau ~ 20-25 ns (decay) pw = shaping constant",
+    "Pin: GND",
+    "PIN 12: VCC, Pin=3 is the clock",
+    "pin: 1234 on the connector",
 ])
 def test_global_patterns_leave_ordinary_text(text):
     assert r.redact(text) == text
@@ -81,6 +85,17 @@ def test_phone_span_matches_any_separators(variant):
 def test_phone_span_does_not_match_inside_longer_numbers():
     text = "TranID16308035268 and 46308035268"
     assert r.redact(text, [rule("630-803-5268")]) == text
+
+
+def test_span_matches_whole_words_only():
+    text = "Mark ran the benchmark; it was marked done. Mark's plot."
+    assert r.redact(text, [rule("Mark")]) == \
+        "[redacted: personal data] ran the benchmark; it was marked done. [redacted: personal data]'s plot."
+
+
+def test_span_with_punctuation_edges_still_matches():
+    assert r.redact("mail <jpeck607@gmail.com>.", [rule("jpeck607@gmail.com")]) == \
+        "mail <[redacted: personal data]>."
 
 
 def test_overlapping_rules_keep_one_placeholder():

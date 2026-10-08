@@ -185,8 +185,13 @@ def split_windows(text: str, window_chars: int = 24000, overlap_chars: int = 800
     edge still appears whole in one of them. A text no longer than
     `window_chars` is a single window.
     """
-    if window_chars <= overlap_chars:
-        raise ValueError("window_chars must be larger than overlap_chars")
+    # A window may be cut as early as 4/5 of its length; the next one starts
+    # overlap_chars before that cut, so the overlap must stay below it or the
+    # start would move backwards and never reach the end.
+    if window_chars * 4 // 5 <= overlap_chars:
+        raise ValueError(
+            f"window_chars ({window_chars}) must be more than 5/4 of overlap_chars ({overlap_chars})"
+        )
     if len(text) <= window_chars:
         return [text]
 

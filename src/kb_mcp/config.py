@@ -154,6 +154,8 @@ def get_server_config() -> dict:
             * `use_firestore` (bool): Use Firestore for session storage (Env: `SESSION_STORE_FIRESTORE`, default: False).
             * `site_name` (str): Display name for the web UI (Env: `SITE_NAME`, default: 'Knowledge Base').
             * `hide_graph` (bool): Hide the knowledge graph from the web UI and MCP tools (Env: `HIDE_GRAPH`, default: False).
+              Also true whenever `PRIVACY_HOLD_NEW_DOCUMENTS` is: the graph tools do not apply document
+              visibility or redaction, so they would leak what the privacy policy hides.
             * `mcp_host` (str): Bind address for the MCP server (Env: `MCP_HOST`, falls back to `SERVER_HOST`, default: '127.0.0.1').
             * `web_host` (str): Bind address for the web UI server (Env: `WEB_HOST`, default: '127.0.0.1', i.e. loopback only).
             * `web_port` (int): Port for the web UI server (Env: `WEB_PORT`, default: `PORT` + 1).
@@ -170,7 +172,7 @@ def get_server_config() -> dict:
         'max_upload_size': _get_int("MAX_UPLOAD_SIZE", 104857600),
         'use_firestore': _get_bool("SESSION_STORE_FIRESTORE", False),
         'site_name': _get_str("SITE_NAME", "Knowledge Base"),
-        'hide_graph': _get_bool("HIDE_GRAPH", False),
+        'hide_graph': _get_bool("HIDE_GRAPH", False) or _get_bool("PRIVACY_HOLD_NEW_DOCUMENTS", False),
         # The MCP endpoint and the web UI are served by two separate uvicorn
         # servers so they can have different exposure: MCP is reachable from
         # the network and gated on an API key, while the web UI binds to

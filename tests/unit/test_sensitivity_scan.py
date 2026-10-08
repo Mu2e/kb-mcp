@@ -40,9 +40,16 @@ def test_windows_without_line_breaks_cut_hard():
     assert "".join(w[100:] if i else w for i, w in enumerate(windows)) == "x" * 5000
 
 
-def test_window_must_exceed_overlap():
+@pytest.mark.parametrize("window_chars", [10, 900, 1001])
+def test_window_must_leave_room_after_the_overlap(window_chars):
     with pytest.raises(ValueError):
-        sensitivity.split_windows("x" * 50, window_chars=10, overlap_chars=10)
+        sensitivity.split_windows("x" * 5000, window_chars=window_chars, overlap_chars=800)
+
+
+def test_smallest_valid_window_terminates():
+    text = "\n".join("line %05d" % i for i in range(2000))
+    windows = sensitivity.split_windows(text, window_chars=1002, overlap_chars=800)
+    assert windows[-1].endswith("line 01999")
 
 
 # --- parsing -----------------------------------------------------------------

@@ -2482,6 +2482,7 @@ def apply_privacy_policy(
     apply: bool = False,
     raw_document_ids: Optional[List[str]] = None,
     group_name: str = DOCUMENT_VISIBILITY_DEFAULT_GROUP,
+    max_chars: int = 500_000,
 ) -> Dict[str, Any]:
     """Turn the latest sensitivity scans into visibility decisions and redactions.
 
@@ -2492,8 +2493,11 @@ def apply_privacy_policy(
     - records a provisional hide (origin "privacy-policy") when the policy
       hides more than the current state;
     - lifts a privacy hold, or an earlier provisional hide, when the policy
-      no longer hides (a hold stays while any text document is unscanned,
-      or when the file has no text document at all);
+      no longer hides; a hold stays while any scannable text document
+      (non-empty, at most `max_chars`, the scan's own limit) is unscanned;
+    - turns a hold on a file the scan cannot read -- no text document, empty
+      text, or text over `max_chars` -- into a hide from search only, flagged
+      for review (kb_get still works, as with the oversized-spreadsheet rule);
     - never changes a decision a person made (any other origin) -- the
       redactions still apply;
     - adds the redactions (they are idempotent).
@@ -2554,12 +2558,19 @@ def apply_privacy_policy(
                        if cur["origin"] == PRIVACY_POLICY_ORIGIN and not (cur["search"] and cur["get"])}
         todo = with_findings | held | auto_hidden
 
+        # Lengths first: only text the scan could read is loaded (the giant
+        # spreadsheets run to 13M characters and are never scanned).
         text_docs: Dict[str, List[Any]] = {}
         if todo:
-            for did, raw, text in session.query(Document.id, Document.raw_document_id, Document.text).filter(
-                Document.raw_document_id.in_(list(todo)), Document.doc_type == "text",
-            ):
-                text_docs.setdefault(raw, []).append((did, text or ""))
+            lengths = session.query(
+                Document.id, Document.raw_document_id, func.coalesce(func.length(Document.text), 0),
+            ).filter(Document.raw_document_id.in_(list(todo)), Document.doc_type == "text").all()
+            readable = [did for did, _, n in lengths if 0 < n <= max_chars and did in scanned_docs]
+            texts = dict(
+                session.query(Document.id, Document.text).filter(Document.id.in_(readable)).all()
+            ) if readable else {}
+            for did, raw, n in lengths:
+                text_docs.setdefault(raw, []).append((did, n, texts.get(did) or ""))
         labels = dict(
             (r.id, f"{r.source_id}/{r.doc_id}")
             for r in session.query(RawDocument.id, RawDocument.source_id, RawDocument.doc_id)
@@ -2576,7 +2587,9 @@ def apply_privacy_policy(
         docs = text_docs.get(raw, [])
         actions = {"hide_search": False, "hide_get": False, "redact": [], "flag": [], "reasons": []}
         rules = rules_for(raw)
-        for did, text in docs:
+        for did, _, text in docs:
+            if did not in scanned_docs:
+                continue
             a = privacy_policy_actions(findings_by_doc.get(did, []), text, find_replacements(text, rules))
             actions["hide_search"] |= a["hide_search"]
             actions["hide_get"] |= a["hide_get"]
@@ -2584,7 +2597,16 @@ def apply_privacy_policy(
             actions["redact"] += [x for x in a["redact"] if x["span"].lower() not in known]
             actions["flag"] += a["flag"]
             actions["reasons"] += a["reasons"]
-        unscanned = not docs or any(did not in scanned_docs for did, _ in docs)
+        scannable = [did for did, n, _ in docs if 0 < n <= max_chars]
+        unscanned = any(did not in scanned_docs for did in scannable)
+        unreadable = [did for did, n, _ in docs if not 0 < n <= max_chars and did not in scanned_docs]
+        if not docs or (unreadable and not unscanned):
+            # Nothing (more) the scan can read: keep it out of search, flag it.
+            actions["hide_search"] = True
+            reason = ("no text document to scan" if not docs
+                      else f"text empty or over {max_chars:,} characters, not scanned")
+            actions["reasons"].append(reason)
+            actions["flag"].append(f"not scannable: {reason}")
         cur = current.get(raw)
         change = {"raw_document_id": raw, "label": labels.get(raw, raw), "visibility": None,
                   "redact": actions["redact"], "flag": actions["flag"], "reasons": actions["reasons"]}
@@ -2593,7 +2615,7 @@ def apply_privacy_policy(
         if human:
             result["skipped_human"] += bool(actions["hide_search"] or actions["hide_get"])
         elif unscanned and cur is not None and cur["origin"] == PRIVACY_HOLD_ORIGIN:
-            result["held"] += 1  # stays held until every text document is scanned
+            result["held"] += 1  # stays held until every scannable text document is scanned
         else:
             want_search = not actions["hide_search"]
             want_get = not actions["hide_get"]

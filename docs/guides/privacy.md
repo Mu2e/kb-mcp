@@ -188,8 +188,12 @@ counts).
   oversized-spreadsheet --apply [--hide-get]`.
 - **A hide or a span rule applies per raw file**, so one bad slide hides the
   whole deck it came from.
-- **The graph tools do not apply visibility.** They are off in the Mu2e
-  deployment (`HIDE_GRAPH=true`) and must stay off while this is the case.
+- **The graph tools do not apply visibility or redaction**, so
+  `PRIVACY_HOLD_NEW_DOCUMENTS=true` turns them off (as `HIDE_GRAPH=true`
+  does) until they do.
+- **Files the scan cannot read** — no text, empty text, or more than 500,000
+  characters — are hidden from search (not from `kb_get`) and flagged, rather
+  than held forever.
 - **Policy questions are not answered here.** Whether, say, contractor
   drawings count as restricted is for the lab to decide; the scan only finds
   what is marked or recognisably sensitive.
