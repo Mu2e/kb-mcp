@@ -32,6 +32,8 @@ def rule(span, raw_id="raw-1", label="personal data"):
      "?pwd=[redacted: meeting passcode] Meeting ID: 434"),
     ("Passcode: mu2eops - Phone passcode: 9682791#",
      "Passcode: [redacted: credential] - Phone passcode: [redacted: credential]"),
+    ("Zoom: 849 878 3372 pw: 631200 After the meeting",
+     "Zoom: 849 878 3372 pw: [redacted: credential] After the meeting"),
     ("Zoom passcode:  631200 and Password: MCR3721.",
      "Zoom passcode:  [redacted: credential] and Password: [redacted: credential]"),
     ("PRN279049 2 MAG SHIELD 5936272675 Card#SONYA7 | 6787 TranID3122547301",
@@ -51,6 +53,7 @@ def test_global_patterns_redact(text, expected):
     "Meeting ID: 630 840 6691",
     "The pin assignment of the connector is in table 3.",
     "DocDB 56323, card reader test",
+    "tau ~ 20-25 ns (decay) pw = shaping constant",
 ])
 def test_global_patterns_leave_ordinary_text(text):
     assert r.redact(text) == text

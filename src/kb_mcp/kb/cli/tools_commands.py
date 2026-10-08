@@ -1671,17 +1671,42 @@ def cmd_visibility_scan(args):
     print("Review with: kb tools visibility findings")
 
 
-def _covered_by_redaction(finding, raw_document_id):
-    """Whether a redaction (global pattern or span rule) already removes the finding's span."""
-    from ...privacy.redaction import find_replacements, rules_for
+def _covered_by_redaction(finding, text, replacements):
+    """Whether redaction already removes every occurrence of the finding's span from `text`.
+
+    `replacements` are find_replacements() of `text` with the document's
+    rules. A span is judged where it occurs in the document, so "mu2eops"
+    counts as covered when every copy sits behind "Passcode:" and the
+    pattern redacts it, even though the bare word matches no pattern.
+    """
+    from ...privacy.redaction import span_regex
 
     if finding.get("category") == "restricted":
         return False  # a notice is not redacted; the document needs a decision
     span = (finding.get("span") or "").strip()
     if not span:
         return False
-    reps = find_replacements(span, rules_for(raw_document_id))
-    return sum(end - start for start, end, _ in reps) >= len(span.replace(" ", "")) * 0.5
+    try:
+        hits = [m.span() for m in span_regex(span).finditer(text or "")]
+    except ValueError:
+        return False
+    if not hits:
+        return False  # paraphrased span: cannot tell, keep it for review
+
+    def residue(hs, he):
+        """The occurrence's text left unredacted, minus labels like "Passcode:" or "pwd="."""
+        kept = "".join(
+            ch for i, ch in enumerate(text[hs:he], start=hs)
+            if not any(rs <= i < re_ for rs, re_, _ in replacements)
+        )
+        return _LABEL_WORDS.sub("", kept)
+
+    return all(not residue(hs, he) for hs, he in hits)
+
+
+_LABEL_WORDS = __import__("re").compile(
+    r"(?i)\b(?:zoom|meeting|phone|pass\s?code|password|passwd|pwd|pw|pin)\b|[\s:=#\-|?&]"
+)
 
 
 def cmd_visibility_findings(args):
@@ -1689,6 +1714,7 @@ def cmd_visibility_findings(args):
     from sqlalchemy import func
     from ..db_models import Document, DocumentSensitivityScan, DocumentVisibilityCurrent, RawDocument
     from ...privacy import sensitivity
+    from ...privacy.redaction import find_replacements, rules_for
 
     version = args.prompt_version or sensitivity.PROMPT_VERSION
     min_rank = sensitivity.SEVERITY_RANK[args.min_severity]
@@ -1718,7 +1744,9 @@ def cmd_visibility_findings(args):
                         if sensitivity.SEVERITY_RANK.get(f.get("severity"), 1) >= min_rank
                         and (not args.category or f.get("category") == args.category)]
             if not args.include_covered:
-                kept = [f for f in findings if not _covered_by_redaction(f, scan.raw_document_id)]
+                text = session.query(Document.text).filter(Document.id == scan.document_id).scalar() or ""
+                replacements = find_replacements(text, rules_for(scan.raw_document_id))
+                kept = [f for f in findings if not _covered_by_redaction(f, text, replacements)]
                 covered += len(findings) - len(kept)
                 findings = kept
             if not findings:

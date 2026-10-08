@@ -57,7 +57,8 @@ GLOBAL_PATTERNS: Sequence[Pattern] = (
     Pattern(
         "passcode-or-password", "credential",
         re.compile(
-            r"\b(?:pass\s?code|password|passwd|pwd|pin)\b\s*[:=]\s*" + _NOT_A_SECRET
+            # "pw" only with a colon: "pw = shaping constant" is physics.
+            r"(?:\b(?:pass\s?code|password|passwd|pwd|pin)\b\s*[:=]|\bpw\s*:)\s*" + _NOT_A_SECRET
             + r"([^\s,;\"'<>()\[\]]{3,40})",
             re.IGNORECASE,
         ), 1,
