@@ -1645,6 +1645,7 @@ def cmd_visibility_scan(args):
             window_chars=args.window_chars,
             reasoning_effort=None if args.reasoning_effort == "none" else args.reasoning_effort,
             rescan=args.rescan,
+            only_unscanned=args.only_unscanned,
             allowed_hosts=allowed,
             progress=progress,
         )
@@ -1671,59 +1672,33 @@ def cmd_visibility_scan(args):
     print("Review with: kb tools visibility findings")
 
 
-def _covered_by_redaction(finding, text, replacements):
-    """Whether redaction already removes every occurrence of the finding's span from `text`.
-
-    `replacements` are find_replacements() of `text` with the document's
-    rules. A span is judged where it occurs in the document, so "mu2eops"
-    counts as covered when every copy sits behind "Passcode:" and the
-    pattern redacts it, even though the bare word matches no pattern.
-    """
-    from ...privacy.redaction import span_regex
-
-    if finding.get("category") == "restricted":
-        return False  # a notice is not redacted; the document needs a decision
-    span = (finding.get("span") or "").strip()
-    if not span:
-        return False
-    try:
-        hits = [m.span() for m in span_regex(span).finditer(text or "")]
-    except ValueError:
-        return False
-    if not hits:
-        return False  # paraphrased span: cannot tell, keep it for review
-
-    def residue(hs, he):
-        """The occurrence's text left unredacted, minus labels like "Passcode:" or "pwd="."""
-        kept = "".join(
-            ch for i, ch in enumerate(text[hs:he], start=hs)
-            if not any(rs <= i < re_ for rs, re_, _ in replacements)
-        )
-        return _LABEL_WORDS.sub("", kept)
-
-    return all(not residue(hs, he) for hs, he in hits)
-
-
-_LABEL_WORDS = __import__("re").compile(
-    r"(?i)\b(?:zoom|meeting|phone|pass\s?code|password|passwd|pwd|pw|pin)\b|[\s:=#\-|?&]"
-)
-
-
 def cmd_visibility_findings(args):
     """List documents the sensitivity scan flagged, with the quoted evidence."""
     from sqlalchemy import func
     from ..db_models import Document, DocumentSensitivityScan, DocumentVisibilityCurrent, RawDocument
     from ...privacy import sensitivity
-    from ...privacy.redaction import find_replacements, rules_for
+    from ...privacy.redaction import covered_by_redaction, find_replacements, rules_for
 
-    version = args.prompt_version or sensitivity.PROMPT_VERSION
+    version = args.prompt_version
     min_rank = sensitivity.SEVERITY_RANK[args.min_severity]
     wanted = [s for s in sensitivity.SEVERITIES if sensitivity.SEVERITY_RANK[s] >= min_rank]
 
     with get_db_session() as session:
-        base = session.query(DocumentSensitivityScan).filter(DocumentSensitivityScan.prompt_version == version)
+        # Each document's latest scan (of that prompt version, if one is given).
+        latest = session.query(
+            DocumentSensitivityScan.document_id,
+            func.max(DocumentSensitivityScan.created_time).label("t"),
+        )
+        if version:
+            latest = latest.filter(DocumentSensitivityScan.prompt_version == version)
         if args.run:
-            base = base.filter(DocumentSensitivityScan.run_id == args.run)
+            latest = latest.filter(DocumentSensitivityScan.run_id == args.run)
+        latest = latest.group_by(DocumentSensitivityScan.document_id).subquery()
+        base = session.query(DocumentSensitivityScan).join(
+            latest,
+            (DocumentSensitivityScan.document_id == latest.c.document_id)
+            & (DocumentSensitivityScan.created_time == latest.c.t),
+        )
         outcome = func.coalesce(DocumentSensitivityScan.max_severity, DocumentSensitivityScan.status)
         counts = dict(base.with_entities(outcome, func.count()).group_by(outcome).all())
         query = (
@@ -1746,7 +1721,7 @@ def cmd_visibility_findings(args):
             if not args.include_covered:
                 text = session.query(Document.text).filter(Document.id == scan.document_id).scalar() or ""
                 replacements = find_replacements(text, rules_for(scan.raw_document_id))
-                kept = [f for f in findings if not _covered_by_redaction(f, text, replacements)]
+                kept = [f for f in findings if not covered_by_redaction(f, text, replacements)]
                 covered += len(findings) - len(kept)
                 findings = kept
             if not findings:
@@ -1768,10 +1743,11 @@ def cmd_visibility_findings(args):
         rows = rows[:args.limit]
 
     if args.json:
-        print(json.dumps({"prompt_version": version, "counts": counts, "documents": rows}, indent=2))
+        print(json.dumps({"prompt_version": version or "latest", "counts": counts, "documents": rows}, indent=2))
         return
 
-    print(f"Sensitivity scans, prompt {version}" + (f", run {args.run}" if args.run else "") + ": "
+    print(f"Latest sensitivity scan per document" + (f", prompt {version}" if version else "")
+          + (f", run {args.run}" if args.run else "") + ": "
           + ", ".join(f"{k} {counts.get(k, 0)}" for k in ("high", "medium", "low", "ok", "error")
                       if counts.get(k)) + ("" if counts else "none yet"))
     print("(ok = scanned, nothing found; error = scan failed, retried on the next run)")
@@ -1954,6 +1930,57 @@ def cmd_visibility_preview(args):
         if len(reps) > args.limit:
             print(f"  ... and {len(reps) - args.limit} more")
     print(f"\nImages withheld from kb_get_image: {withheld} of {sum(1 for d in docs if d[0] == 'image')}")
+
+
+def cmd_visibility_apply_policy(args):
+    """Turn the latest privacy scans into provisional hides and redactions; dry run unless --apply."""
+    from ..tools import apply_privacy_policy
+
+    raw_ids = None
+    if args.document:
+        try:
+            with get_db_session() as session:
+                raw_ids = [_resolve_raw_document(session, d).id for d in args.document]
+        except ValueError as e:
+            print(f"Error: {e}")
+            sys.exit(1)
+    result = apply_privacy_policy(apply=args.apply, raw_document_ids=raw_ids)
+    if args.json:
+        print(json.dumps(result, indent=2, default=str))
+        return
+
+    verb = "Applied" if result["applied"] else "Would apply (dry run, nothing written)"
+    print(f"{verb}: {result['documents']} document(s) considered")
+    print(f"  hide {result['hidden']}, lift {result['lifted']}, redact {result['redactions']} span(s), "
+          f"flag {result['flagged']} for review; {result['held']} still held (not fully scanned), "
+          f"{result['skipped_human']} left to their manual decision")
+    if result.get("errors"):
+        print(f"  {len(result['errors'])} error(s): " + "; ".join(e["error"] for e in result["errors"][:3]))
+    if not args.verbose:
+        changes = [c for c in result["changes"] if c["visibility"]]
+        if changes:
+            print("Visibility changes:")
+        for c in changes:
+            v = c["visibility"]
+            state = ("visible (lift)" if v["search"] and v["get"]
+                     else "hide search+get" if not v["get"] else "hide search")
+            print(f"  {state:<15} {c['label'][:60]:<60} {(c['reasons'] or [''])[0][:70]}")
+    else:
+        for c in result["changes"]:
+            print(f"\n{c['label']}")
+            if c["visibility"]:
+                print(f"  visibility -> search={'yes' if c['visibility']['search'] else 'HIDDEN'} "
+                      f"get={'yes' if c['visibility']['get'] else 'HIDDEN'}")
+            for reason in c["reasons"]:
+                print(f"  because: {reason}")
+            for r in c["redact"]:
+                print(f"  redact [{r['label']}] {r['span']!r}")
+            for f in c["flag"]:
+                print(f"  review: {f}")
+    if result["run_id"]:
+        print(f"Run: {result['run_id']}")
+    elif result["changes"]:
+        print("Re-run with --apply to write these (--verbose lists redactions and flags).")
 
 
 def cmd_export(args):
@@ -2581,6 +2608,10 @@ def setup_commands(subparsers):
     )
     vis_scan_parser.add_argument("--rescan", action="store_true", help="Scan again documents already scanned")
     vis_scan_parser.add_argument(
+        "--only-unscanned", action="store_true",
+        help="Only documents never scanned under any prompt version (the import job's mode)",
+    )
+    vis_scan_parser.add_argument(
         "--allow-endpoint", action="append", metavar="HOST",
         help="Also allow sending document text to HOST (only for local/approved endpoints); repeatable",
     )
@@ -2596,7 +2627,7 @@ def setup_commands(subparsers):
     )
     vis_findings_parser.add_argument("--category", help="Only findings of this category")
     vis_findings_parser.add_argument("--run", help="Only scans from this run ID")
-    vis_findings_parser.add_argument("--prompt-version", help="Prompt version (default: current)")
+    vis_findings_parser.add_argument("--prompt-version", help="Only scans of this prompt version (default: each document's latest)")
     vis_findings_parser.add_argument("--limit", type=int, help="Maximum number of documents")
     vis_findings_parser.add_argument(
         "--include-covered", action="store_true",
@@ -2604,6 +2635,22 @@ def setup_commands(subparsers):
     )
     vis_findings_parser.add_argument("--json", action="store_true", help="Output as JSON")
     vis_findings_parser.set_defaults(func=cmd_visibility_findings)
+
+    vis_policy_parser = visibility_subparsers.add_parser(
+        "apply-policy",
+        help="Turn the latest privacy scans into provisional hides and redactions (dry run unless --apply)",
+        description=(
+            "Applies the privacy policy (docs/guides/privacy.md) to each document's latest scan: "
+            "restriction notices and real passwords hide the document, private details and "
+            "credentials are redacted, the rest is flagged for review. Lifts the hold on new "
+            "documents that scanned clean. Never changes a decision made with hide/show."
+        ),
+    )
+    vis_policy_parser.add_argument("--apply", action="store_true", help="Write the decisions (default: dry run)")
+    vis_policy_parser.add_argument("--document", action="append", help="Only this document; repeatable")
+    vis_policy_parser.add_argument("--verbose", action="store_true", help="List every redaction and flag too")
+    vis_policy_parser.add_argument("--json", action="store_true", help="Output as JSON")
+    vis_policy_parser.set_defaults(func=cmd_visibility_apply_policy)
 
     vis_redact_parser = visibility_subparsers.add_parser(
         "redact",

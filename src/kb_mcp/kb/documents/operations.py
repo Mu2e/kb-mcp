@@ -1457,6 +1457,30 @@ def get_or_create_parser(
     return parser
 
 
+def _hold_for_privacy_scan(raw_document_id: str, session) -> None:
+    """Hide a new raw document until the privacy scan clears it, if configured.
+
+    Written in the caller's transaction, so the document is never visible to
+    the MCP tools without its hold, not even between insert and scan.
+    `apply-policy` lifts the hold once the document is scanned clean (or
+    replaces it with the policy's decision).
+    """
+    from ...config import get_privacy_config
+
+    if not get_privacy_config()["hold_new_documents"]:
+        return
+    from ..tools import record_visibility_decision, PRIVACY_HOLD_ORIGIN
+
+    record_visibility_decision(
+        raw_document_id,
+        visible_search=False,
+        visible_get=False,
+        reason="new document, waiting for the privacy scan",
+        meta={"origin": PRIVACY_HOLD_ORIGIN},
+        session=session,
+    )
+
+
 def get_or_create_raw_document(
     source_id: str,
     doc_id: str,
@@ -1527,6 +1551,7 @@ def get_or_create_raw_document(
         session.refresh(raw_doc)
 
         logger.info(f"Created raw document: {raw_doc.id} (hash: {content_hash[:16]}...)")
+        _hold_for_privacy_scan(raw_doc.id, session)
         return raw_doc
 
 
@@ -1597,6 +1622,7 @@ def insert_raw_document(
         session.refresh(raw_doc)
 
         logger.info(f"Inserted raw document: {raw_doc.id} (hash: {content_hash[:16]}...)")
+        _hold_for_privacy_scan(raw_doc.id, session)
         return raw_doc.id
 
 

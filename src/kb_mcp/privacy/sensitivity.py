@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 
 # Bump whenever the prompt or the output contract changes: scans are keyed on
 # (document, prompt version), so a new version re-scans everything once.
-PROMPT_VERSION = "v3"
+PROMPT_VERSION = "v4"
 
 CATEGORIES = {
     "personnel": "HR and personnel matters about identifiable people",
@@ -136,7 +136,9 @@ named people, private contact data, security details.
 Document: {title}
 Source: {source}
 Type: {source_type}
-Part {window} of {windows} of the document's text.
+Part {window} of {windows} of the document's text. The first part starts with \
+the document's title and an AI-generated summary of it, which are shown to \
+users too: report problems in them like in the text.
 
 <text>
 {text}

@@ -255,3 +255,46 @@ def redact_output(text: Optional[str]) -> Optional[str]:
     if not text:
         return text
     return redact(text, rules_for(None))
+
+
+# Label text a finding's span often includes around the secret itself
+# ("Passcode: 640919", "pwd=..."): not sensitive, so it may stay unredacted.
+_LABEL_WORDS = re.compile(
+    r"(?i)\b(?:zoom|meeting|phone|pass\s?code|password|passwd|pwd|pw|pin)\b|[\s:=#\-|?&]"
+)
+
+
+def covered_by_redaction(finding: dict, text: str, replacements: Sequence[Replacement]) -> bool:
+    """Whether redaction already removes every occurrence of a finding's span from `text`.
+
+    `replacements` are find_replacements() of `text` with the document's
+    rules. A span is judged where it occurs in the document, so "mu2eops"
+    counts as covered when every copy sits behind "Passcode:" and the
+    pattern redacts it, even though the bare word matches no pattern; label
+    words left around a redacted secret do not count against it.
+    Restriction notices are never "covered": they need a decision about the
+    document, not a redaction.
+    """
+    if finding.get("category") == "restricted":
+        return False
+    span = (finding.get("span") or "").strip()
+    if not span:
+        return False
+    try:
+        hits = [m.span() for m in span_regex(span).finditer(text or "")]
+    except ValueError:
+        return False
+    if not hits:
+        return False  # paraphrased span: cannot tell, keep it for review
+
+    def covered(hs: int, he: int) -> bool:
+        redacted = [rs < he and hs < re_ for rs, re_, _ in replacements]
+        if not any(redacted):
+            return False  # nothing of it is redacted, whatever it consists of
+        kept = "".join(
+            ch for i, ch in enumerate(text[hs:he], start=hs)
+            if not any(rs <= i < re_ for rs, re_, _ in replacements)
+        )
+        return not _LABEL_WORDS.sub("", kept)
+
+    return all(covered(hs, he) for hs, he in hits)

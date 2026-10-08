@@ -1831,15 +1831,15 @@ def _already_decided(session, raw_document_ids, group_name: str) -> set:
     if not raw_document_ids:
         return set()
     rows = (
-        session.query(DocumentVisibilityDecision.raw_document_id)
+        session.query(DocumentVisibilityDecision.raw_document_id, DocumentVisibilityDecision.meta)
         .filter(
             DocumentVisibilityDecision.raw_document_id.in_(list(raw_document_ids)),
             DocumentVisibilityDecision.group_name == group_name,
         )
-        .distinct()
         .all()
     )
-    return {r[0] for r in rows}
+    # The privacy pipeline's provisional decisions are not a review.
+    return {raw for raw, meta in rows if (meta or {}).get("origin") not in AUTO_VISIBILITY_ORIGINS}
 
 
 def visibility_sweep(
@@ -1957,6 +1957,7 @@ def sensitivity_candidates(
     max_chars: int = 500_000,
     document_ids: Optional[List[str]] = None,
     rescan: bool = False,
+    only_unscanned: bool = False,
 ) -> Dict[str, Any]:
     """Text documents a sensitivity scan should read, without their text.
 
@@ -1964,7 +1965,8 @@ def sensitivity_candidates(
     in their parent's text. Documents over `max_chars` (the giant
     spreadsheets, decided separately) and empty ones are left out, as are
     those already scanned successfully under `prompt_version` unless
-    `rescan`. Returns {"candidates": [{"document_id", "raw_document_id",
+    `rescan`. With `only_unscanned`, a successful scan under any prompt
+    version counts (the import job's mode: new documents only). Returns {"candidates": [{"document_id", "raw_document_id",
     "chars"}], "already_scanned": int, "too_large": int}.
     """
     from sqlalchemy import func
@@ -1984,12 +1986,10 @@ def sensitivity_candidates(
 
     scanned = set()
     if not rescan:
-        scanned = {
-            r[0] for r in session.query(DocumentSensitivityScan.document_id).filter(
-                DocumentSensitivityScan.prompt_version == prompt_version,
-                DocumentSensitivityScan.status == "ok",
-            ).distinct()
-        }
+        done = session.query(DocumentSensitivityScan.document_id).filter(DocumentSensitivityScan.status == "ok")
+        if not only_unscanned:
+            done = done.filter(DocumentSensitivityScan.prompt_version == prompt_version)
+        scanned = {r[0] for r in done.distinct()}
     candidates, too_large, already = [], 0, 0
     for doc_id, raw_id, n in rows:
         if doc_id in scanned:
@@ -2008,8 +2008,14 @@ def _scan_one_document(client, model: str, candidate: Dict[str, Any], run_id: st
 
     with get_db_session() as session:
         doc = session.get(Document, candidate["document_id"])
-        text = doc.text or ""
         title = doc.title or doc.title_gen or ""
+        # Title and summary are shown to users (search results lead with the
+        # summary), and a summary paraphrases rather than quotes, so a span
+        # redaction of the text would not catch it: scan them with the text.
+        header = [f"[Title] {title}"] if title else []
+        if doc.summary:
+            header.append(f"[AI-generated summary] {doc.summary}")
+        text = ("\n".join(header) + "\n\n[Document text]\n" if header else "") + (doc.text or "")
         label = f"{doc.source_id}/{doc.doc_id}"
         source_type = doc.source_type
 
@@ -2069,6 +2075,7 @@ def sensitivity_scan(
     overlap_chars: int = 800,
     reasoning_effort: Optional[str] = "low",
     rescan: bool = False,
+    only_unscanned: bool = False,
     allowed_hosts=None,
     progress=None,
 ) -> Dict[str, Any]:
@@ -2090,6 +2097,7 @@ def sensitivity_scan(
         max_chars: Skip documents with more text than this.
         window_chars / overlap_chars / reasoning_effort: See sensitivity.scan_text.
         rescan: Scan documents again even if already scanned at this version.
+        only_unscanned: Skip documents scanned under any prompt version.
         allowed_hosts: Endpoints document text may go to (default:
             sensitivity.DEFAULT_ALLOWED_HOSTS).
         progress: Optional callable(dict) called after every document.
@@ -2127,6 +2135,7 @@ def sensitivity_scan(
             max_chars=max_chars,
             document_ids=document_ids,
             rescan=rescan,
+            only_unscanned=only_unscanned,
         )
     candidates = selection["candidates"]
     if sample is not None and sample < len(candidates):
@@ -2140,7 +2149,7 @@ def sensitivity_scan(
         "document_ids": document_ids, "sample": sample, "seed": seed, "limit": limit,
         "max_minutes": max_minutes, "concurrency": concurrency, "max_chars": max_chars,
         "window_chars": window_chars, "overlap_chars": overlap_chars,
-        "reasoning_effort": reasoning_effort, "rescan": rescan,
+        "reasoning_effort": reasoning_effort, "rescan": rescan, "only_unscanned": only_unscanned,
     }
     with get_db_session() as session:
         run = DocumentVisibilityRun(
@@ -2371,6 +2380,288 @@ def redaction_candidates_from_findings(
                 "reason": f.get("reason") or "",
             })
     return out
+
+
+# Origins of visibility decisions made by the privacy pipeline rather than a
+# person. They are provisional: the policy may change or lift them on a later
+# run, a human `hide`/`show` (any other origin) always wins over them, and the
+# rule sweeps do not count them as "already decided".
+PRIVACY_HOLD_ORIGIN = "privacy-hold"
+PRIVACY_POLICY_ORIGIN = "privacy-policy"
+AUTO_VISIBILITY_ORIGINS = (PRIVACY_HOLD_ORIGIN, PRIVACY_POLICY_ORIGIN)
+
+# A "restricted" finding hides its document only when the quote is an actual
+# notice; the model also files shared-drive links and the like under it.
+_NOTICE_WORDS = __import__("re").compile(
+    r"proprietar|confidential|vertraulich|internal|distribut|export|\bitar\b|\bear\b"
+    r"|official\s+use|\bouo\b|\bcui\b|\bnda\b|non-disclosure|forbidden|embargo|reproduc|restricted",
+    __import__("re").IGNORECASE,
+)
+
+
+def privacy_policy_actions(findings: List[Dict[str, Any]], text: str, replacements) -> Dict[str, Any]:
+    """What the privacy policy does about one document's findings. Pure; no database.
+
+    `text` is the scanned document text and `replacements` its
+    find_replacements() with the current rules, so findings a redaction
+    already covers are ignored. The rules (docs/guides/privacy.md):
+
+    - restriction notice (proprietary, confidential, internal, export
+      control, ...): hide from search and get
+    - credential, high (a real password): hide from search and get, and
+      redact it
+    - credential, medium: redact the exact span; without one, flag
+    - personal data / personnel / assessment, high (health, HR action):
+      redact the span if exact, and hide from search
+    - personal data, medium: redact the exact span
+    - anything else at medium or high: flag for review; low: nothing
+
+    Returns {"hide_search", "hide_get", "redact": [{"span", "label", "reason"}],
+    "flag": [str], "reasons": [str]}.
+    """
+    from ..privacy.redaction import covered_by_redaction, span_regex
+
+    out: Dict[str, Any] = {"hide_search": False, "hide_get": False, "redact": [], "flag": [], "reasons": []}
+    seen_spans = set()
+
+    def exact(span: str) -> bool:
+        if len(span) < 4 or not any(c.isalnum() for c in span):
+            return False
+        try:
+            return bool(span_regex(span).search(text or ""))
+        except ValueError:
+            return False
+
+    def redact(f, span):
+        if span.lower() not in seen_spans:
+            seen_spans.add(span.lower())
+            out["redact"].append({
+                "span": span,
+                "label": REDACTION_LABELS.get(f.get("category"), "sensitive detail"),
+                "reason": f"{f.get('severity')} {f.get('category')}: {f.get('reason') or ''}".strip(),
+            })
+
+    for f in findings:
+        if covered_by_redaction(f, text, replacements):
+            continue
+        category, severity = f.get("category"), f.get("severity")
+        span = " ".join((f.get("span") or "").split())
+        quote = (span or f.get("evidence") or "")[:80]
+        if severity not in ("medium", "high"):
+            continue
+        if category == "restricted":
+            if f.get("source") == "marker" or _NOTICE_WORDS.search(f"{span} {f.get('evidence', '')}"):
+                out["hide_search"] = out["hide_get"] = True
+                out["reasons"].append(f"restriction notice: {quote}")
+            else:
+                out["flag"].append(f"restricted? {quote}")
+        elif category == "credentials" and severity == "high":
+            out["hide_search"] = out["hide_get"] = True
+            out["reasons"].append(f"password or secret: {quote}")
+            if exact(span):
+                redact(f, span)
+        elif category == "credentials":
+            if exact(span):
+                redact(f, span)
+            else:
+                out["flag"].append(f"credential without an exact span: {quote}")
+        elif category in ("personal_data", "personnel", "individual_assessment") and severity == "high":
+            out["hide_search"] = True
+            out["reasons"].append(f"{category}: {quote}")
+            if exact(span):
+                redact(f, span)
+        elif category == "personal_data" and exact(span):
+            redact(f, span)
+        else:
+            out["flag"].append(f"{category}: {quote}")
+    return out
+
+
+def apply_privacy_policy(
+    *,
+    apply: bool = False,
+    raw_document_ids: Optional[List[str]] = None,
+    group_name: str = DOCUMENT_VISIBILITY_DEFAULT_GROUP,
+) -> Dict[str, Any]:
+    """Turn the latest sensitivity scans into visibility decisions and redactions.
+
+    Considers raw documents whose latest scan has findings, and those on a
+    privacy hold. For each it computes `privacy_policy_actions` over the
+    latest scan of each of its text documents, then:
+
+    - records a provisional hide (origin "privacy-policy") when the policy
+      hides more than the current state;
+    - lifts a privacy hold, or an earlier provisional hide, when the policy
+      no longer hides (a hold stays while any text document is unscanned,
+      or when the file has no text document at all);
+    - never changes a decision a person made (any other origin) -- the
+      redactions still apply;
+    - adds the redactions (they are idempotent).
+
+    Without `apply` nothing is written and the result lists the plan.
+    Returns {"applied", "documents", "hidden", "lifted", "redactions",
+    "flagged", "held", "skipped_human", "changes": [...], "run_id"}.
+    """
+    import os
+    import socket
+    from sqlalchemy import func
+    from .db_models import (
+        DocumentSensitivityScan, DocumentVisibilityRun, RawDocument,
+    )
+    from ..privacy.redaction import find_replacements, rules_for
+
+    with get_db_session() as session:
+        latest = (
+            session.query(DocumentSensitivityScan.document_id, func.max(DocumentSensitivityScan.created_time).label("t"))
+            .filter(DocumentSensitivityScan.status == "ok")
+            .group_by(DocumentSensitivityScan.document_id)
+            .subquery()
+        )
+        scan_rows = (
+            session.query(DocumentSensitivityScan.raw_document_id, DocumentSensitivityScan.document_id,
+                          DocumentSensitivityScan.findings)
+            .join(latest, (DocumentSensitivityScan.document_id == latest.c.document_id)
+                  & (DocumentSensitivityScan.created_time == latest.c.t))
+            .filter(DocumentSensitivityScan.status == "ok", DocumentSensitivityScan.raw_document_id.isnot(None))
+        )
+        if raw_document_ids:
+            scan_rows = scan_rows.filter(DocumentSensitivityScan.raw_document_id.in_(raw_document_ids))
+        scans = scan_rows.all()
+        scanned_docs = {did for _, did, _ in scans}
+
+        current_rows = (
+            session.query(DocumentVisibilityCurrent, DocumentVisibilityDecision.meta)
+            .outerjoin(DocumentVisibilityDecision, DocumentVisibilityDecision.id == DocumentVisibilityCurrent.decision_id)
+            .filter(DocumentVisibilityCurrent.group_name == group_name)
+        )
+        if raw_document_ids:
+            current_rows = current_rows.filter(DocumentVisibilityCurrent.raw_document_id.in_(raw_document_ids))
+        current = {
+            c.raw_document_id: {
+                "search": c.visible_search, "get": c.visible_get,
+                "origin": (meta or {}).get("origin"),
+            }
+            for c, meta in current_rows.all()
+        }
+
+        with_findings = {raw for raw, _, f in scans if f}
+        held = {raw for raw, cur in current.items() if cur["origin"] == PRIVACY_HOLD_ORIGIN}
+        auto_hidden = {raw for raw, cur in current.items()
+                       if cur["origin"] == PRIVACY_POLICY_ORIGIN and not (cur["search"] and cur["get"])}
+        todo = with_findings | held | auto_hidden
+
+        text_docs: Dict[str, List[Any]] = {}
+        if todo:
+            for did, raw, text in session.query(Document.id, Document.raw_document_id, Document.text).filter(
+                Document.raw_document_id.in_(list(todo)), Document.doc_type == "text",
+            ):
+                text_docs.setdefault(raw, []).append((did, text or ""))
+        labels = dict(
+            (r.id, f"{r.source_id}/{r.doc_id}")
+            for r in session.query(RawDocument.id, RawDocument.source_id, RawDocument.doc_id)
+            .filter(RawDocument.id.in_(list(todo))).all()
+        ) if todo else {}
+
+    findings_by_doc = {did: f or [] for _, did, f in scans}
+    result: Dict[str, Any] = {
+        "applied": apply, "documents": len(todo), "hidden": 0, "lifted": 0, "redactions": 0,
+        "flagged": 0, "held": 0, "skipped_human": 0, "changes": [], "run_id": None,
+    }
+    plans = []
+    for raw in sorted(todo, key=lambda r: labels.get(r, r)):
+        docs = text_docs.get(raw, [])
+        actions = {"hide_search": False, "hide_get": False, "redact": [], "flag": [], "reasons": []}
+        rules = rules_for(raw)
+        for did, text in docs:
+            a = privacy_policy_actions(findings_by_doc.get(did, []), text, find_replacements(text, rules))
+            actions["hide_search"] |= a["hide_search"]
+            actions["hide_get"] |= a["hide_get"]
+            known = {x["span"].lower() for x in actions["redact"]}
+            actions["redact"] += [x for x in a["redact"] if x["span"].lower() not in known]
+            actions["flag"] += a["flag"]
+            actions["reasons"] += a["reasons"]
+        unscanned = not docs or any(did not in scanned_docs for did, _ in docs)
+        cur = current.get(raw)
+        change = {"raw_document_id": raw, "label": labels.get(raw, raw), "visibility": None,
+                  "redact": actions["redact"], "flag": actions["flag"], "reasons": actions["reasons"]}
+
+        human = cur is not None and cur["origin"] not in AUTO_VISIBILITY_ORIGINS
+        if human:
+            result["skipped_human"] += bool(actions["hide_search"] or actions["hide_get"])
+        elif unscanned and cur is not None and cur["origin"] == PRIVACY_HOLD_ORIGIN:
+            result["held"] += 1  # stays held until every text document is scanned
+        else:
+            want_search = not actions["hide_search"]
+            want_get = not actions["hide_get"]
+            have_search = cur["search"] if cur else True
+            have_get = cur["get"] if cur else True
+            if (want_search, want_get) != (have_search, have_get):
+                change["visibility"] = {"search": want_search, "get": want_get}
+                if want_search and want_get:
+                    result["lifted"] += 1
+                else:
+                    result["hidden"] += 1
+        result["redactions"] += len(actions["redact"])
+        result["flagged"] += bool(actions["flag"])
+        if change["visibility"] or change["redact"] or change["flag"]:
+            result["changes"].append(change)
+        plans.append(change)
+
+    if not apply:
+        return result
+
+    with get_db_session() as session:
+        run = DocumentVisibilityRun(
+            hostname=socket.gethostname(), pid=os.getpid(),
+            trigger=os.getenv("KB_RUN_TRIGGER") or "manual", log_path=os.getenv("KB_RUN_LOG"),
+            args={"rule": "privacy-policy", "raw_document_ids": raw_document_ids, "group_name": group_name},
+            documents_scanned=len(todo), meta={"kind": "privacy-policy"},
+        )
+        session.add(run)
+        session.flush()
+        run_id = run.id
+    result["run_id"] = run_id
+
+    errors: List[Dict[str, str]] = []
+    added = 0
+    for change in plans:
+        raw = change["raw_document_id"]
+        try:
+            if change["visibility"]:
+                lifting = change["visibility"]["search"] and change["visibility"]["get"]
+                record_visibility_decision(
+                    raw,
+                    visible_search=change["visibility"]["search"],
+                    visible_get=change["visibility"]["get"],
+                    reason=("privacy scan clean" if lifting
+                            else "; ".join(change["reasons"])[:1000] or "privacy policy"),
+                    group_name=group_name,
+                    run_id=run_id,
+                    meta={"origin": PRIVACY_POLICY_ORIGIN, "provisional": True,
+                          "reasons": change["reasons"][:20], "flags": change["flag"][:20]},
+                )
+            for r in change["redact"]:
+                if add_redaction(r["span"], raw_document_id=raw, label=r["label"], reason=r["reason"],
+                                 origin=PRIVACY_POLICY_ORIGIN, created_by="privacy-policy")["added"]:
+                    added += 1
+        except Exception as e:  # noqa: BLE001 - recorded on the run, the rest continues
+            logger.error(f"privacy policy: {change['label']}: {e}")
+            errors.append({"raw_document_id": raw, "error": str(e)[:500]})
+
+    with get_db_session() as session:
+        session.query(DocumentVisibilityRun).filter_by(id=run_id).update({
+            "status": "partial" if errors else "success",
+            "finished_time": func.now(),
+            "newly_hidden": result["hidden"],
+            "newly_visible": result["lifted"],
+            "errors": len(errors),
+            "failures": errors,
+            "meta": {"kind": "privacy-policy", "redactions_added": added, "flagged": result["flagged"],
+                     "held": result["held"], "skipped_human": result["skipped_human"]},
+        })
+    result["redactions_added"] = added
+    result["errors"] = errors
+    return result
 
 
 def filter_all(

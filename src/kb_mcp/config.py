@@ -189,6 +189,23 @@ def get_default_llm_model() -> str:
     """
     return _get_str("DEFAULT_LLM_MODEL", "gemini-2.5-flash-lite")
 
+def get_privacy_config() -> dict:
+    """Settings for the privacy scan and policy (see docs/guides/privacy.md).
+
+    Returns:
+        dict with keys:
+
+            * `hold_new_documents` (bool): Hide every newly created raw document
+              from the MCP tools until the privacy scan has cleared it
+              (Env: `PRIVACY_HOLD_NEW_DOCUMENTS`, default: False). Only for a
+              deployment that runs `kb tools visibility scan` and
+              `apply-policy` after its imports, or new documents stay hidden.
+    """
+    return {
+        'hold_new_documents': _get_bool("PRIVACY_HOLD_NEW_DOCUMENTS", False),
+    }
+
+
 def get_llm_config() -> dict:
     """All LLM settings.
 
