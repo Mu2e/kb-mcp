@@ -2529,19 +2529,23 @@ def apply_privacy_policy(
         scans = scan_rows.all()
         scanned_docs = {did for _, did, _ in scans}
 
+        # Plain columns, not the entity plus a JSONB dict: SQLAlchemy de-duplicates
+        # entity rows by hashing them, and a dict is unhashable.
         current_rows = (
-            session.query(DocumentVisibilityCurrent, DocumentVisibilityDecision.meta)
+            session.query(
+                DocumentVisibilityCurrent.raw_document_id,
+                DocumentVisibilityCurrent.visible_search,
+                DocumentVisibilityCurrent.visible_get,
+                DocumentVisibilityDecision.meta["origin"].astext,
+            )
             .outerjoin(DocumentVisibilityDecision, DocumentVisibilityDecision.id == DocumentVisibilityCurrent.decision_id)
             .filter(DocumentVisibilityCurrent.group_name == group_name)
         )
         if raw_document_ids:
             current_rows = current_rows.filter(DocumentVisibilityCurrent.raw_document_id.in_(raw_document_ids))
         current = {
-            c.raw_document_id: {
-                "search": c.visible_search, "get": c.visible_get,
-                "origin": (meta or {}).get("origin"),
-            }
-            for c, meta in current_rows.all()
+            raw: {"search": vs, "get": vg, "origin": origin}
+            for raw, vs, vg, origin in current_rows.all()
         }
 
         with_findings = {raw for raw, _, f in scans if f}
