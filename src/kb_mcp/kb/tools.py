@@ -2399,6 +2399,18 @@ _NOTICE_WORDS = __import__("re").compile(
 )
 
 
+# Scans from this prompt version on feed the policy (earlier ones had other
+# categories and no exact spans).
+POLICY_MIN_PROMPT_VERSION = 3
+
+
+def _prompt_version_number(version: Optional[str]) -> int:
+    try:
+        return int(str(version).lstrip("v"))
+    except ValueError:
+        return 0
+
+
 def privacy_policy_actions(findings: List[Dict[str, Any]], text: str, replacements) -> Dict[str, Any]:
     """What the privacy policy does about one document's findings. Pure; no database.
 
@@ -2486,9 +2498,10 @@ def apply_privacy_policy(
 ) -> Dict[str, Any]:
     """Turn the latest sensitivity scans into visibility decisions and redactions.
 
-    Considers raw documents whose latest scan has findings, and those on a
+    Considers raw documents whose scans have findings, and those on a
     privacy hold. For each it computes `privacy_policy_actions` over the
-    latest scan of each of its text documents, then:
+    latest scan per prompt version (from POLICY_MIN_PROMPT_VERSION on) of
+    each of its text documents -- a finding in any of them counts -- then:
 
     - records a provisional hide (origin "privacy-policy") when the policy
       hides more than the current state;
@@ -2515,22 +2528,32 @@ def apply_privacy_policy(
     from ..privacy.redaction import find_replacements, rules_for
 
     with get_db_session() as session:
+        # The latest scan per document *and prompt version*: the model varies
+        # between runs (v3 and v4 disagreed on ~15% of flagged documents), so
+        # a finding in any recent version counts. Versions before
+        # POLICY_MIN_PROMPT_VERSION used other categories and are ignored.
         latest = (
-            session.query(DocumentSensitivityScan.document_id, func.max(DocumentSensitivityScan.created_time).label("t"))
+            session.query(
+                DocumentSensitivityScan.document_id,
+                DocumentSensitivityScan.prompt_version,
+                func.max(DocumentSensitivityScan.created_time).label("t"),
+            )
             .filter(DocumentSensitivityScan.status == "ok")
-            .group_by(DocumentSensitivityScan.document_id)
+            .group_by(DocumentSensitivityScan.document_id, DocumentSensitivityScan.prompt_version)
             .subquery()
         )
         scan_rows = (
             session.query(DocumentSensitivityScan.raw_document_id, DocumentSensitivityScan.document_id,
-                          DocumentSensitivityScan.findings)
+                          DocumentSensitivityScan.findings, DocumentSensitivityScan.prompt_version)
             .join(latest, (DocumentSensitivityScan.document_id == latest.c.document_id)
+                  & (DocumentSensitivityScan.prompt_version == latest.c.prompt_version)
                   & (DocumentSensitivityScan.created_time == latest.c.t))
             .filter(DocumentSensitivityScan.status == "ok", DocumentSensitivityScan.raw_document_id.isnot(None))
         )
         if raw_document_ids:
             scan_rows = scan_rows.filter(DocumentSensitivityScan.raw_document_id.in_(raw_document_ids))
-        scans = scan_rows.all()
+        scans = [(raw, did, f) for raw, did, f, version in scan_rows.all()
+                 if _prompt_version_number(version) >= POLICY_MIN_PROMPT_VERSION]
         scanned_docs = {did for _, did, _ in scans}
 
         # Plain columns, not the entity plus a JSONB dict: SQLAlchemy de-duplicates
@@ -2577,7 +2600,9 @@ def apply_privacy_policy(
             .filter(RawDocument.id.in_(list(todo))).all()
         ) if todo else {}
 
-    findings_by_doc = {did: f or [] for _, did, f in scans}
+    findings_by_doc: Dict[str, List[Dict[str, Any]]] = {}
+    for _, did, f in scans:
+        findings_by_doc.setdefault(did, []).extend(f or [])
     result: Dict[str, Any] = {
         "applied": apply, "documents": len(todo), "hidden": 0, "lifted": 0, "redactions": 0,
         "flagged": 0, "held": 0, "skipped_human": 0, "changes": [], "run_id": None,

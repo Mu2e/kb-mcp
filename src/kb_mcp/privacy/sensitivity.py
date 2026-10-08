@@ -261,7 +261,7 @@ MARKERS = [
         r"|\bECCN\b\W{0,5}(?!EAR99)[0-9][A-E][0-9]{3}",
         re.IGNORECASE)),
     ("confidentiality notice", "medium", re.compile(
-        r"\b(?:company|strictly|highly)\s+confidential\b"
+        r"\b(?:company|strictly|highly)\s+confidential\b|\bvertraulich\b"
         r"|\bdo\s+not\s+(?:distribute|forward|copy)\b"
         r"|\bnot\s+for\s+(?:public\s+)?(?:distribution|release)\b"
         r"|\binternal\s+use\s+only\b"

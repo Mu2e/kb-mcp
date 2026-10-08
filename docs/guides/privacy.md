@@ -82,8 +82,9 @@ incremental scan takes seconds per new document.
 
 ## The policy
 
-`apply-policy` looks at each document's latest scan and ignores findings a
-redaction already covers:
+`apply-policy` looks at each document's latest scan of every prompt version
+from v3 on — the model varies between runs, so a finding in any of them
+counts — and ignores findings a redaction already covers:
 
 | Finding | Action |
 |---|---|

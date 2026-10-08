@@ -120,7 +120,7 @@ def test_markers_find_restriction_notices_once_each():
         "Slide 3\nGeneral Atomics Proprietary Information\nSlide 4\nGeneral Atomics Proprietary Information\n"
         "THIS DRAWING CONTAINS INFORMATION THAT IS PROPRIETARY TO MOLEX INC\n"
         "Official Use Only\nCUI//PROPIN\nECCN: 3A001\nMu2e internal, not for public distribution\n"
-        "Excerpt from document labelled Internal Use Only\n"
+        "Excerpt from document labelled Internal Use Only\nVertraulich/Confidential\n"
     )
     found = {(f["subject"], f["severity"], f["span"]) for f in sensitivity.find_markers(text)}
     assert found == {
@@ -131,6 +131,7 @@ def test_markers_find_restriction_notices_once_each():
         ("export control", "high", "ECCN: 3A001"),
         ("confidentiality notice", "medium", "not for public distribution"),
         ("confidentiality notice", "medium", "Internal Use Only"),
+        ("confidentiality notice", "medium", "Vertraulich"),
     }
     assert all(f["source"] == "marker" and f["category"] == "restricted" for f in sensitivity.find_markers(text))
 
