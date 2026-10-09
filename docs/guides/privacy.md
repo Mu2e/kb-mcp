@@ -141,6 +141,12 @@ kb tools visibility history <doc>       # every decision, who and why
 kb tools visibility redactions [<doc>]
 ```
 
+A rule of thumb for decisions: **the fact of an event is fine, personal
+correspondence about it is not.** A resignation announced in the Institutional
+Board slides stays visible; the resignation letter itself stays out of search.
+Likewise a member directory (office numbers of hundreds of people) is better
+hidden as a whole than redacted line by line.
+
 `<doc>` is a raw document UUID, a document UUID, `source_id/doc_id` or a bare
 `doc_id`. Running servers pick up redaction rules within a minute; visibility
 decisions apply immediately.
