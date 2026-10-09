@@ -204,10 +204,11 @@ def setup_imports_routes(app, session_manager: WebSessionManager, require_auth_h
         elif hold["stuck"]:
             hold_html = (f'<p style="color:#c62828; font-weight:bold;">{hold["held"]} document(s) on privacy hold, '
                          f'{hold["stuck"]} of them for more than a day: the privacy step is not clearing them '
-                         "(see the latest log, <code>kb tools visibility list --hidden</code>).</p>")
+                         "(see the latest log and the <a href=\"/web/privacy#held\">privacy review</a>).</p>")
         else:
             hold_html = (f"<p>{hold['held']} document(s) on privacy hold (hidden from the MCP tools until "
-                         "the import job's privacy scan clears them).</p>")
+                         "the import job's privacy scan clears them). "
+                         '<a href="/web/privacy">Privacy review</a></p>')
         table = (
             '<div style="overflow-x:auto;"><table class="data-table" style="width:100%; border-collapse:collapse; font-size:13px;">'
             "<thead><tr>" + "".join(f'<th style="text-align:left; padding:4px 8px;">{h}</th>' for h in headers) + "</tr></thead>"

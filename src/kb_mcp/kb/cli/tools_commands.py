@@ -2002,6 +2002,58 @@ def cmd_visibility_apply_policy(args):
         print("Re-run with --apply to write these (--verbose lists redactions and flags).")
 
 
+def cmd_visibility_review(args):
+    """The privacy review queue: held, provisional and flagged documents."""
+    from ..tools import privacy_review_queue
+
+    queue = privacy_review_queue()
+    if args.json:
+        print(json.dumps(queue, indent=2, default=str))
+        return
+    sections = [
+        ("held", "On hold (waiting for the import job's privacy scan)"),
+        ("provisional", "Hidden by the privacy policy, not yet confirmed"),
+        ("flagged", "Visible, with findings no redaction covers yet"),
+    ]
+    for key, heading in sections:
+        if args.section and args.section != key:
+            continue
+        docs = queue[key]
+        print(f"\n== {heading}: {len(docs)}")
+        for d in docs[:args.limit]:
+            s = d["state"] or {}
+            state = ("visible" if not s or (s["search"] and s["get"])
+                     else "hidden search+get" if not s["get"] else "hidden search")
+            since = f" since {s['since']}" if s.get("since") else ""
+            print(f"  {d['label'][:70]}  [{state}{since}]  {d['title'][:50]}")
+            if s.get("reason") and key != "flagged":
+                print(f"     why: {s['reason'][:110]}")
+            for f in d["findings"][:args.findings]:
+                mark = "redacted" if f["covered"] else f"{f['severity']}"
+                print(f"     - [{mark}] {f['category']}: {(f.get('span') or f.get('evidence') or '')[:90]!r}")
+            if len(d["findings"]) > args.findings:
+                print(f"     ... {len(d['findings']) - args.findings} more")
+        if len(docs) > args.limit:
+            print(f"  ... {len(docs) - args.limit} more (--limit)")
+    print("\nDecide with: confirm / show / hide [--search-only] / redact <doc> --span ...  (or the web page /web/privacy)")
+
+
+def cmd_visibility_confirm(args):
+    """Confirm a provisional (policy) decision as reviewed, keeping its visibility."""
+    import getpass
+    from ..tools import privacy_review_action
+
+    try:
+        with get_db_session() as session:
+            raw = _resolve_raw_document(session, args.identifier)
+            raw_id, label = raw.id, f"{raw.source_id}/{raw.doc_id}"
+        message = privacy_review_action(raw_id, "confirm", user=getpass.getuser(), reason=args.reason)
+    except ValueError as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+    print(f"{label}: {message}")
+
+
 def cmd_export(args):
     """Export documents from a source into a folder hierarchy."""
     try:
@@ -2670,6 +2722,22 @@ def setup_commands(subparsers):
     vis_policy_parser.add_argument("--verbose", action="store_true", help="List every redaction and flag too")
     vis_policy_parser.add_argument("--json", action="store_true", help="Output as JSON")
     vis_policy_parser.set_defaults(func=cmd_visibility_apply_policy)
+
+    vis_review_parser = visibility_subparsers.add_parser(
+        "review", help="The privacy review queue: held, provisional and flagged documents",
+    )
+    vis_review_parser.add_argument("--section", choices=["held", "provisional", "flagged"], help="Only one section")
+    vis_review_parser.add_argument("--limit", type=int, default=50, help="Documents per section (default: 50)")
+    vis_review_parser.add_argument("--findings", type=int, default=3, help="Findings shown per document (default: 3)")
+    vis_review_parser.add_argument("--json", action="store_true", help="Output as JSON")
+    vis_review_parser.set_defaults(func=cmd_visibility_review)
+
+    vis_confirm_parser = visibility_subparsers.add_parser(
+        "confirm", help="Confirm a provisional privacy-policy decision as reviewed (keeps its visibility)",
+    )
+    vis_confirm_parser.add_argument("identifier", help="Raw document UUID, document UUID, source_id/doc_id, or doc_id")
+    vis_confirm_parser.add_argument("--reason", help="Why (default: reviewed by <user>)")
+    vis_confirm_parser.set_defaults(func=cmd_visibility_confirm)
 
     vis_redact_parser = visibility_subparsers.add_parser(
         "redact",

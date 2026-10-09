@@ -31,6 +31,7 @@ def get_default_nav_items(is_admin: bool = True) -> list[tuple[str, str]]:
             ("/web/statistics", "Statistics"),
             ("/web/logs", "Logs"),
             ("/web/imports", "Imports"),
+            ("/web/privacy", "Privacy"),
             ("/web/upload", "Upload"),
             ("/admin", "Admin"),
         ]

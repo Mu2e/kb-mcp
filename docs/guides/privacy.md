@@ -120,7 +120,26 @@ redacted content, since pixels cannot be redacted.
 
 ## Reviewing
 
+The **review queue** collects what needs a person, in three sections:
+
+- **On hold** — new documents waiting for the import job's scan. They clear
+  themselves; one older than a day means the privacy step is not running.
+- **Hidden by the privacy policy** — provisional hides nobody has confirmed.
+- **Flagged** — visible documents with findings no redaction covers yet.
+
+A document leaves the queue once a person decides about it; those decisions
+(origin `review`, or `cli` for `hide`/`show`) are final for the policy.
+
+**Web:** the admin page **Privacy** (`/web/privacy`) shows each document with
+its findings and quoted evidence, and buttons to confirm, show, hide from
+search, hide from search and get, or redact a finding's passage. The Imports
+page shows how many documents are on hold and links to it.
+
+**CLI:**
+
 ```bash
+kb tools visibility review                          # the queue
+kb tools visibility confirm <doc> --reason "..."    # keep a provisional hide, as reviewed
 # What needs a look (findings already covered by a redaction are not shown)
 kb tools visibility findings --min-severity medium
 
