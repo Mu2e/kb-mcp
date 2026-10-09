@@ -95,10 +95,28 @@ def _duration(seconds: Optional[float]) -> str:
 def setup_imports_routes(app, session_manager: WebSessionManager, require_auth_html):
     """Register the import runs page and its log views (admin only)."""
     from ....config import get_import_log_dirs
-    from ....kb.logs import get_import_runs
+    from ....kb.logs import get_import_runs, get_privacy_hold_summary
 
     def _cell(value) -> str:
         return "" if value is None else html_escape(str(value))
+
+    def _privacy_cell(privacy) -> str:
+        """The run's privacy step: scanned / hidden / redactions / still held."""
+        if not privacy:
+            return ""
+        parts = [f"{privacy.get('scanned', 0)} scanned"]
+        if privacy.get("scan_errors"):
+            parts.append(f'<span style="color:#c62828;">{privacy["scan_errors"]} scan errors</span>')
+        if "hidden" not in privacy:
+            parts.append('<span style="color:#c62828;">policy not run</span>')
+        else:
+            if privacy.get("hidden"):
+                parts.append(f"{privacy['hidden']} hidden")
+            if privacy.get("redactions"):
+                parts.append(f"{privacy['redactions']} redactions")
+            if privacy.get("held"):
+                parts.append(f'<span style="color:#ef6c00;">{privacy["held"]} still held</span>')
+        return ", ".join(parts)
 
     async def web_imports(request: Request):
         session_data, redirect = await require_auth_html(request, session_manager, require_admin=True)
@@ -138,6 +156,7 @@ def setup_imports_routes(app, session_manager: WebSessionManager, require_auth_h
                 f"<td>{_cell(run.get('summarized'))}</td>"
                 f"<td>{_cell(run.get('chunked'))}</td>"
                 f"<td>{errors or ''}</td>"
+                f"<td>{_privacy_cell(run.get('privacy'))}</td>"
                 f'<td title="{html_escape(error_text)}">{html_escape(error_text[:60])}</td>'
                 f"<td>{log_cell}</td>"
                 "</tr>"
@@ -171,7 +190,24 @@ def setup_imports_routes(app, session_manager: WebSessionManager, require_auth_h
                          "so runs are listed without their logs.")
 
         headers = ["Started", "Status", "Source", "Host", "Trigger", "Duration", "Found",
-                   "New docs", "Skipped", "Failed", "Summarized", "Embedded", "Errors", "Error", "Log"]
+                   "New docs", "Skipped", "Failed", "Summarized", "Embedded", "Errors", "Privacy", "Error", "Log"]
+
+        # New documents stay hidden from the MCP tools until the privacy step
+        # clears them; a hold older than a day means that step is not working.
+        try:
+            hold = get_privacy_hold_summary()
+        except Exception as e:  # noqa: BLE001 - the page still shows the runs
+            logger.warning("Cannot count privacy holds: %s", e)
+            hold = None
+        if hold is None:
+            hold_html = ""
+        elif hold["stuck"]:
+            hold_html = (f'<p style="color:#c62828; font-weight:bold;">{hold["held"]} document(s) on privacy hold, '
+                         f'{hold["stuck"]} of them for more than a day: the privacy step is not clearing them '
+                         "(see the latest log, <code>kb tools visibility list --hidden</code>).</p>")
+        else:
+            hold_html = (f"<p>{hold['held']} document(s) on privacy hold (hidden from the MCP tools until "
+                         "the import job's privacy scan clears them).</p>")
         table = (
             '<div style="overflow-x:auto;"><table class="data-table" style="width:100%; border-collapse:collapse; font-size:13px;">'
             "<thead><tr>" + "".join(f'<th style="text-align:left; padding:4px 8px;">{h}</th>' for h in headers) + "</tr></thead>"
@@ -191,6 +227,7 @@ def setup_imports_routes(app, session_manager: WebSessionManager, require_auth_h
         <div class="card">
             <h1>Import Runs</h1>
             <p>Runs of the scheduled import job, newest first. {dirs_note}</p>
+            {hold_html}
         </div>
         <div class="card">{table}</div>
         {orphan_html}

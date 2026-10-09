@@ -218,6 +218,16 @@ def cmd_logs_imports(args):
         extra = ((run["meta"] or {}).get("embed") or {})
         if extra:
             print(f"             " + ", ".join(f"{k}={v}" for k, v in sorted(extra.items())))
+        privacy = run.get("privacy")
+        if privacy:
+            line = f"{privacy.get('scanned', 0)} scanned, {privacy.get('scan_errors', 0)} scan errors"
+            if "hidden" in privacy:
+                line += (f"; policy: {privacy['hidden']} hidden, {privacy['lifted']} cleared, "
+                         f"{privacy['redactions']} redactions, {privacy.get('flagged') or 0} flagged, "
+                         f"{privacy.get('held') or 0} still held")
+            else:
+                line += "; policy not run"
+            print(f"  Privacy:   {line}")
         if run["error"]:
             print(f"  Error:     {run['error']}")
         failures = run["failures"] or []
@@ -232,7 +242,7 @@ def cmd_logs_imports(args):
         return "-" if v is None else str(v)
 
     header = (f"{'STARTED':16}  {'SOURCE':12}  {'HOST':12}  {'TRIGGER':11}  {'STATUS':11}  {'TIME':>7}  "
-              f"{'FOUND':>5}  {'PARSED':>6}  {'NEW':>4}  {'SKIP':>5}  {'FAIL':>4}  {'SUMM':>4}  {'EMBED':>5}  {'ERR':>3}  {'PEAK':>5}  RUN")
+              f"{'FOUND':>5}  {'PARSED':>6}  {'NEW':>4}  {'SKIP':>5}  {'FAIL':>4}  {'SUMM':>4}  {'EMBED':>5}  {'ERR':>3}  {'HELD':>4}  {'PEAK':>5}  RUN")
     print(header)
     print("-" * len(header))
     for run in runs:
@@ -245,8 +255,17 @@ def cmd_logs_imports(args):
               f"{n(run['items_found']):>5}  {n(run['items_processed']):>6}  {n(run['documents_created']):>4}  "
               f"{n(run['items_skipped']):>5}  "
               f"{n(run['items_failed']):>4}  {n(run['summarized']):>4}  {n(run['chunked']):>5}  {errs:>3}  "
+              f"{n((run.get('privacy') or {}).get('held')):>4}  "
               f"{run['peak_memory']:>5}  {run['id'][:8]}")
-    print("\nDetails (failures, log file, command): kb logs imports <RUN>")
+    print("\nHELD: documents still on privacy hold after the run's privacy step (- : no privacy step).")
+    try:
+        from ..logs import get_privacy_hold_summary
+        hold = get_privacy_hold_summary()
+        warn = f", {hold['stuck']} of them for more than a day -- the privacy step is not clearing them" if hold["stuck"] else ""
+        print(f"On privacy hold now: {hold['held']}{warn}")
+    except Exception as e:  # noqa: BLE001 - the run list is still useful
+        print(f"On privacy hold now: unknown ({e})")
+    print("Details (failures, privacy, log file, command): kb logs imports <RUN>")
 
 
 def cmd_logs_parsing(args):

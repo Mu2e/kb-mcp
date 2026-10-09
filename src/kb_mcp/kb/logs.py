@@ -365,4 +365,65 @@ def _get_import_runs_impl(
             if run.finished_time and run.started_time else None
         )
         result.append(row)
+    _attach_privacy_runs(session, result)
     return result
+
+
+def _attach_privacy_runs(session: Session, runs: List[Dict[str, Any]]) -> None:
+    """Add each import run's privacy step (scan + policy) as run["privacy"], or None.
+
+    The import job runs `kb tools visibility scan` and `apply-policy` with
+    KB_RUN_LOG set to its own log file, so their DocumentVisibilityRun rows
+    share the import run's log_path; that is the join.
+    """
+    from .db_models import DocumentVisibilityRun
+
+    paths = {r["log_path"] for r in runs if r.get("log_path")}
+    by_path: Dict[str, Dict[str, Any]] = {}
+    if paths:
+        rows = (
+            session.query(DocumentVisibilityRun)
+            .filter(DocumentVisibilityRun.log_path.in_(list(paths)))
+            .order_by(DocumentVisibilityRun.started_time)
+            .all()
+        )
+        for v in rows:
+            kind = (v.meta or {}).get("kind")
+            p = by_path.setdefault(v.log_path, {})
+            if kind == "sensitivity-scan":
+                p["scanned"] = p.get("scanned", 0) + (v.documents_scanned or 0)
+                p["scan_errors"] = p.get("scan_errors", 0) + (v.errors or 0)
+            elif kind == "privacy-policy":
+                meta = v.meta or {}
+                p["hidden"] = p.get("hidden", 0) + (v.newly_hidden or 0)
+                p["lifted"] = p.get("lifted", 0) + (v.newly_visible or 0)
+                p["redactions"] = p.get("redactions", 0) + (meta.get("redactions_added") or 0)
+                p["flagged"] = meta.get("flagged")
+                p["held"] = meta.get("held")  # still held after this run
+    for r in runs:
+        r["privacy"] = by_path.get(r.get("log_path")) if r.get("log_path") else None
+
+
+def get_privacy_hold_summary(stuck_hours: float = 24.0, session: Optional[Session] = None) -> Dict[str, int]:
+    """Documents currently on the privacy hold, and how many have waited longer than `stuck_hours`.
+
+    A hold normally lasts until the end of the import run that created it;
+    one that outlives a day means the privacy step is not running or keeps
+    failing for that document.
+    """
+    from datetime import timedelta
+    from .db_models import DocumentVisibilityCurrent, DocumentVisibilityDecision
+
+    with get_db_session(session) as session:
+        rows = (
+            session.query(DocumentVisibilityCurrent.updated_time)
+            .join(DocumentVisibilityDecision, DocumentVisibilityDecision.id == DocumentVisibilityCurrent.decision_id)
+            .filter(
+                DocumentVisibilityDecision.meta["origin"].astext == "privacy-hold",
+                DocumentVisibilityCurrent.visible_get.is_(False),
+            )
+            .all()
+        )
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=stuck_hours)
+    stuck = sum(1 for (t,) in rows if t is not None and (t if t.tzinfo else t.replace(tzinfo=timezone.utc)) < cutoff)
+    return {"held": len(rows), "stuck": stuck}
