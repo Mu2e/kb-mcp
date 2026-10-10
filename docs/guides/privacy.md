@@ -172,6 +172,10 @@ decisions apply immediately.
 
 ## Operations
 
+**Database grants.** The servers only read the privacy tables, but the
+review page writes decisions and redaction rules as the server's database
+role; the grants are listed in the deploy guide (*Database grants*).
+
 **Settings** (`deploy/mu2e.env`, environment for the import job):
 
 | Setting | Meaning |

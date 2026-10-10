@@ -2296,15 +2296,12 @@ def add_redaction(
     from .db_models import DocumentRedaction
     from ..privacy.redaction import clear_cache, span_regex
 
-    from .database import init_db
-
     span = " ".join((span or "").split())
     minimum = 4 if raw_document_id else 6
     if len(span) < minimum:
         raise ValueError(f"span {span!r} is too short to redact safely (minimum {minimum} characters)")
     span_regex(span)
 
-    init_db(create_tables=True)  # creates document_redactions on first use
     with get_db_session(session) as s:
         existing = s.query(DocumentRedaction).filter(
             DocumentRedaction.active.is_(True),
@@ -2522,10 +2519,17 @@ def apply_privacy_policy(
     import os
     import socket
     from sqlalchemy import func
+    from .database import init_db
     from .db_models import (
         DocumentSensitivityScan, DocumentVisibilityRun, RawDocument,
     )
     from ..privacy.redaction import find_replacements, rules_for
+
+    # Runs as the schema owner (import job, CLI): create document_redactions
+    # on first use. Not in add_redaction, which the web server also calls as
+    # a role without CREATE rights.
+    if apply:
+        init_db(create_tables=True)
 
     with get_db_session() as session:
         # The latest scan per document *and prompt version*: the model varies

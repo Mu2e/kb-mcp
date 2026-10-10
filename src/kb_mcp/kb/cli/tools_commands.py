@@ -1804,6 +1804,9 @@ def cmd_visibility_redact(args):
     if not args.span and not args.from_findings:
         print("Error: give --span TEXT (repeatable) and/or --from-findings")
         sys.exit(1)
+    if not args.dry_run:
+        from ..database import init_db
+        init_db(create_tables=True)  # creates document_redactions on first use
     user = getpass.getuser()
     try:
         with get_db_session() as session:
