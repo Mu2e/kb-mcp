@@ -552,6 +552,8 @@ GRANT INSERT ON <schema>.document_visibility_decisions TO <role>;
 GRANT USAGE ON SEQUENCE <schema>.document_visibility_decisions_seq TO <role>;
 GRANT INSERT, UPDATE ON <schema>.document_visibility_current TO <role>;
 GRANT INSERT, UPDATE ON <schema>.document_redactions TO <role>;
+-- MCP tool-call counts (kb logs mcp)
+GRANT INSERT ON <schema>.logs_mcp_calls TO <role>;
 ```
 
 Why each one:
@@ -566,6 +568,9 @@ Why each one:
   *not* optional in practice: it is flushed in the caller's transaction, so a
   denial poisons the session and the search returns
   `DetachedInstanceError` after having found its results.
+- **`INSERT ON logs_mcp_calls`** — every MCP tool call writes one row (tool,
+  session, outcome, duration; no user or arguments). Unlike `logs_search` it is
+  written by a background thread, so a missing grant only loses the counts.
 - **Privacy review** — the buttons on `/web/privacy` record visibility
   decisions and redaction rules as this role. Without these grants the page
   still shows the queue, but every decision fails with `permission denied`.
