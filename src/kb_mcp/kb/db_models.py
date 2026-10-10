@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 
 from sqlalchemy import (
     JSON,
+    Boolean,
     Column,
     DateTime,
     ForeignKey,
@@ -1208,6 +1209,65 @@ class ImportRun(Base):
             f"started={self.started_time}, found={self.items_found}, "
             f"failed={self.items_failed})>"
         )
+
+
+class ImageHash(Base):
+    """Table 'image_hashes': one row per distinct image (sha256 of its bytes).
+
+    The same picture recurs across the corpus -- slide-template logos in
+    every deck, the same plot in each revision of a talk. This table holds
+    what is known about each distinct image once, so the parser can reuse a
+    description instead of asking the vision model again, and so decorative
+    images (logos, banners, template graphics) can be demoted: kept as
+    records with a short label, but not embedded and not inlined into their
+    parent's text at length. See `kb tools images` and `kb_mcp.kb.images`.
+
+    Attributes:
+        image_hash (str): sha256 hex digest of the image bytes (primary key).
+        description (str): The vision model's description of the image.
+        decorative (bool): True for logos, banners and other template
+            graphics; False for real content; None while undecided.
+        label (str): Short placeholder for a decorative image
+            (e.g. "decorative: Fermilab logo").
+        decided_by (str): Who decided `decorative`: "vision" (the description
+            call), "llm" (`kb tools images classify`) or "review" (a person;
+            final, never overwritten by the automatic steps).
+        model (str): Model that described or classified the image.
+        copies / documents / entries (int): How often the image occurs: image
+            records, parent documents, and distinct DocDB entries (refreshed
+            by `kb tools images refresh`).
+        bytes (int): Size of the image.
+        created_time / updated_time (datetime): Row bookkeeping.
+        meta (dict): Anything else (e.g. the classifier's reason).
+    """
+
+    __tablename__ = "image_hashes"
+
+    DECIDED_BY_VISION = "vision"
+    DECIDED_BY_LLM = "llm"
+    DECIDED_BY_REVIEW = "review"
+
+    image_hash = Column(String(64), primary_key=True)
+    description = Column(Text, nullable=True)
+    decorative = Column(Boolean, nullable=True, index=True)
+    label = Column(String(256), nullable=True)
+    decided_by = Column(String(16), nullable=True)
+    model = Column(String(256), nullable=True)
+    copies = Column(Integer, nullable=True)
+    documents = Column(Integer, nullable=True)
+    entries = Column(Integer, nullable=True)
+    bytes = Column(Integer, nullable=True)
+    created_time = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=func.now(),
+        server_default=func.now(),
+    )
+    updated_time = Column(DateTime(timezone=True), nullable=True, default=func.now(), onupdate=func.now())
+    meta = Column(JSONB, nullable=True, default=dict)
+
+    def __repr__(self) -> str:
+        return f"<ImageHash({self.image_hash[:12]}, decorative={self.decorative}, copies={self.copies})>"
 
 
 class ParserComparison(Base):

@@ -1186,6 +1186,10 @@ def record_chunk_and_embed_all(
             Document.text.isnot(None),
             Document.text != ""
         ).outerjoin(Chunk, Document.id == Chunk.document_id).filter(Chunk.id.is_(None))
+        if doc_type == "image":
+            # Decorative images (logos, template graphics) keep their record
+            # but are never embedded: see kb_mcp.parser.boilerplate.
+            query = query.filter(Document.meta["boilerplate"].astext.is_(None))
 
         documents = query.all()
 

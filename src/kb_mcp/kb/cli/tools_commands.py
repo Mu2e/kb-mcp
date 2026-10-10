@@ -1491,6 +1491,106 @@ def cmd_count_tokens(args):
         sys.exit(1)
 
 
+def _image_row(r) -> str:
+    decision = {True: "decorative", False: "content", None: "undecided"}[r["decorative"]]
+    by = f" ({r['decided_by']})" if r.get("decided_by") else ""
+    what = f" {r['label']}" if r.get("label") else ""
+    desc = " ".join((r.get("description") or "").split())[:110]
+    return (f"{r['image_hash'][:12]}  {r['copies'] or 0:>5}x {r['documents'] or 0:>4} docs "
+            f"{r['entries'] or 0:>4} entries {(r['bytes'] or 0) / 1024:>7.1f} kB  "
+            f"{decision}{by}{what}\n    {desc}")
+
+
+def cmd_images_refresh(args):
+    """Hash every image record and count its copies into image_hashes."""
+    from ..database import init_db
+    from ..images import refresh_registry
+
+    init_db(create_tables=True)
+    result = refresh_registry()
+    print(f"Hashed {result['hashed']} image record(s); {result['distinct']} distinct images "
+          f"({result['added']} new in the registry, {result['updated']} updated).")
+
+
+def cmd_images_classify(args):
+    """Ask an LLM which repeated images are decorative (registry only; documents untouched)."""
+    from ..images import classify_candidates, classify_images
+
+    if args.dry_run:
+        rows = classify_candidates(min_copies=args.min_copies, limit=args.limit,
+                                   include_decided=args.include_decided)
+        print(f"{len(rows)} image(s) would be classified (>= {args.min_copies} copies).")
+        return
+
+    def progress(row, answer):
+        if args.verbose:
+            mark = "DECORATIVE" if answer["decorative"] else "content   "
+            print(f"{mark} {row['image_hash'][:12]} {row['copies']:>5}x  {answer['what']}")
+
+    result = classify_images(min_copies=args.min_copies, limit=args.limit, model=args.model,
+                             concurrency=args.concurrency, include_decided=args.include_decided,
+                             progress=progress)
+    print(f"Classified {result['candidates']} image(s) with {result['model']}: "
+          f"{result['decorative']} decorative, {result['content']} content, {result['errors']} error(s).")
+    if result.get("first_error"):
+        print(f"First error: {result['first_error']}")
+    if result["decorative"]:
+        print("Review with `kb tools images list --decorative yes`, then `kb tools images apply`.")
+    if result["errors"]:
+        sys.exit(1)
+
+
+def cmd_images_list(args):
+    """List registry rows for review."""
+    from ..images import list_images
+
+    rows = list_images(decorative=args.decorative, min_copies=args.min_copies,
+                       decided_by=args.decided_by, limit=args.limit)
+    if args.json:
+        print(json.dumps(rows, indent=2))
+        return
+    for r in rows:
+        print(_image_row(r))
+    print(f"({len(rows)} shown)")
+
+
+def cmd_images_decide(args):
+    """Record a reviewer's decision (final; the classifier never overrides it)."""
+    import getpass
+    from ..images import decide_images
+
+    try:
+        changed = decide_images(args.hashes, decorative=args.decision == "decorative", what=args.what,
+                                user=getpass.getuser())
+    except ValueError as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+    print(f"Marked {changed} image(s) as {args.decision}. Run `kb tools images apply` to update the documents.")
+
+
+def cmd_images_apply(args):
+    """Demote/restore image records and their parents' inlined descriptions to match the registry."""
+    from ..images import apply_image_decisions
+
+    result = apply_image_decisions(apply=args.apply, hashes=args.hash or None, rechunk=not args.no_rechunk,
+                                   limit_parents=args.limit_parents)
+    verb = "Demoted" if args.apply else "Would demote"
+    print(f"{verb} {result['demote_images']} image record(s), restore {result['restore_images']}; "
+          f"{result['parents']} parent document(s), {result['chars_saved']:,} characters of descriptions removed"
+          + ("" if args.apply else " (counted over up to 2000 parents)") + ".")
+    if result["restore_missing"]:
+        print(f"{result['restore_missing']} image(s) marked as content were demoted at parse time and have no "
+              f"description to restore; re-parse their documents.")
+    for ex in result["examples"]:
+        print(f"  e.g. {ex['action']} {ex['image']}: {ex['alt']}")
+    if args.apply:
+        print(f"Dropped {result['chunks_dropped']} chunk(s); re-chunked {result['rechunked']} parent(s)"
+              + (f", {result['rechunk_errors']} failed (the next embedding sweep retries)"
+                 if result["rechunk_errors"] else "") + ".")
+    else:
+        print("Dry run. Add --apply to change the documents.")
+
+
 def cmd_check_connections(args):
     """Check that every configured endpoint actually answers."""
     from ...health import run_and_report
@@ -1982,6 +2082,51 @@ def setup_commands(subparsers):
              "routinely needs more than Postgres's own 64MB default)",
     )
     db_maintain_parser.set_defaults(func=cmd_db_maintain)
+
+    # Image registry: repeated and decorative images (kb_mcp.kb.images)
+    images_parser = tools_subparsers.add_parser(
+        "images",
+        help="Find repeated images, classify decorative ones (logos, banners) and demote them",
+    )
+    images_subparsers = images_parser.add_subparsers(dest="images_command", required=True)
+
+    images_refresh = images_subparsers.add_parser("refresh", help="Hash all image records and count copies per image")
+    images_refresh.set_defaults(func=cmd_images_refresh)
+
+    images_classify = images_subparsers.add_parser(
+        "classify", help="Ask an LLM which repeated images are decorative (registry only)")
+    images_classify.add_argument("--min-copies", type=int, default=3, help="Only images with at least this many copies (default 3)")
+    images_classify.add_argument("--limit", type=int, help="At most this many images")
+    images_classify.add_argument("--model", help="LLM (default: PARSE_IMAGE_DESCRIPTION_MODEL, the endpoint that described the images)")
+    images_classify.add_argument("--concurrency", type=int, default=4)
+    images_classify.add_argument("--include-decided", action="store_true",
+                                 help="Also re-classify images decided by the vision model or an earlier run (never a reviewer's)")
+    images_classify.add_argument("--dry-run", action="store_true", help="Only count the candidates")
+    images_classify.add_argument("-v", "--verbose", action="store_true", help="Print each answer")
+    images_classify.set_defaults(func=cmd_images_classify)
+
+    images_list = images_subparsers.add_parser("list", help="List images in the registry for review")
+    images_list.add_argument("--decorative", choices=["yes", "no", "undecided"])
+    images_list.add_argument("--decided-by", choices=["vision", "llm", "review"])
+    images_list.add_argument("--min-copies", type=int, default=1)
+    images_list.add_argument("--limit", type=int, default=50)
+    images_list.add_argument("--json", action="store_true")
+    images_list.set_defaults(func=cmd_images_list)
+
+    images_decide = images_subparsers.add_parser("decide", help="Record a reviewer's decision for images (final)")
+    images_decide.add_argument("decision", choices=["decorative", "content"])
+    images_decide.add_argument("hashes", nargs="+", help="Image hashes (a unique prefix is enough)")
+    images_decide.add_argument("--what", help="Label for decorative images, e.g. 'Fermilab logo'")
+    images_decide.set_defaults(func=cmd_images_decide)
+
+    images_apply = images_subparsers.add_parser(
+        "apply", help="Demote/restore image records and parent texts to match the registry (dry run by default)")
+    images_apply.add_argument("--apply", action="store_true", help="Change the documents")
+    images_apply.add_argument("--hash", action="append", help="Only this image hash (repeatable)")
+    images_apply.add_argument("--limit-parents", type=int, help="At most this many parent documents")
+    images_apply.add_argument("--no-rechunk", action="store_true",
+                              help="Leave changed parents for the next embedding sweep instead of re-chunking now")
+    images_apply.set_defaults(func=cmd_images_apply)
 
     # Extract-all command (for graph relations)
     extract_all_parser = tools_subparsers.add_parser(
