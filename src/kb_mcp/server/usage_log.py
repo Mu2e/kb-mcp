@@ -23,6 +23,7 @@ import logging
 import time
 import typing
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
 
 from mcp.server.mcpserver import Context
@@ -107,12 +108,16 @@ def logged(fn):
             error_kind = type(exc).__name__
         else:
             error_kind = "error answer" if is_error_answer(result) else None
+        seconds = time.perf_counter() - started
         record({
+            # Stamped here, not by the database when the background writer
+            # gets to it, so a backed-up queue cannot shift calls in time.
+            "created_time": datetime.now(timezone.utc) - timedelta(seconds=seconds),
             "tool": fn.__name__,
             **request_info(ctx),
             "status": "error" if error_kind else "ok",
             "error_kind": error_kind,
-            "duration_ms": round((time.perf_counter() - started) * 1000, 1),
+            "duration_ms": round(seconds * 1000, 1),
             "response_chars": _size(result) if exc is None else None,
         })
 

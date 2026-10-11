@@ -46,7 +46,8 @@ def test_only_usage_fields_are_recorded(rows):
 
     logged(kb_search)("secret query", usage_ctx=fake_ctx())
     [row] = rows
-    assert set(row) == {"tool", "session_id", "transport", "status", "error_kind", "duration_ms", "response_chars"}
+    assert set(row) == {"created_time", "tool", "session_id", "transport", "status", "error_kind",
+                        "duration_ms", "response_chars"}
     assert "secret" not in repr(row)
     assert (row["status"], row["error_kind"], row["session_id"], row["transport"]) == \
         ("error", "error answer", "sess-1", "http")
@@ -134,3 +135,16 @@ def test_usage_summary_counts_tools_sessions_and_errors(session):
     s1 = next(s for s in usage["sessions"] if s["session_id"] == "s1")
     assert s1["calls"] == 3 and s1["tools"] == {"kb_search": 2, "kb_get": 1}
     assert get_mcp_usage(days=None, session=session)["totals"]["calls"] == 7
+
+
+def test_call_time_is_stamped_by_the_wrapper(rows):
+    # Not by the database when the background writer catches up.
+    from datetime import datetime, timedelta, timezone
+
+    def kb_get(identifier: str) -> str:
+        return "text"
+
+    before = datetime.now(timezone.utc)
+    logged(kb_get)("x", usage_ctx=fake_ctx())
+    [row] = rows
+    assert before - timedelta(seconds=1) <= row["created_time"] <= datetime.now(timezone.utc)
