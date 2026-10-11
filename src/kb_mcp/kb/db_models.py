@@ -1751,3 +1751,45 @@ class DocumentRedaction(Base):
             f"<DocumentRedaction(raw_document_id={self.raw_document_id}, "
             f"label={self.label}, active={self.active})>"
         )
+
+
+class McpCallLog(Base):
+    """Table 'logs_mcp_calls': one row per MCP tool call, to count what is used how often.
+
+    Written best-effort by the tool wrapper in `kb_mcp.server.usage_log`
+    (never fails a call). Read by `kb logs mcp`.
+
+    Deliberately minimal: no user, no arguments (queries, document IDs) and
+    no error text, only what usage statistics need.
+
+    Attributes:
+        id (str): Primary key (UUID).
+        created_time (datetime): When the call started.
+        tool (str): Tool name, e.g. "kb_search".
+        session_id (str): The client's MCP session (`Mcp-Session-Id`, a random
+            id per conversation), to group calls; null over stdio.
+        transport (str): "http" (external clients) or "stdio" (the kb_research
+            worker and the web chat, which run their own stdio server).
+        status (str): "ok" or "error".
+        error_kind (str): For an error, its kind only: the exception class, or
+            "error answer" when the tool answered with an error message.
+        duration_ms (float): Time the tool took.
+        response_chars (int): Size of the answer (base64 bytes for kb_get_image).
+    """
+
+    __tablename__ = "logs_mcp_calls"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    created_time = Column(
+        DateTime(timezone=True), nullable=False, default=func.now(), server_default=func.now(), index=True,
+    )
+    tool = Column(String(128), nullable=False, index=True)
+    session_id = Column(String(128), nullable=True, index=True)
+    transport = Column(String(16), nullable=True)
+    status = Column(String(16), nullable=False, default="ok")
+    error_kind = Column(String(128), nullable=True)
+    duration_ms = Column(Float, nullable=True)
+    response_chars = Column(Integer, nullable=True)
+
+    def __repr__(self) -> str:
+        return f"<McpCallLog(tool={self.tool}, session={self.session_id}, status={self.status})>"

@@ -427,3 +427,68 @@ def get_privacy_hold_summary(stuck_hours: float = 24.0, session: Optional[Sessio
     cutoff = datetime.now(timezone.utc) - timedelta(hours=stuck_hours)
     stuck = sum(1 for (t,) in rows if t is not None and (t if t.tzinfo else t.replace(tzinfo=timezone.utc)) < cutoff)
     return {"held": len(rows), "stuck": stuck}
+
+
+def get_mcp_usage(days: Optional[float] = 30, session: Optional[Session] = None) -> Dict[str, Any]:
+    """MCP tool usage from logs_mcp_calls over the last `days` (None: all time).
+
+    Aggregated in Python (one small row per call), so it runs on SQLite too.
+    Returns {"since", "tools": [{"tool", "calls", "sessions", "errors",
+    "median_ms", "p95_ms", "last_used"}], "sessions": [{"session_id",
+    "first", "last", "calls", "tools": {tool: count}}], "totals": {...}}.
+    """
+    from datetime import timedelta
+    from .db_models import McpCallLog
+
+    since = datetime.now(timezone.utc) - timedelta(days=days) if days else None
+    with get_db_session(session) as session:
+        query = session.query(
+            McpCallLog.tool, McpCallLog.session_id, McpCallLog.transport,
+            McpCallLog.status, McpCallLog.duration_ms, McpCallLog.created_time,
+        )
+        if since is not None:
+            query = query.filter(McpCallLog.created_time >= since)
+        rows = query.all()
+
+    def percentile(values, q):
+        if not values:
+            return None
+        values = sorted(values)
+        return round(values[min(len(values) - 1, int(q * len(values)))], 1)
+
+    tools: Dict[str, Dict[str, Any]] = {}
+    sessions: Dict[str, Dict[str, Any]] = {}
+    transports: Dict[str, int] = {}
+    for tool, sid, transport, status, duration, created in rows:
+        t = tools.setdefault(tool, {"tool": tool, "calls": 0, "sessions": set(), "errors": 0,
+                                    "durations": [], "last_used": created})
+        t["calls"] += 1
+        t["errors"] += status == "error"
+        if sid:
+            t["sessions"].add(sid)
+        if duration is not None:
+            t["durations"].append(duration)
+        t["last_used"] = max(t["last_used"], created)
+        transports[transport or "unknown"] = transports.get(transport or "unknown", 0) + 1
+        if sid:
+            s_ = sessions.setdefault(sid, {"session_id": sid, "first": created, "last": created,
+                                           "calls": 0, "tools": {}})
+            s_["calls"] += 1
+            s_["tools"][tool] = s_["tools"].get(tool, 0) + 1
+            s_["first"], s_["last"] = min(s_["first"], created), max(s_["last"], created)
+
+    tool_rows = sorted(
+        ({"tool": t["tool"], "calls": t["calls"], "sessions": len(t["sessions"]), "errors": t["errors"],
+          "median_ms": percentile(t["durations"], 0.5), "p95_ms": percentile(t["durations"], 0.95),
+          "last_used": _to_utc_iso(t["last_used"])} for t in tools.values()),
+        key=lambda t: -t["calls"],
+    )
+    session_rows = sorted(sessions.values(), key=lambda s_: s_["last"], reverse=True)
+    for s_ in session_rows:
+        s_["first"], s_["last"] = _to_utc_iso(s_["first"]), _to_utc_iso(s_["last"])
+    return {
+        "since": _to_utc_iso(since) if since else None,
+        "tools": tool_rows,
+        "sessions": session_rows,
+        "totals": {"calls": len(rows), "sessions": len(session_rows), "by_transport": transports},
+    }

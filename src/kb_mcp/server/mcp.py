@@ -973,19 +973,24 @@ def _redacting(fn):
 
 
 def register_tools(mcp):
-    """Register MCP tools with the FastMCP instance."""
-    from ..config import get_server_config
+    """Register MCP tools with the FastMCP instance.
 
-    mcp.tool()(_redacting(kb_search))
-    mcp.tool()(_redacting(kb_get))
-    mcp.tool()(kb_get_image)  # Keep for explicit image retrieval by filename
+    Every tool is counted in logs_mcp_calls (`logged`, outermost, so it also
+    times the redaction) and every text tool is redacted (`_redacting`).
+    """
+    from ..config import get_server_config
+    from .usage_log import logged
+
+    mcp.tool()(logged(_redacting(kb_search)))
+    mcp.tool()(logged(_redacting(kb_get)))
+    mcp.tool()(logged(kb_get_image))  # Keep for explicit image retrieval by filename
     # Graph Tools (skipped when HIDE_GRAPH is set)
     if not get_server_config()['hide_graph']:
-        mcp.tool()(_redacting(kb_lookup_node))
-        mcp.tool()(_redacting(kb_find_path))
-        mcp.tool()(_redacting(kb_node_relation_evidence))
+        mcp.tool()(logged(_redacting(kb_lookup_node)))
+        mcp.tool()(logged(_redacting(kb_find_path)))
+        mcp.tool()(logged(_redacting(kb_node_relation_evidence)))
     # Agentic research (long-running; excluded from worker agents' own tool lists)
-    mcp.tool()(_redacting(kb_research))
+    mcp.tool()(logged(_redacting(kb_research)))
 
 
 def register_resources(mcp, oauth_provider, base_url):

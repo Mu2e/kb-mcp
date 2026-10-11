@@ -152,6 +152,37 @@ def _fmt_duration(seconds):
     return f"{minutes // 60}h{minutes % 60:02d}m" if minutes >= 60 else f"{minutes}m{int(seconds % 60):02d}s"
 
 
+def cmd_logs_mcp(args):
+    """Which MCP tools are used how often (from logs_mcp_calls)."""
+    from ..logs import get_mcp_usage
+
+    usage = get_mcp_usage(days=None if args.all else args.days)
+    if args.json:
+        print(json.dumps(usage, indent=2, default=str))
+        return
+    span = "all time" if args.all else f"last {args.days:g} days"
+    totals = usage["totals"]
+    by_transport = ", ".join(f"{k} {v}" for k, v in sorted(totals["by_transport"].items()))
+    print(f"MCP tool calls, {span}: {totals['calls']} calls in {totals['sessions']} sessions"
+          + (f" ({by_transport})" if by_transport else ""))
+    if not usage["tools"]:
+        print("No calls recorded.")
+        return
+    header = f"{'TOOL':28} {'CALLS':>7} {'SESSIONS':>8} {'ERRORS':>6} {'MEDIAN':>9} {'P95':>9}  LAST USED"
+    print(header)
+    print("-" * len(header))
+    for t in usage["tools"]:
+        ms = lambda v: "-" if v is None else (f"{v / 1000:.1f}s" if v >= 1000 else f"{v:.0f}ms")
+        print(f"{t['tool']:28} {t['calls']:>7} {t['sessions']:>8} {t['errors']:>6} {ms(t['median_ms']):>9} "
+              f"{ms(t['p95_ms']):>9}  {_fmt_local(t['last_used'])}")
+    if args.sessions:
+        print(f"\nSessions (newest first, {min(args.limit, len(usage['sessions']))} of {len(usage['sessions'])}):")
+        for s in usage["sessions"][:args.limit]:
+            tools = ", ".join(f"{k} {v}" for k, v in sorted(s["tools"].items(), key=lambda kv: -kv[1]))
+            print(f"  {s['session_id'][:12]}  {_fmt_local(s['first'])} - {_fmt_local(s['last'])}  "
+                  f"{s['calls']:>4} calls: {tools}")
+
+
 def cmd_logs_imports(args):
     """Show import runs (cron or manual): when, how many found/parsed/failed, sweep results."""
     from ..logs import get_import_runs
@@ -2271,6 +2302,17 @@ def setup_commands(subparsers):
     logs_imports_parser.add_argument("--limit", type=int, default=20, help="Maximum number of runs to list (default: 20)")
     logs_imports_parser.add_argument("--json", action="store_true", help="Output as JSON")
     logs_imports_parser.set_defaults(func=cmd_logs_imports)
+
+    # logs mcp
+    logs_mcp_parser = logs_subparsers.add_parser(
+        "mcp", help="Show which MCP tools are used how often (calls, sessions, errors, durations)"
+    )
+    logs_mcp_parser.add_argument("--days", type=float, default=30, help="Look back this many days (default: 30)")
+    logs_mcp_parser.add_argument("--all", action="store_true", help="All recorded calls")
+    logs_mcp_parser.add_argument("--sessions", action="store_true", help="Also list sessions with their tool counts")
+    logs_mcp_parser.add_argument("--limit", type=int, default=30, help="Sessions to list (default: 30)")
+    logs_mcp_parser.add_argument("--json", action="store_true", help="Output as JSON")
+    logs_mcp_parser.set_defaults(func=cmd_logs_mcp)
 
     # logs tokens
     logs_tokens_parser = logs_subparsers.add_parser("tokens", help="Show LLM token usage for the knowledge base")
