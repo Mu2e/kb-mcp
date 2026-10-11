@@ -65,3 +65,20 @@ def test_parser_map_covers_extension_keys():
 def test_unknown_binary_extension_fails_cleanly():
     with pytest.raises(Exception):
         parse(data=_data("blob.xyz123", binary=b"\x00\x01\x02"))
+
+
+def test_html_extension_is_in_parser_map():
+    # The DocDB importer gates downloads on the file extension.
+    assert "html" in PARSER_MAP and "htm" in PARSER_MAP
+
+
+def test_docling_html_loads_inline_images_only():
+    pytest.importorskip("docling.datamodel.backend_options")
+    from docling.document_converter import HTMLFormatOption
+    from kb_mcp.parser.parser_docling import _html_format_option
+
+    options = _html_format_option(HTMLFormatOption).backend_options
+    assert options.fetch_images
+    # DocDB HTML is untrusted: no network, no reads from the local disk.
+    assert not options.enable_remote_fetch
+    assert not options.enable_local_fetch

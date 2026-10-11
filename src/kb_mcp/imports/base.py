@@ -350,7 +350,7 @@ class Source(ABC):
                     # Check if item was skipped (already exists)
                     if result.get("skipped"):
                         skipped += 1
-                        contacted_server = False
+                        contacted_server = bool(result.get("contacted_server"))
                         logger.debug(f"Item {item_id} was skipped (already processed)")
                     else:
                         # Success - add document IDs

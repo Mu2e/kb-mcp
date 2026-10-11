@@ -76,6 +76,23 @@ def _fill_undecoded_formulas(text: str, structured_output: Optional[dict]) -> st
     return re.sub(re.escape(_FORMULA_PLACEHOLDER), _replace, text)
 
 
+def _html_format_option(html_format_option_cls: Any) -> Any:
+    """HTML option that keeps images embedded as data: URIs.
+
+    Exported notebooks carry every plot inline as base64; by default Docling
+    records those pictures without their pixels, so they never reach image
+    description. fetch_images loads them, while remote and local fetches
+    stay off: the HTML is untrusted input. Older Docling without
+    HTMLBackendOptions gets the plain option.
+    """
+    try:
+        from docling.datamodel.backend_options import HTMLBackendOptions
+        return html_format_option_cls(backend_options=HTMLBackendOptions(fetch_images=True))
+    except (ImportError, TypeError, ValueError) as e:
+        logger.debug(f"docling HTML image loading unavailable: {e}")
+        return html_format_option_cls()
+
+
 def _get_converter(with_formula_enrichment: bool = False) -> Any:
     """Initialize and return a docling DocumentConverter (cached).
 
@@ -154,7 +171,7 @@ def _get_converter(with_formula_enrichment: bool = False) -> Any:
                 InputFormat.PDF: PdfFormatOption(pipeline_options=pdf_pipeline_options),
                 InputFormat.PPTX: PowerpointFormatOption(),
                 InputFormat.DOCX: WordFormatOption(),
-                InputFormat.HTML: HTMLFormatOption(),
+                InputFormat.HTML: _html_format_option(HTMLFormatOption),
                 InputFormat.XLSX: ExcelFormatOption(),
             }
         )
