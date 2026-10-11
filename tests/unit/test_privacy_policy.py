@@ -79,6 +79,17 @@ def test_medium_personal_data_is_redacted_when_exact():
     assert not a["hide_search"] and a["redact"][0]["label"] == "personal data"
 
 
+def test_span_only_in_the_summary_is_redacted_like_one_in_the_text():
+    # The scan reads title + summary + text; the policy checks spans against
+    # that same composition, not the bare text, or this would only be flagged.
+    scanned = tools._scanned_text("Shift notes", "Contact Jane at 630-803-5268 for access.", "Body text.")
+    assert scanned.startswith("[Title] Shift notes\n[AI-generated summary] Contact Jane")
+    assert scanned.endswith("[Document text]\nBody text.")
+    a = actions([f("personal_data", "medium", "630-803-5268")], scanned)
+    assert a["redact"] and not a["flag"]
+    assert tools._scanned_text(None, None, "Body text.") == "Body text."
+
+
 def test_paraphrased_personal_data_is_flagged():
     text = "Email call or text if you need me"
     a = actions([f("personal_data", "medium", "his mobile number")], text)

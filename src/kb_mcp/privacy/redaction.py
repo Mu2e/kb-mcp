@@ -197,7 +197,11 @@ def redact(text: str, rules: Iterable[SpanRule] = (), patterns: Sequence[Pattern
 
 _CACHE_SECONDS = 60
 _cache_lock = threading.Lock()
-_cache: Dict[str, object] = {"loaded": 0.0, "by_raw": {}, "global": []}
+_cache: Dict[str, object] = {"loaded": 0.0, "by_raw": {}, "global": [], "ever_loaded": False}
+
+
+class RedactionRulesUnavailable(RuntimeError):
+    """The redaction rules have never been read in this process, so output cannot be redacted."""
 
 
 def _load_rules() -> Tuple[Dict[str, List[SpanRule]], List[SpanRule]]:
@@ -229,7 +233,10 @@ def rules_for(raw_document_id: Optional[str]) -> List[SpanRule]:
     Rules are cached for a minute, so a new rule reaches a running server
     within that time without a query per tool call. If the table cannot be
     read, the last loaded rules stay in use and the global patterns, which
-    need no database, still apply.
+    need no database, still apply. Before the first successful load there are
+    no last rules to fall back on, so this fails closed: it raises
+    RedactionRulesUnavailable (and retries on the next call) rather than let
+    output through without its per-document redactions.
     """
     now = time.time()
     with _cache_lock:
@@ -237,20 +244,25 @@ def rules_for(raw_document_id: Optional[str]) -> List[SpanRule]:
             try:
                 _cache["by_raw"], _cache["global"] = _load_rules()
                 _cache["error"] = None
+                _cache["ever_loaded"] = True
+                _cache["loaded"] = now
             except Exception as e:  # noqa: BLE001 - patterns still apply; retried next minute
                 message = str(e).splitlines()[0]
                 if message != _cache.get("error"):  # once per distinct failure, not every minute
                     logger.error(f"redaction: could not load document_redactions, "
                                  f"using global patterns and the last loaded rules: {message}")
                 _cache["error"] = message
-            _cache["loaded"] = now
+                if not _cache["ever_loaded"]:
+                    raise RedactionRulesUnavailable(
+                        f"redaction rules could not be loaded: {message}") from e
+                _cache["loaded"] = now
         by_raw, global_rules = _cache["by_raw"], _cache["global"]
     return list(by_raw.get(raw_document_id, [])) + list(global_rules) if raw_document_id else list(global_rules)
 
 
 def clear_cache() -> None:
     with _cache_lock:
-        _cache.update({"loaded": 0.0, "by_raw": {}, "global": []})
+        _cache.update({"loaded": 0.0, "by_raw": {}, "global": [], "ever_loaded": False})
 
 
 def redact_document_text(text: Optional[str], raw_document_id: Optional[str]) -> Optional[str]:

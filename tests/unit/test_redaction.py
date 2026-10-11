@@ -203,3 +203,22 @@ async def test_redacting_wrapper_handles_async_tools(no_db_rules):
         return "the passcode is Passcode: mu2eops"
 
     assert await _redacting(research)("q") == "the passcode is Passcode: [redacted: credential]"
+
+
+def test_rules_for_fails_closed_before_the_first_load(monkeypatch):
+    import kb_mcp.privacy.redaction as r
+
+    r.clear_cache()
+    calls = []
+
+    def boom():
+        calls.append(1)
+        raise RuntimeError("permission denied for table document_redactions")
+
+    monkeypatch.setattr(r, "_load_rules", boom)
+    with pytest.raises(r.RedactionRulesUnavailable):
+        r.rules_for("raw-1")
+    with pytest.raises(r.RedactionRulesUnavailable):      # retried, not cached as "no rules"
+        r.rules_for("raw-1")
+    assert len(calls) == 2
+    r.clear_cache()

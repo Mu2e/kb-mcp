@@ -39,6 +39,7 @@ def get_closest(
     session=None,
     explain_analyse: bool = False,
     max_chunks_per_doc: Optional[int] = None,
+    enforce_visibility: bool = False,
     **kwargs
 ) -> Dict[str, Any]:
     """
@@ -60,6 +61,8 @@ def get_closest(
                 filter documentation and examples.
         session: Optional database session
         explain_analyse: If True, print EXPLAIN ANALYZE output for the query (PostgreSQL only)
+        enforce_visibility: If True, exclude documents hidden from search via
+                DocumentVisibilityCurrent (both backends).
         **kwargs: Simple metadata filters. See :func:`search` for details.
     
     Returns:
@@ -117,6 +120,7 @@ def get_closest(
                 embedding_time=0.0,  # No embedding time when using embedding directly
                 start_time=search_start,
                 max_chunks_per_doc=max_chunks_per_doc,
+                enforce_visibility=enforce_visibility,
                 **kwargs
             )
         else:
@@ -133,6 +137,7 @@ def get_closest(
                 embedding_time=0.0,  # No embedding time when using embedding directly
                 start_time=search_start,
                 max_chunks_per_doc=max_chunks_per_doc,
+                enforce_visibility=enforce_visibility,
                 **kwargs
             )
 

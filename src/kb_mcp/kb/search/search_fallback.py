@@ -4,10 +4,10 @@ import logging
 import time
 from typing import List, Optional, Dict, Any
 import numpy as np
-from sqlalchemy import select, and_
+from sqlalchemy import select, and_, func
 from sqlalchemy.orm import aliased
 
-from ..db_models import Document
+from ..db_models import DOCUMENT_VISIBILITY_DEFAULT_GROUP, Document, DocumentVisibilityCurrent
 from ..embedding.db_models import Chunk
 from .filters import get_filters_fallback
 
@@ -26,6 +26,7 @@ def _search_fallback(
     embedding_time: float = 0.0,
     start_time: Optional[float] = None,
     max_chunks_per_doc: Optional[int] = None,
+    enforce_visibility: bool = False,
     **kwargs,
 ) -> Dict[str, Any]:
     """
@@ -89,6 +90,15 @@ def _search_fallback(
     )
     if filters:
         query_stmt = query_stmt.where(and_(*filters))
+
+    # Same rule as the pgvector path: no current-visibility row, or
+    # visible_search left NULL, means visible.
+    if enforce_visibility:
+        query_stmt = query_stmt.outerjoin(
+            DocumentVisibilityCurrent,
+            and_(DocumentVisibilityCurrent.raw_document_id == doc_alias.raw_document_id,
+                 DocumentVisibilityCurrent.group_name == DOCUMENT_VISIBILITY_DEFAULT_GROUP),
+        ).where(func.coalesce(DocumentVisibilityCurrent.visible_search, True))
     
     # Apply chunking_strategy filter
     if chunking_strategy:

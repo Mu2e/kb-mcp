@@ -321,7 +321,9 @@ def parse_findings(content: str) -> List[Dict[str, Any]]:
     data = json.loads(content)
 
     raw = data.get("findings") if isinstance(data, dict) else None
-    if raw is None:
+    if not isinstance(raw, list):
+        # A dict or string here is a malformed answer, not "nothing found":
+        # treating it as clean would let the policy lift the document's hold.
         raise ValueError(f"response has no 'findings' list: {content[:200]!r}")
     findings = []
     for f in raw:

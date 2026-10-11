@@ -2001,6 +2001,20 @@ def sensitivity_candidates(
     return {"candidates": candidates, "already_scanned": already, "too_large": too_large}
 
 
+def _scanned_text(title: Optional[str], summary: Optional[str], text: Optional[str]) -> str:
+    """The text the privacy scan reads for a document: title, AI summary, then the text.
+
+    Title and summary are shown to users (search results lead with the
+    summary), and a summary paraphrases rather than quotes, so a span
+    redaction of the text would not catch it: they are scanned with the text,
+    and a finding's span is checked against this same composition.
+    """
+    header = [f"[Title] {title}"] if title else []
+    if summary:
+        header.append(f"[AI-generated summary] {summary}")
+    return ("\n".join(header) + "\n\n[Document text]\n" if header else "") + (text or "")
+
+
 def _scan_one_document(client, model: str, candidate: Dict[str, Any], run_id: str, scan_options: Dict[str, Any]):
     """Scan one document and write its DocumentSensitivityScan row (ok or error)."""
     from .db_models import DocumentSensitivityScan
@@ -2008,14 +2022,7 @@ def _scan_one_document(client, model: str, candidate: Dict[str, Any], run_id: st
 
     with get_db_session() as session:
         doc = session.get(Document, candidate["document_id"])
-        title = doc.title or doc.title_gen or ""
-        # Title and summary are shown to users (search results lead with the
-        # summary), and a summary paraphrases rather than quotes, so a span
-        # redaction of the text would not catch it: scan them with the text.
-        header = [f"[Title] {title}"] if title else []
-        if doc.summary:
-            header.append(f"[AI-generated summary] {doc.summary}")
-        text = ("\n".join(header) + "\n\n[Document text]\n" if header else "") + (doc.text or "")
+        text = _scanned_text(doc.title or doc.title_gen, doc.summary, doc.text)
         label = f"{doc.source_id}/{doc.doc_id}"
         source_type = doc.source_type
 
@@ -2343,7 +2350,7 @@ def redaction_candidates_from_findings(
 
     rank = sensitivity.SEVERITY_RANK
     scans = (
-        session.query(DocumentSensitivityScan, Document.text)
+        session.query(DocumentSensitivityScan, Document.title, Document.title_gen, Document.summary, Document.text)
         .join(Document, Document.id == DocumentSensitivityScan.document_id)
         .filter(
             DocumentSensitivityScan.raw_document_id == raw_document_id,
@@ -2353,7 +2360,8 @@ def redaction_candidates_from_findings(
         .all()
     )
     out, seen = [], set()
-    for scan, text in scans:
+    for scan, title, title_gen, summary, doc_text in scans:
+        text = _scanned_text(title or title_gen, summary, doc_text)
         for f in scan.findings or []:
             category = f.get("category")
             if category == "restricted" or (categories and category not in categories):
@@ -2593,9 +2601,14 @@ def apply_privacy_policy(
                 Document.id, Document.raw_document_id, func.coalesce(func.length(Document.text), 0),
             ).filter(Document.raw_document_id.in_(list(todo)), Document.doc_type == "text").all()
             readable = [did for did, _, n in lengths if 0 < n <= max_chars and did in scanned_docs]
-            texts = dict(
-                session.query(Document.id, Document.text).filter(Document.id.in_(readable)).all()
-            ) if readable else {}
+            # The same text the scan read, so a span found only in the
+            # title or summary is still matched and redacted.
+            texts = {
+                did: _scanned_text(title or title_gen, summary, text)
+                for did, title, title_gen, summary, text in session.query(
+                    Document.id, Document.title, Document.title_gen, Document.summary, Document.text,
+                ).filter(Document.id.in_(readable)).all()
+            } if readable else {}
             for did, raw, n in lengths:
                 text_docs.setdefault(raw, []).append((did, n, texts.get(did) or ""))
         labels = dict(
@@ -2884,6 +2897,24 @@ def privacy_review_queue(group_name: str = DOCUMENT_VISIBILITY_DEFAULT_GROUP) ->
 REVIEW_ACTIONS = ("confirm", "show", "hide", "hide-search", "redact", "unredact")
 
 
+def _current_visibility(raw_document_id: str, group_name: str) -> Optional[Dict[str, Any]]:
+    """The current visibility of a raw document and the origin of the decision behind it."""
+    with get_db_session() as session:
+        row = (
+            session.query(
+                DocumentVisibilityCurrent.visible_search,
+                DocumentVisibilityCurrent.visible_get,
+                DocumentVisibilityDecision.meta["origin"].astext,
+            )
+            .outerjoin(DocumentVisibilityDecision,
+                       DocumentVisibilityDecision.id == DocumentVisibilityCurrent.decision_id)
+            .filter(DocumentVisibilityCurrent.raw_document_id == raw_document_id,
+                    DocumentVisibilityCurrent.group_name == group_name)
+            .first()
+        )
+    return {"search": row[0], "get": row[1], "origin": row[2]} if row else None
+
+
 def privacy_review_action(
     raw_document_id: str,
     action: str,
@@ -2933,10 +2964,15 @@ def privacy_review_action(
         return f"no longer redacting {span!r}"
 
     if action == "confirm":
-        with get_db_session() as session:
-            cur = session.query(DocumentVisibilityCurrent).filter_by(
-                raw_document_id=raw_document_id, group_name=group_name).first()
-            visible = (cur.visible_search, cur.visible_get) if cur else (True, True)
+        # Only a provisional policy decision can be confirmed. Confirming a
+        # hold would turn "not scanned yet" into a final hidden decision that
+        # no later scan could lift; anything else already is final.
+        cur = _current_visibility(raw_document_id, group_name)
+        if cur is None or cur["origin"] != PRIVACY_POLICY_ORIGIN:
+            origin = cur["origin"] if cur else "none"
+            raise ValueError(f"nothing to confirm: the current decision is not a provisional "
+                             f"privacy-policy one (origin {origin}); use show, hide or hide-search")
+        visible = (cur["search"], cur["get"])
     else:
         visible = {"show": (True, True), "hide": (False, False), "hide-search": (False, True)}[action]
     record_visibility_decision(

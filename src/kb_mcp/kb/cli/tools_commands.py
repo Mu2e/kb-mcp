@@ -1708,7 +1708,15 @@ def cmd_visibility_scan(args):
 
     if args.json:
         print(json.dumps(result, indent=2, default=str))
-        return
+    else:
+        _print_scan_result(result)
+    # Documents that failed to scan stay held; a nonzero exit lets the import
+    # job report it (PRIVACY FAILED) instead of "privacy scan done".
+    if result["errors"]:
+        sys.exit(2)
+
+
+def _print_scan_result(result):
     print()
     print(f"Run {result['run_id']}: {result['status']}"
           + (f" ({result['stopped']})" if result["stopped"] else ""))
@@ -2000,8 +2008,15 @@ def cmd_visibility_apply_policy(args):
     result = apply_privacy_policy(apply=args.apply, raw_document_ids=raw_ids)
     if args.json:
         print(json.dumps(result, indent=2, default=str))
-        return
+    else:
+        _print_policy_result(result, verbose=args.verbose)
+    # A write that failed leaves its document as it was; exit nonzero so the
+    # import job reports PRIVACY FAILED instead of "privacy policy applied".
+    if result["applied"] and result.get("errors"):
+        sys.exit(2)
 
+
+def _print_policy_result(result, verbose=False):
     verb = "Applied" if result["applied"] else "Would apply (dry run, nothing written)"
     print(f"{verb}: {result['documents']} document(s) considered")
     print(f"  hide {result['hidden']}, lift {result['lifted']}, redact {result['redactions']} span(s), "
@@ -2009,7 +2024,7 @@ def cmd_visibility_apply_policy(args):
           f"{result['skipped_human']} left to their manual decision")
     if result.get("errors"):
         print(f"  {len(result['errors'])} error(s): " + "; ".join(e["error"] for e in result["errors"][:3]))
-    if not args.verbose:
+    if not verbose:
         changes = [c for c in result["changes"] if c["visibility"]]
         if changes:
             print("Visibility changes:")
