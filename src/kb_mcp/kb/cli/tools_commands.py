@@ -218,6 +218,16 @@ def cmd_logs_imports(args):
         extra = ((run["meta"] or {}).get("embed") or {})
         if extra:
             print(f"             " + ", ".join(f"{k}={v}" for k, v in sorted(extra.items())))
+        privacy = run.get("privacy")
+        if privacy:
+            line = f"{privacy.get('scanned', 0)} scanned, {privacy.get('scan_errors', 0)} scan errors"
+            if "hidden" in privacy:
+                line += (f"; policy: {privacy['hidden']} hidden, {privacy['lifted']} cleared, "
+                         f"{privacy['redactions']} redactions, {privacy.get('flagged') or 0} flagged, "
+                         f"{privacy.get('held') or 0} still held")
+            else:
+                line += "; policy not run"
+            print(f"  Privacy:   {line}")
         if run["error"]:
             print(f"  Error:     {run['error']}")
         failures = run["failures"] or []
@@ -232,7 +242,7 @@ def cmd_logs_imports(args):
         return "-" if v is None else str(v)
 
     header = (f"{'STARTED':16}  {'SOURCE':12}  {'HOST':12}  {'TRIGGER':11}  {'STATUS':11}  {'TIME':>7}  "
-              f"{'FOUND':>5}  {'PARSED':>6}  {'NEW':>4}  {'SKIP':>5}  {'FAIL':>4}  {'SUMM':>4}  {'EMBED':>5}  {'ERR':>3}  {'PEAK':>5}  RUN")
+              f"{'FOUND':>5}  {'PARSED':>6}  {'NEW':>4}  {'SKIP':>5}  {'FAIL':>4}  {'SUMM':>4}  {'EMBED':>5}  {'ERR':>3}  {'HELD':>4}  {'PEAK':>5}  RUN")
     print(header)
     print("-" * len(header))
     for run in runs:
@@ -245,8 +255,17 @@ def cmd_logs_imports(args):
               f"{n(run['items_found']):>5}  {n(run['items_processed']):>6}  {n(run['documents_created']):>4}  "
               f"{n(run['items_skipped']):>5}  "
               f"{n(run['items_failed']):>4}  {n(run['summarized']):>4}  {n(run['chunked']):>5}  {errs:>3}  "
+              f"{n((run.get('privacy') or {}).get('held')):>4}  "
               f"{run['peak_memory']:>5}  {run['id'][:8]}")
-    print("\nDetails (failures, log file, command): kb logs imports <RUN>")
+    print("\nHELD: documents still on privacy hold after the run's privacy step (- : no privacy step).")
+    try:
+        from ..logs import get_privacy_hold_summary
+        hold = get_privacy_hold_summary()
+        warn = f", {hold['stuck']} of them for more than a day -- the privacy step is not clearing them" if hold["stuck"] else ""
+        print(f"On privacy hold now: {hold['held']}{warn}")
+    except Exception as e:  # noqa: BLE001 - the run list is still useful
+        print(f"On privacy hold now: unknown ({e})")
+    print("Details (failures, privacy, log file, command): kb logs imports <RUN>")
 
 
 def cmd_logs_parsing(args):
@@ -1351,6 +1370,708 @@ def cmd_filter_stats(args):
         sys.exit(1)
 
 
+def _resolve_raw_document(session, identifier):
+    """The one RawDocument an identifier names: a raw document UUID, a parsed
+    document UUID, "source_id/doc_id", or a bare doc_id.
+
+    Visibility is decided per raw file, so a parsed document resolves to its
+    raw document. Raises ValueError when nothing matches, or when a doc_id
+    matches several raw documents (it is not unique across sources, and a
+    re-staged file can leave duplicates) -- pass the raw UUID then.
+    """
+    from ..db_models import Document, RawDocument
+
+    raw = session.get(RawDocument, identifier)
+    if raw is not None:
+        return raw
+    doc = session.get(Document, identifier)
+    if doc is not None:
+        if not doc.raw_document_id:
+            raise ValueError(
+                f"document {identifier} has no raw document; visibility is decided per raw file"
+            )
+        return session.get(RawDocument, doc.raw_document_id)
+
+    query = session.query(RawDocument)
+    if "/" in identifier:
+        source_id, doc_id = identifier.split("/", 1)
+        query = query.filter(RawDocument.source_id == source_id, RawDocument.doc_id == doc_id)
+    else:
+        query = query.filter(RawDocument.doc_id == identifier)
+    matches = query.limit(11).all()
+    if not matches:
+        raise ValueError(f"no raw document matches {identifier!r}")
+    if len(matches) > 1:
+        listing = "\n".join(f"  {r.id}  {r.source_id}/{r.doc_id}" for r in matches[:10])
+        raise ValueError(
+            f"{identifier!r} matches several raw documents; pass one raw document UUID:\n{listing}"
+        )
+    return matches[0]
+
+
+def cmd_visibility_set(args):
+    """Record an explicit hide/show decision for one raw document."""
+    import getpass
+    from ..tools import record_visibility_decision
+
+    if args.visibility_command == "hide":
+        visible_search, visible_get = False, args.search_only
+    else:
+        visible_search, visible_get = True, True
+
+    try:
+        with get_db_session() as session:
+            raw = _resolve_raw_document(session, args.identifier)
+            result = record_visibility_decision(
+                raw.id,
+                visible_search=visible_search,
+                visible_get=visible_get,
+                reason=args.reason,
+                group_name=args.group,
+                meta={"origin": "cli", "user": getpass.getuser()},
+                session=session,
+            )
+            label = f"{raw.source_id}/{raw.doc_id}"
+    except ValueError as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+
+    print(
+        f"{label} ({raw.id}): search={'visible' if visible_search else 'hidden'}, "
+        f"get={'visible' if visible_get else 'hidden'}, group={args.group}"
+    )
+    if not result["applied"]:
+        print("  note: a newer decision already holds this document; recorded in history only")
+
+
+def cmd_visibility_list(args):
+    """List the current visibility exceptions."""
+    from ..db_models import DocumentVisibilityCurrent, RawDocument
+
+    with get_db_session() as session:
+        query = (
+            session.query(DocumentVisibilityCurrent, RawDocument)
+            .join(RawDocument, DocumentVisibilityCurrent.raw_document_id == RawDocument.id)
+            .filter(DocumentVisibilityCurrent.group_name == args.group)
+        )
+        if args.hidden:
+            query = query.filter(
+                (DocumentVisibilityCurrent.visible_search.is_(False))
+                | (DocumentVisibilityCurrent.visible_get.is_(False))
+            )
+        if args.source_id:
+            query = query.filter(RawDocument.source_id == args.source_id)
+        query = query.order_by(RawDocument.source_id, RawDocument.doc_id)
+        if args.limit:
+            query = query.limit(args.limit)
+        rows = [
+            {
+                "raw_document_id": cur.raw_document_id,
+                "source_id": raw.source_id,
+                "doc_id": raw.doc_id,
+                "visible_search": cur.visible_search,
+                "visible_get": cur.visible_get,
+                "reason": cur.reason,
+                "updated_time": str(cur.updated_time)[:19] if cur.updated_time else None,
+            }
+            for cur, raw in query.all()
+        ]
+
+    if args.json:
+        print(json.dumps(rows, indent=2))
+        return
+    if not rows:
+        print("No visibility exceptions.")
+        return
+    print(f"{'Search':<7} {'Get':<7} {'Source/Doc ID':<60} Reason")
+    print("-" * 120)
+    for r in rows:
+        print(
+            f"{'yes' if r['visible_search'] else 'HIDDEN':<7} {'yes' if r['visible_get'] else 'HIDDEN':<7} "
+            f"{(r['source_id'] or '') + '/' + (r['doc_id'] or ''):<60} {(r['reason'] or '')[:60]}"
+        )
+
+
+def cmd_visibility_history(args):
+    """Show every recorded decision for one raw document, oldest first."""
+    from ..db_models import DocumentVisibilityDecision
+
+    try:
+        with get_db_session() as session:
+            raw = _resolve_raw_document(session, args.identifier)
+            decisions = (
+                session.query(DocumentVisibilityDecision)
+                .filter(DocumentVisibilityDecision.raw_document_id == raw.id)
+                .order_by(DocumentVisibilityDecision.seq)
+                .all()
+            )
+            label = f"{raw.source_id}/{raw.doc_id} ({raw.id})"
+            rows = [
+                {
+                    "seq": d.seq,
+                    "group_name": d.group_name,
+                    "visible_search": d.visible_search,
+                    "visible_get": d.visible_get,
+                    "reason": d.reason,
+                    "run_id": d.run_id,
+                    "model": d.model,
+                    "meta": d.meta,
+                    "created_time": str(d.created_time)[:19] if d.created_time else None,
+                }
+                for d in decisions
+            ]
+    except ValueError as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+
+    if args.json:
+        print(json.dumps(rows, indent=2))
+        return
+    print(label)
+    if not rows:
+        print("  no decisions recorded (visible)")
+        return
+    for r in rows:
+        origin = (r["meta"] or {}).get("origin") or ("sweep" if r["run_id"] else "")
+        print(
+            f"  #{r['seq']:<5} {r['created_time']}  group={r['group_name']}  "
+            f"search={'yes' if r['visible_search'] else 'HIDDEN'}  get={'yes' if r['visible_get'] else 'HIDDEN'}  "
+            f"{origin:<6} {r['reason'] or ''}"
+        )
+
+
+def cmd_visibility_sweep(args):
+    """Run a visibility rule; dry run unless --apply."""
+    from ..tools import visibility_sweep
+
+    rule_options = {}
+    if args.rule == "oversized-spreadsheet":
+        rule_options = {"max_chars": args.max_chars, "hide_get": args.hide_get}
+
+    try:
+        result = visibility_sweep(
+            args.rule,
+            apply=args.apply,
+            source_id=args.source_id,
+            limit=args.limit,
+            group_name=args.group,
+            rule_options=rule_options,
+        )
+    except ValueError as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+
+    if args.json:
+        print(json.dumps(result, indent=2, default=str))
+        return
+
+    with get_db_session() as session:
+        from ..db_models import RawDocument
+        ids = [d["raw_document_id"] for d in result["decisions"]]
+        labels = {
+            r.id: f"{r.source_id}/{r.doc_id}"
+            for r in session.query(RawDocument).filter(RawDocument.id.in_(ids)).all()
+        } if ids else {}
+
+    verb = "Recorded" if result["applied"] else "Would record (dry run, nothing written)"
+    print(f"Rule {result['rule']}: {result['matched']} matched, "
+          f"{result['already_decided']} already decided (skipped)")
+    print(f"{verb}: {len(result['decisions'])} decision(s)")
+    for d in result["decisions"]:
+        search = "visible" if d["visible_search"] else "HIDDEN"
+        get_ = "visible" if d["visible_get"] else "HIDDEN"
+        print(f"  search={search:<7} get={get_:<7} {labels.get(d['raw_document_id'], d['raw_document_id'])}"
+              f"  -- {d['reason']}")
+    if result["errors"]:
+        print(f"{len(result['errors'])} error(s):")
+        for e in result["errors"]:
+            print(f"  {e['raw_document_id']}: {e['error']}")
+    if result["run_id"]:
+        print(f"Run: {result['run_id']}")
+    elif not result["applied"] and result["decisions"]:
+        print("Re-run with --apply to write these decisions.")
+
+
+def _text_document_ids(session, identifiers):
+    """Text document IDs for --document arguments (each resolved to its raw file)."""
+    from ..db_models import Document
+
+    ids = []
+    for identifier in identifiers:
+        raw = _resolve_raw_document(session, identifier)
+        ids += [
+            r[0] for r in session.query(Document.id).filter(
+                Document.raw_document_id == raw.id, Document.doc_type == "text"
+            )
+        ]
+    return ids
+
+
+def cmd_visibility_scan(args):
+    """Run the LLM sensitivity scan; findings go to review, nothing is hidden."""
+    import signal
+    import time
+    from ..tools import sensitivity_scan
+    from ...privacy import sensitivity
+
+    # `timeout` and service stops send SIGTERM: finish like Ctrl-C, so the
+    # run row is closed as partial instead of left "running".
+    signal.signal(signal.SIGTERM, signal.default_int_handler)
+
+    document_ids = None
+    if args.document:
+        try:
+            with get_db_session() as session:
+                document_ids = _text_document_ids(session, args.document)
+        except ValueError as e:
+            print(f"Error: {e}")
+            sys.exit(1)
+
+    last_summary = [time.time()]
+
+    def progress(p):
+        row = p["last"]
+        done = p["scanned"] + p["errors"]
+        if row["status"] == "ok":
+            sev = row["max_severity"] or "-"
+            print(f"[{done}/{p['selected']}] {sev:<6} {row.get('label', row['document_id'])} "
+                  f"({row['windows']} win, {row['seconds']:.0f}s)", flush=True)
+        else:
+            print(f"[{done}/{p['selected']}] ERROR  {row.get('label', row['document_id'])}: {row['error']}", flush=True)
+        if time.time() - last_summary[0] >= 60 or done == p["selected"]:
+            last_summary[0] = time.time()
+            rate = p["prompt_tokens"] / p["seconds"] if p["seconds"] else 0
+            left = p["selected"] - done
+            eta = p["seconds"] / done * left / 60 if done else 0
+            print(f"  -- {done}/{p['selected']} docs in {p['seconds'] / 60:.1f} min, "
+                  f"{rate:,.0f} prompt tok/s, flagged high/medium/low "
+                  f"{p['by_severity']['high']}/{p['by_severity']['medium']}/{p['by_severity']['low']}, "
+                  f"errors {p['errors']}, ~{eta:.0f} min left", flush=True)
+
+    allowed = tuple(sensitivity.DEFAULT_ALLOWED_HOSTS) + tuple(args.allow_endpoint or ())
+    print(f"Sensitivity scan, prompt {sensitivity.PROMPT_VERSION} (findings for review; nothing is hidden)", flush=True)
+    try:
+        result = sensitivity_scan(
+            model=args.model,
+            source_id=args.source_id,
+            document_ids=document_ids,
+            sample=args.sample,
+            seed=args.seed,
+            limit=args.limit,
+            max_minutes=args.max_minutes,
+            concurrency=args.concurrency,
+            max_chars=args.max_chars,
+            window_chars=args.window_chars,
+            reasoning_effort=None if args.reasoning_effort == "none" else args.reasoning_effort,
+            rescan=args.rescan,
+            only_unscanned=args.only_unscanned,
+            allowed_hosts=allowed,
+            progress=progress,
+        )
+    except ValueError as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+    except KeyboardInterrupt:
+        print("\nInterrupted: documents in flight finish and are saved; the next run resumes.", flush=True)
+        sys.exit(130)
+
+    if args.json:
+        print(json.dumps(result, indent=2, default=str))
+    else:
+        _print_scan_result(result)
+    # Documents that failed to scan stay held; a nonzero exit lets the import
+    # job report it (PRIVACY FAILED) instead of "privacy scan done".
+    if result["errors"]:
+        sys.exit(2)
+
+
+def _print_scan_result(result):
+    print()
+    print(f"Run {result['run_id']}: {result['status']}"
+          + (f" ({result['stopped']})" if result["stopped"] else ""))
+    print(f"  Model {result['model']} at {result['endpoint']}")
+    print(f"  Selected {result['selected']}, scanned {result['scanned']}, errors {result['errors']}; "
+          f"skipped {result['already_scanned']} already scanned, {result['too_large']} over --max-chars")
+    print(f"  Documents by highest severity: high {result['by_severity']['high']}, "
+          f"medium {result['by_severity']['medium']}, low {result['by_severity']['low']}")
+    print(f"  Tokens: {result['prompt_tokens']:,} in, {result['completion_tokens']:,} out, "
+          f"{result['seconds'] / 60:.1f} min")
+    print("Review with: kb tools visibility findings")
+
+
+def cmd_visibility_findings(args):
+    """List documents the sensitivity scan flagged, with the quoted evidence."""
+    from sqlalchemy import func
+    from ..db_models import Document, DocumentSensitivityScan, DocumentVisibilityCurrent, RawDocument
+    from ...privacy import sensitivity
+    from ...privacy.redaction import covered_by_redaction, find_replacements, rules_for
+
+    version = args.prompt_version
+    min_rank = sensitivity.SEVERITY_RANK[args.min_severity]
+    wanted = [s for s in sensitivity.SEVERITIES if sensitivity.SEVERITY_RANK[s] >= min_rank]
+
+    with get_db_session() as session:
+        # Each document's latest scan (of that prompt version, if one is given).
+        latest = session.query(
+            DocumentSensitivityScan.document_id,
+            func.max(DocumentSensitivityScan.created_time).label("t"),
+        )
+        if version:
+            latest = latest.filter(DocumentSensitivityScan.prompt_version == version)
+        if args.run:
+            latest = latest.filter(DocumentSensitivityScan.run_id == args.run)
+        latest = latest.group_by(DocumentSensitivityScan.document_id).subquery()
+        base = session.query(DocumentSensitivityScan).join(
+            latest,
+            (DocumentSensitivityScan.document_id == latest.c.document_id)
+            & (DocumentSensitivityScan.created_time == latest.c.t),
+        )
+        outcome = func.coalesce(DocumentSensitivityScan.max_severity, DocumentSensitivityScan.status)
+        counts = dict(base.with_entities(outcome, func.count()).group_by(outcome).all())
+        query = (
+            base.filter(DocumentSensitivityScan.status == "ok",
+                        DocumentSensitivityScan.max_severity.in_(wanted))
+            .join(Document, Document.id == DocumentSensitivityScan.document_id)
+            .outerjoin(RawDocument, RawDocument.id == DocumentSensitivityScan.raw_document_id)
+            .outerjoin(DocumentVisibilityCurrent,
+                       (DocumentVisibilityCurrent.raw_document_id == DocumentSensitivityScan.raw_document_id)
+                       & (DocumentVisibilityCurrent.group_name == "*"))
+            .with_entities(DocumentSensitivityScan, Document.source_id, Document.doc_id,
+                           Document.title, Document.title_gen, DocumentVisibilityCurrent)
+        )
+        rows = []
+        covered = 0
+        for scan, source_id, doc_id, title, title_gen, current in query.all():
+            findings = [f for f in scan.findings or []
+                        if sensitivity.SEVERITY_RANK.get(f.get("severity"), 1) >= min_rank
+                        and (not args.category or f.get("category") == args.category)]
+            if not args.include_covered:
+                text = session.query(Document.text).filter(Document.id == scan.document_id).scalar() or ""
+                replacements = find_replacements(text, rules_for(scan.raw_document_id))
+                kept = [f for f in findings if not covered_by_redaction(f, text, replacements)]
+                covered += len(findings) - len(kept)
+                findings = kept
+            if not findings:
+                continue
+            rows.append({
+                "document_id": scan.document_id,
+                "raw_document_id": scan.raw_document_id,
+                "label": f"{source_id}/{doc_id}",
+                "title": title or title_gen or "",
+                "max_severity": scan.max_severity,
+                "visibility": None if current is None else
+                    {"search": current.visible_search, "get": current.visible_get},
+                "findings": findings,
+                "run_id": scan.run_id,
+                "created_time": str(scan.created_time)[:19],
+            })
+    rows.sort(key=lambda r: (-sensitivity.SEVERITY_RANK[r["max_severity"]], r["label"]))
+    if args.limit:
+        rows = rows[:args.limit]
+
+    if args.json:
+        print(json.dumps({"prompt_version": version or "latest", "counts": counts, "documents": rows}, indent=2))
+        return
+
+    print(f"Latest sensitivity scan per document" + (f", prompt {version}" if version else "")
+          + (f", run {args.run}" if args.run else "") + ": "
+          + ", ".join(f"{k} {counts.get(k, 0)}" for k in ("high", "medium", "low", "ok", "error")
+                      if counts.get(k)) + ("" if counts else "none yet"))
+    print("(ok = scanned, nothing found; error = scan failed, retried on the next run)")
+    if covered:
+        print(f"{covered} finding(s) not shown: a redaction already covers them (--include-covered shows them)")
+    print()
+    for r in rows:
+        vis = ""
+        if r["visibility"]:
+            vis = (f"  [already decided: search={'yes' if r['visibility']['search'] else 'HIDDEN'}, "
+                   f"get={'yes' if r['visibility']['get'] else 'HIDDEN'}]")
+        print(f"{r['max_severity'].upper():<6} {r['label']}  {r['title'][:80]}{vis}")
+        print(f"       raw document {r['raw_document_id']}")
+        for f in r["findings"]:
+            mark = "" if f.get("evidence_found") else "  (quote NOT found in text)"
+            origin = "  [pattern]" if f.get("source") == "marker" else ""
+            print(f"   - {f['severity']:<6} {f['category']}: {f.get('subject', '')}{origin}{mark}")
+            print(f"       \"{f.get('evidence', '')[:300]}\"")
+            if f.get("span") and f["span"] != f.get("evidence"):
+                print(f"       remove: \"{f['span'][:200]}\"")
+            if f.get("reason"):
+                print(f"       {f['reason']}")
+        print()
+    if rows:
+        print("Decide with: kb tools visibility hide <raw document> --reason ... [--search-only]"
+              " or show <raw document> --reason ...")
+
+
+def cmd_visibility_redact(args):
+    """Add spans to redact from MCP output: given with --span, or approved from scan findings."""
+    import getpass
+    from ..tools import add_redaction, redaction_candidates_from_findings
+    from ...privacy import sensitivity
+
+    if not args.span and not args.from_findings:
+        print("Error: give --span TEXT (repeatable) and/or --from-findings")
+        sys.exit(1)
+    if not args.dry_run:
+        from ..database import init_db
+        init_db(create_tables=True)  # creates document_redactions on first use
+    user = getpass.getuser()
+    try:
+        with get_db_session() as session:
+            raw = None if args.all_documents else _resolve_raw_document(session, args.identifier)
+            raw_id = raw.id if raw else None
+            label = f"{raw.source_id}/{raw.doc_id}" if raw else "every document"
+            todo = [
+                {"span": s, "label": args.label, "scan_id": None, "origin": "cli", "reason": args.reason}
+                for s in (args.span or [])
+            ]
+            if args.from_findings:
+                if raw is None:
+                    print("Error: --from-findings needs a document, not --all-documents")
+                    sys.exit(1)
+                for c in redaction_candidates_from_findings(
+                    session, raw_id, prompt_version=sensitivity.PROMPT_VERSION,
+                    min_severity=args.min_severity, categories=args.category,
+                ):
+                    todo.append({
+                        "span": c["span"], "label": c["label"], "scan_id": c["scan_id"], "origin": "finding",
+                        "reason": args.reason or f"{c['severity']} {c['category']}: {c['reason']}",
+                    })
+    except ValueError as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+
+    if not todo:
+        print(f"{label}: nothing to redact (findings are restriction notices, already covered by "
+              f"a pattern, or not found verbatim in the text)")
+        return
+    print(f"{label}:")
+    for t in todo:
+        if args.dry_run:
+            print(f"  would redact  [{t['label']}]  {t['span']!r}")
+            continue
+        try:
+            r = add_redaction(
+                t["span"], raw_document_id=raw_id, label=t["label"], reason=t["reason"],
+                origin=t["origin"], scan_id=t["scan_id"], created_by=user,
+            )
+        except ValueError as e:
+            print(f"  skipped       {t['span']!r}: {e}")
+            continue
+        state = "redacted     " if r["added"] else "already rule "
+        print(f"  {state} [{t['label']}]  {t['span']!r}  (rule {r['id']})")
+    if args.dry_run:
+        print("Dry run: nothing written.")
+    else:
+        print("Running servers pick the rules up within a minute.")
+
+
+def cmd_visibility_unredact(args):
+    """Deactivate a redaction rule (kept in history)."""
+    from sqlalchemy import func
+    from ..db_models import DocumentRedaction
+    from ...privacy.redaction import clear_cache
+
+    with get_db_session() as session:
+        rule = session.get(DocumentRedaction, args.rule_id)
+        if rule is None:
+            print(f"Error: no redaction rule {args.rule_id}")
+            sys.exit(1)
+        if not rule.active:
+            print(f"Rule {rule.id} is already inactive")
+            return
+        rule.active = False
+        rule.deactivated_time = func.now()
+        span = rule.span
+    clear_cache()
+    print(f"Deactivated rule {args.rule_id} ({span!r}); servers stop applying it within a minute.")
+
+
+def cmd_visibility_redactions(args):
+    """List redaction rules."""
+    from ..db_models import DocumentRedaction, RawDocument
+
+    with get_db_session() as session:
+        query = (
+            session.query(DocumentRedaction, RawDocument.source_id, RawDocument.doc_id)
+            .outerjoin(RawDocument, RawDocument.id == DocumentRedaction.raw_document_id)
+        )
+        if not args.include_inactive:
+            query = query.filter(DocumentRedaction.active.is_(True))
+        if args.identifier:
+            try:
+                raw = _resolve_raw_document(session, args.identifier)
+            except ValueError as e:
+                print(f"Error: {e}")
+                sys.exit(1)
+            query = query.filter(DocumentRedaction.raw_document_id == raw.id)
+        rows = [
+            {
+                "id": r.id, "document": f"{src}/{doc}" if src else "* (every document)",
+                "raw_document_id": r.raw_document_id, "span": r.span, "label": r.label,
+                "active": r.active, "origin": r.origin, "reason": r.reason,
+                "created_by": r.created_by, "created_time": str(r.created_time)[:19],
+            }
+            for r, src, doc in query.order_by(DocumentRedaction.created_time).all()
+        ]
+    if args.json:
+        print(json.dumps(rows, indent=2))
+        return
+    from ...privacy.redaction import GLOBAL_PATTERNS
+    print("Global patterns (always on): " + ", ".join(f"{p.name} [{p.label}]" for p in GLOBAL_PATTERNS))
+    print(f"{len(rows)} span rule(s):")
+    for r in rows:
+        state = "" if r["active"] else "  (inactive)"
+        print(f"  {r['id']}  {r['document'][:55]:<55} [{r['label']}] {r['span']!r}{state}")
+
+
+def cmd_visibility_preview(args):
+    """Show what the MCP tools redact or withhold for one document."""
+    import re as _re
+    from ..db_models import Document
+    from ...privacy.redaction import clear_cache, find_replacements, rules_for
+
+    clear_cache()
+    try:
+        with get_db_session() as session:
+            raw = _resolve_raw_document(session, args.identifier)
+            docs = session.query(Document.doc_type, Document.doc_id, Document.text).filter(
+                Document.raw_document_id == raw.id).all()
+    except ValueError as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+    rules = rules_for(raw.id)
+    print(f"{raw.source_id}/{raw.doc_id}: {len([r for r in rules if r.raw_document_id])} document rule(s), "
+          f"{len([r for r in rules if not r.raw_document_id])} global span rule(s), plus the global patterns")
+    withheld = 0
+    for doc_type, doc_id, text in docs:
+        reps = find_replacements(text or "", rules)
+        if doc_type == "image":
+            withheld += bool(reps)
+            continue
+        if not reps:
+            continue
+        print(f"\n{doc_type} {doc_id}: {len(reps)} redaction(s)")
+        for start, end, placeholder in reps[:args.limit]:
+            before = _re.sub(r"\s+", " ", text[max(0, start - 60):start])
+            after = _re.sub(r"\s+", " ", text[end:end + 40])
+            print(f"  ...{before}{placeholder}{after}...")
+            print(f"       was: {text[start:end]!r}")
+        if len(reps) > args.limit:
+            print(f"  ... and {len(reps) - args.limit} more")
+    print(f"\nImages withheld from kb_get_image: {withheld} of {sum(1 for d in docs if d[0] == 'image')}")
+
+
+def cmd_visibility_apply_policy(args):
+    """Turn the latest privacy scans into provisional hides and redactions; dry run unless --apply."""
+    from ..tools import apply_privacy_policy
+
+    raw_ids = None
+    if args.document:
+        try:
+            with get_db_session() as session:
+                raw_ids = [_resolve_raw_document(session, d).id for d in args.document]
+        except ValueError as e:
+            print(f"Error: {e}")
+            sys.exit(1)
+    result = apply_privacy_policy(apply=args.apply, raw_document_ids=raw_ids)
+    if args.json:
+        print(json.dumps(result, indent=2, default=str))
+    else:
+        _print_policy_result(result, verbose=args.verbose)
+    # A write that failed leaves its document as it was; exit nonzero so the
+    # import job reports PRIVACY FAILED instead of "privacy policy applied".
+    if result["applied"] and result.get("errors"):
+        sys.exit(2)
+
+
+def _print_policy_result(result, verbose=False):
+    verb = "Applied" if result["applied"] else "Would apply (dry run, nothing written)"
+    print(f"{verb}: {result['documents']} document(s) considered")
+    print(f"  hide {result['hidden']}, lift {result['lifted']}, redact {result['redactions']} span(s), "
+          f"flag {result['flagged']} for review; {result['held']} still held (not fully scanned), "
+          f"{result['skipped_human']} left to their manual decision")
+    if result.get("errors"):
+        print(f"  {len(result['errors'])} error(s): " + "; ".join(e["error"] for e in result["errors"][:3]))
+    if not verbose:
+        changes = [c for c in result["changes"] if c["visibility"]]
+        if changes:
+            print("Visibility changes:")
+        for c in changes:
+            v = c["visibility"]
+            state = ("visible (lift)" if v["search"] and v["get"]
+                     else "hide search+get" if not v["get"] else "hide search")
+            print(f"  {state:<15} {c['label'][:60]:<60} {(c['reasons'] or [''])[0][:70]}")
+    else:
+        for c in result["changes"]:
+            print(f"\n{c['label']}")
+            if c["visibility"]:
+                print(f"  visibility -> search={'yes' if c['visibility']['search'] else 'HIDDEN'} "
+                      f"get={'yes' if c['visibility']['get'] else 'HIDDEN'}")
+            for reason in c["reasons"]:
+                print(f"  because: {reason}")
+            for r in c["redact"]:
+                print(f"  redact [{r['label']}] {r['span']!r}")
+            for f in c["flag"]:
+                print(f"  review: {f}")
+    if result["run_id"]:
+        print(f"Run: {result['run_id']}")
+    elif result["changes"]:
+        print("Re-run with --apply to write these (--verbose lists redactions and flags).")
+
+
+def cmd_visibility_review(args):
+    """The privacy review queue: held, provisional and flagged documents."""
+    from ..tools import privacy_review_queue
+
+    queue = privacy_review_queue()
+    if args.json:
+        print(json.dumps(queue, indent=2, default=str))
+        return
+    sections = [
+        ("held", "On hold (waiting for the import job's privacy scan)"),
+        ("provisional", "Hidden by the privacy policy, not yet confirmed"),
+        ("flagged", "Visible, with findings no redaction covers yet"),
+    ]
+    for key, heading in sections:
+        if args.section and args.section != key:
+            continue
+        docs = queue[key]
+        print(f"\n== {heading}: {len(docs)}")
+        for d in docs[:args.limit]:
+            s = d["state"] or {}
+            state = ("visible" if not s or (s["search"] and s["get"])
+                     else "hidden search+get" if not s["get"] else "hidden search")
+            since = f" since {s['since']}" if s.get("since") else ""
+            print(f"  {d['label'][:70]}  [{state}{since}]  {d['title'][:50]}")
+            if s.get("reason") and key != "flagged":
+                print(f"     why: {s['reason'][:110]}")
+            for f in d["findings"][:args.findings]:
+                mark = "redacted" if f["covered"] else f"{f['severity']}"
+                print(f"     - [{mark}] {f['category']}: {(f.get('span') or f.get('evidence') or '')[:90]!r}")
+            if len(d["findings"]) > args.findings:
+                print(f"     ... {len(d['findings']) - args.findings} more")
+        if len(docs) > args.limit:
+            print(f"  ... {len(docs) - args.limit} more (--limit)")
+    print("\nDecide with: confirm / show / hide [--search-only] / redact <doc> --span ...  (or the web page /web/privacy)")
+
+
+def cmd_visibility_confirm(args):
+    """Confirm a provisional (policy) decision as reviewed, keeping its visibility."""
+    import getpass
+    from ..tools import privacy_review_action
+
+    try:
+        with get_db_session() as session:
+            raw = _resolve_raw_document(session, args.identifier)
+            raw_id, label = raw.id, f"{raw.source_id}/{raw.doc_id}"
+        message = privacy_review_action(raw_id, "confirm", user=getpass.getuser(), reason=args.reason)
+    except ValueError as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+    print(f"{label}: {message}")
+
+
 def cmd_export(args):
     """Export documents from a source into a folder hierarchy."""
     try:
@@ -1861,6 +2582,232 @@ def setup_commands(subparsers):
         help="Output as JSON"
     )
     filter_stats_parser.set_defaults(func=cmd_filter_stats)
+
+    visibility_parser = tools_subparsers.add_parser(
+        "visibility",
+        help="Hide documents from, or explicitly keep them in, the agent-facing MCP tools",
+        description=(
+            "Explicit per-raw-document visibility decisions. No decision means visible. "
+            "Only kb_search / kb_get (the MCP tools) apply them; the CLI and web UI "
+            "always see everything."
+        ),
+    )
+    visibility_subparsers = visibility_parser.add_subparsers(
+        dest="visibility_command", help="Visibility commands"
+    )
+    for name, help_text in (
+        ("hide", "Hide a document from kb_search and kb_get"),
+        ("show", "Mark a document reviewed and visible (un-hides it, and keeps sweeps from re-flagging it)"),
+    ):
+        p = visibility_subparsers.add_parser(name, help=help_text)
+        p.add_argument(
+            "identifier",
+            help="Raw document UUID, document UUID, source_id/doc_id, or doc_id",
+        )
+        p.add_argument("--reason", required=True, help="Why (stored with the decision)")
+        p.add_argument("--group", default="*", help="Group the decision applies to (default: * = everyone)")
+        if name == "hide":
+            p.add_argument(
+                "--search-only", action="store_true",
+                help="Hide from kb_search only; kb_get can still fetch it",
+            )
+        p.set_defaults(func=cmd_visibility_set)
+
+    vis_list_parser = visibility_subparsers.add_parser("list", help="List current visibility exceptions")
+    vis_list_parser.add_argument("--hidden", action="store_true", help="Only documents hidden from search or get")
+    vis_list_parser.add_argument("--source-id", help="Filter to a single source")
+    vis_list_parser.add_argument("--group", default="*", help="Group (default: *)")
+    vis_list_parser.add_argument("--limit", type=int, help="Maximum number of results")
+    vis_list_parser.add_argument("--json", action="store_true", help="Output as JSON")
+    vis_list_parser.set_defaults(func=cmd_visibility_list)
+
+    vis_history_parser = visibility_subparsers.add_parser(
+        "history", help="Show every decision recorded for one document"
+    )
+    vis_history_parser.add_argument(
+        "identifier", help="Raw document UUID, document UUID, source_id/doc_id, or doc_id",
+    )
+    vis_history_parser.add_argument("--json", action="store_true", help="Output as JSON")
+    vis_history_parser.set_defaults(func=cmd_visibility_history)
+
+    vis_sweep_parser = visibility_subparsers.add_parser(
+        "sweep",
+        help="Apply a rule across the corpus (dry run unless --apply)",
+        description=(
+            "Select documents with a rule and record a visibility decision for each one "
+            "that has no decision yet. Prints what it would do unless --apply is given."
+        ),
+    )
+    vis_sweep_parser.add_argument(
+        "--rule", required=True, choices=["oversized-spreadsheet"],
+        help="oversized-spreadsheet: spreadsheets over --max-chars, hidden from search",
+    )
+    vis_sweep_parser.add_argument("--apply", action="store_true", help="Write the decisions (default: dry run)")
+    vis_sweep_parser.add_argument("--source-id", help="Restrict to a single source")
+    vis_sweep_parser.add_argument("--limit", type=int, help="Record at most N decisions")
+    vis_sweep_parser.add_argument("--group", default="*", help="Group (default: *)")
+    vis_sweep_parser.add_argument(
+        "--max-chars", type=int, default=500_000,
+        help="oversized-spreadsheet threshold in characters (default: 500000, as the DocDB job's --max-embed-chars)",
+    )
+    vis_sweep_parser.add_argument(
+        "--hide-get", action="store_true",
+        help="oversized-spreadsheet: also hide from kb_get (default: search only)",
+    )
+    vis_sweep_parser.add_argument("--json", action="store_true", help="Output as JSON")
+    vis_sweep_parser.set_defaults(func=cmd_visibility_sweep)
+
+    vis_scan_parser = visibility_subparsers.add_parser(
+        "scan",
+        help="LLM scan for content agents should not surface; writes findings for review, hides nothing",
+        description=(
+            "Read every text document (image descriptions and tables are inline in it) in "
+            "overlapping windows with an LLM, and record passages that an agent should not "
+            "pass to an external LLM: personnel matters, assessments of people, personal "
+            "data, credentials, security details, explicitly restricted material. "
+            "Resumable: documents already scanned with the current prompt are skipped. "
+            "Document text only goes to allowed endpoints (vllm.fnal.gov and ALCF by default)."
+        ),
+    )
+    vis_scan_parser.add_argument("--model", help="LLM (default: PRIVACY_FILTER_MODEL / DEFAULT_LLM_MODEL)")
+    vis_scan_parser.add_argument("--source-id", help="Restrict to a single source")
+    vis_scan_parser.add_argument(
+        "--document", action="append",
+        help="Scan only this document (raw/document UUID, source_id/doc_id or doc_id); repeatable",
+    )
+    vis_scan_parser.add_argument("--sample", type=int, help="Scan a random sample of N documents")
+    vis_scan_parser.add_argument("--seed", type=int, default=0, help="Seed for --sample (default: 0)")
+    vis_scan_parser.add_argument("--limit", type=int, help="Scan at most N documents")
+    vis_scan_parser.add_argument(
+        "--max-minutes", type=float,
+        help="Stop starting new documents after this many minutes (in-flight ones finish)",
+    )
+    vis_scan_parser.add_argument("--concurrency", type=int, default=8, help="Parallel documents (default: 8)")
+    vis_scan_parser.add_argument(
+        "--max-chars", type=int, default=500_000,
+        help="Skip documents with more text than this (default: 500000; the giant spreadsheets)",
+    )
+    vis_scan_parser.add_argument(
+        "--window-chars", type=int, default=24000,
+        help="Characters per LLM call (default: 24000, about 6k tokens)",
+    )
+    vis_scan_parser.add_argument(
+        "--reasoning-effort", choices=["low", "medium", "high", "none"], default="low",
+        help="Reasoning effort for reasoning models (default: low; none = do not send)",
+    )
+    vis_scan_parser.add_argument("--rescan", action="store_true", help="Scan again documents already scanned")
+    vis_scan_parser.add_argument(
+        "--only-unscanned", action="store_true",
+        help="Only documents never scanned under any prompt version (the import job's mode)",
+    )
+    vis_scan_parser.add_argument(
+        "--allow-endpoint", action="append", metavar="HOST",
+        help="Also allow sending document text to HOST (only for local/approved endpoints); repeatable",
+    )
+    vis_scan_parser.add_argument("--json", action="store_true", help="Output the summary as JSON")
+    vis_scan_parser.set_defaults(func=cmd_visibility_scan)
+
+    vis_findings_parser = visibility_subparsers.add_parser(
+        "findings", help="List documents the sensitivity scan flagged, with quoted evidence",
+    )
+    vis_findings_parser.add_argument(
+        "--min-severity", choices=["low", "medium", "high"], default="low",
+        help="Lowest severity to show (default: low)",
+    )
+    vis_findings_parser.add_argument("--category", help="Only findings of this category")
+    vis_findings_parser.add_argument("--run", help="Only scans from this run ID")
+    vis_findings_parser.add_argument("--prompt-version", help="Only scans of this prompt version (default: each document's latest)")
+    vis_findings_parser.add_argument("--limit", type=int, help="Maximum number of documents")
+    vis_findings_parser.add_argument(
+        "--include-covered", action="store_true",
+        help="Also show findings a redaction already covers (global pattern or span rule)",
+    )
+    vis_findings_parser.add_argument("--json", action="store_true", help="Output as JSON")
+    vis_findings_parser.set_defaults(func=cmd_visibility_findings)
+
+    vis_policy_parser = visibility_subparsers.add_parser(
+        "apply-policy",
+        help="Turn the latest privacy scans into provisional hides and redactions (dry run unless --apply)",
+        description=(
+            "Applies the privacy policy (docs/guides/privacy.md) to each document's latest scan: "
+            "restriction notices and real passwords hide the document, private details and "
+            "credentials are redacted, the rest is flagged for review. Lifts the hold on new "
+            "documents that scanned clean. Never changes a decision made with hide/show."
+        ),
+    )
+    vis_policy_parser.add_argument("--apply", action="store_true", help="Write the decisions (default: dry run)")
+    vis_policy_parser.add_argument("--document", action="append", help="Only this document; repeatable")
+    vis_policy_parser.add_argument("--verbose", action="store_true", help="List every redaction and flag too")
+    vis_policy_parser.add_argument("--json", action="store_true", help="Output as JSON")
+    vis_policy_parser.set_defaults(func=cmd_visibility_apply_policy)
+
+    vis_review_parser = visibility_subparsers.add_parser(
+        "review", help="The privacy review queue: held, provisional and flagged documents",
+    )
+    vis_review_parser.add_argument("--section", choices=["held", "provisional", "flagged"], help="Only one section")
+    vis_review_parser.add_argument("--limit", type=int, default=50, help="Documents per section (default: 50)")
+    vis_review_parser.add_argument("--findings", type=int, default=3, help="Findings shown per document (default: 3)")
+    vis_review_parser.add_argument("--json", action="store_true", help="Output as JSON")
+    vis_review_parser.set_defaults(func=cmd_visibility_review)
+
+    vis_confirm_parser = visibility_subparsers.add_parser(
+        "confirm", help="Confirm a provisional privacy-policy decision as reviewed (keeps its visibility)",
+    )
+    vis_confirm_parser.add_argument("identifier", help="Raw document UUID, document UUID, source_id/doc_id, or doc_id")
+    vis_confirm_parser.add_argument("--reason", help="Why (default: reviewed by <user>)")
+    vis_confirm_parser.set_defaults(func=cmd_visibility_confirm)
+
+    vis_redact_parser = visibility_subparsers.add_parser(
+        "redact",
+        help="Redact exact text from what the MCP tools return (stored data is unchanged)",
+        description=(
+            "Add spans to replace with '[redacted: <label>]' in kb_search/kb_get output. "
+            "Meeting passcodes, pwd= links, purchase cards and keys are covered by built-in "
+            "patterns already. --from-findings takes the spans of the document's latest "
+            "sensitivity-scan findings (except restriction notices: hide those documents)."
+        ),
+    )
+    vis_redact_parser.add_argument(
+        "identifier", nargs="?",
+        help="Raw document UUID, document UUID, source_id/doc_id, or doc_id",
+    )
+    vis_redact_parser.add_argument("--span", action="append", help="Exact text to redact; repeatable")
+    vis_redact_parser.add_argument("--from-findings", action="store_true", help="Redact the spans of the scan findings")
+    vis_redact_parser.add_argument(
+        "--min-severity", choices=["low", "medium", "high"], default="medium",
+        help="--from-findings: lowest severity to take (default: medium)",
+    )
+    vis_redact_parser.add_argument(
+        "--category", action="append",
+        help="--from-findings: only these categories (repeatable, e.g. personal_data)",
+    )
+    vis_redact_parser.add_argument("--label", default="private detail", help="Placeholder label for --span")
+    vis_redact_parser.add_argument("--reason", help="Why (stored with the rule)")
+    vis_redact_parser.add_argument(
+        "--all-documents", action="store_true",
+        help="Redact --span in every document instead of one (minimum 6 characters)",
+    )
+    vis_redact_parser.add_argument("--dry-run", action="store_true", help="Show what would be added")
+    vis_redact_parser.set_defaults(func=cmd_visibility_redact)
+
+    vis_unredact_parser = visibility_subparsers.add_parser(
+        "unredact", help="Deactivate a redaction rule (it stays in the history)",
+    )
+    vis_unredact_parser.add_argument("rule_id", help="Rule ID, from `redactions`")
+    vis_unredact_parser.set_defaults(func=cmd_visibility_unredact)
+
+    vis_redactions_parser = visibility_subparsers.add_parser("redactions", help="List redaction rules")
+    vis_redactions_parser.add_argument("identifier", nargs="?", help="Only rules for this document")
+    vis_redactions_parser.add_argument("--include-inactive", action="store_true", help="Also deactivated rules")
+    vis_redactions_parser.add_argument("--json", action="store_true", help="Output as JSON")
+    vis_redactions_parser.set_defaults(func=cmd_visibility_redactions)
+
+    vis_preview_parser = visibility_subparsers.add_parser(
+        "preview", help="Show what the MCP tools redact or withhold for one document",
+    )
+    vis_preview_parser.add_argument("identifier", help="Raw document UUID, document UUID, source_id/doc_id, or doc_id")
+    vis_preview_parser.add_argument("--limit", type=int, default=20, help="Redactions to show per text (default: 20)")
+    vis_preview_parser.set_defaults(func=cmd_visibility_preview)
 
     export_parser = tools_subparsers.add_parser(
         "export",

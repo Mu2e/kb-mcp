@@ -205,6 +205,35 @@ stdbuf -oL -eL kb-import docdb --days "$DAYS" --skip-existing --delay 1 --max-em
 rc=$?
 end=$(date +%s)
 
+# 3a. Privacy (docs/guides/privacy.md), when PRIVACY_HOLD_NEW_DOCUMENTS is on:
+# every document this run created is on hold (hidden from the MCP tools)
+# from the moment it was inserted. Scan the documents no prompt version has
+# scanned yet -- this run's, plus any an earlier run failed on -- with the
+# on-prem LLM, then let the policy hide or redact what it found and lift the
+# hold on the rest. After step 3 on purpose: the scan reads the summaries
+# auto-summarize just wrote. If the LLM is down the documents simply stay
+# held and the next run retries them; the import itself is unaffected.
+if python3 -c 'import sys; from kb_mcp.config import get_privacy_config; sys.exit(0 if get_privacy_config()["hold_new_documents"] else 1)' 2>>"$LOG"; then
+    {
+        echo "--- privacy scan ---"
+        p_start=$(date +%s)
+        if stdbuf -oL -eL kb tools visibility scan --only-unscanned \
+                --concurrency "${PRIVACY_SCAN_CONCURRENCY:-4}" --max-minutes "${PRIVACY_SCAN_MAX_MINUTES:-60}"; then
+            echo "privacy scan done in $(( $(date +%s) - p_start ))s"
+        else
+            echo "PRIVACY FAILED: the scan did not run or some documents failed to scan; they stay held until a later run scans them"
+        fi
+        echo "--- privacy policy ---"
+        if kb tools visibility apply-policy --apply; then
+            echo "privacy policy applied"
+        else
+            echo "PRIVACY FAILED: apply-policy did not complete or some writes failed; those documents stay held"
+        fi
+    } >> "$LOG" 2>&1
+else
+    echo "--- privacy: off (PRIVACY_HOLD_NEW_DOCUMENTS is not set) ---" >> "$LOG"
+fi
+
 # 3b. Database upkeep after the writes: refresh planner statistics and VACUUM
 # this app's tables. VACUUM also merges the full-text index's pending list
 # (new chunks land there unsorted, and every full-text search scans it until
@@ -244,6 +273,9 @@ elif grep -qaE "ERROR - Error during auto-(summarize|embed)" "$LOG"; then
     failure_reason="auto-summarize/auto-embed raised — see the traceback in the log"
 elif grep -qaE "^[[:space:]]*FAIL[[:space:]]+database" "$LOG"; then
     failure_reason="database connection check failed"
+elif grep -qaE "^PRIVACY FAILED" "$LOG"; then
+    # The import itself worked; its new documents are just still held.
+    failure_reason="$(grep -aE "^PRIVACY FAILED" "$LOG" | head -1)"
 fi
 
 if [ -n "$failure_reason" ] && [ "$rc" -eq 0 ]; then

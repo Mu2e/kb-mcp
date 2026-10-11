@@ -11,6 +11,7 @@ import pytest
 
 import kb_mcp.config as config_mod
 import kb_mcp.kb as kb_mod
+import kb_mcp.privacy.redaction as redaction_mod
 from kb_mcp.server import mcp as mcp_mod
 from kb_mcp.server.mcp import KB_GET_MAX_CHARS_LIMIT, kb_get
 
@@ -21,9 +22,10 @@ TEXT = "".join(chr(ord("a") + i % 26) for i in range(250))
 def fake_doc(monkeypatch):
     doc = SimpleNamespace(
         title="Big table", title_gen=None, doc_id="123", source_id="mu2e-docdb",
-        doc_type="table", uri=None, meta=None, parser_id="docling", text=TEXT,
+        doc_type="table", uri=None, meta=None, parser_id="docling", text=TEXT, raw_document_id=None,
     )
-    monkeypatch.setattr(kb_mod, "get", lambda identifier: doc)
+    monkeypatch.setattr(kb_mod, "get", lambda identifier, enforce_visibility=False: doc)
+    monkeypatch.setattr(redaction_mod, "rules_for", lambda raw_document_id: [])
     monkeypatch.setattr(
         config_mod, "get_server_config",
         lambda: {"kb_get_max_chars": 100, "hide_graph": False},
@@ -94,3 +96,17 @@ def test_empty_document_still_answers(fake_doc):
     out = kb_get("mu2e-docdb/123")
     assert "No content available" in out
     assert out.endswith("[[DOCUMENT_END]]")
+
+
+def test_redaction_applies_to_the_whole_text_before_paging(fake_doc, monkeypatch):
+    # A secret straddling the page boundary (characters 95-105) must not leak
+    # half on each page: kb_get redacts the whole text first, then pages it.
+    secret = "hunter2pass"
+    fake_doc.text = "x" * 94 + " " + secret + " " + "y" * 200
+    rule = redaction_mod.SpanRule(id="r1", raw_document_id=None, span=secret, label="password",
+                                  regex=redaction_mod.span_regex(secret))
+    monkeypatch.setattr(redaction_mod, "rules_for", lambda raw_document_id: [rule])
+    first = kb_get("mu2e-docdb/123")
+    second = kb_get("mu2e-docdb/123", offset=100)
+    for out in (first, second):
+        assert "hunter" not in out and "2pass" not in out

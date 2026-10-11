@@ -295,6 +295,11 @@ The incremental DocDB import runs from a release, twice a day, from cron. It
 runs as a user, not the service account: DocDB has no service login, so login
 is only possible as a user.
 
+With `PRIVACY_HOLD_NEW_DOCUMENTS=true` (set in `deploy/mu2e.env`) each run also
+scans its new documents with the on-prem LLM and applies the privacy policy;
+new documents stay hidden from the MCP tools until then. See
+[Privacy](privacy.md).
+
 Same layout as the servers: deploy root `/exp/mu2e/app/users/<you>/mcp/kb`,
 data (logs, model cache, ALCF login) in `/exp/mu2e/data/users/<you>/kb-mcp-data`.
 Files in `<deploy-root>/config/`, all mode 600:
@@ -542,6 +547,11 @@ GRANT USAGE ON SCHEMA <schema> TO <role>;
 GRANT SELECT ON ALL TABLES IN SCHEMA <schema> TO <role>;
 ALTER DEFAULT PRIVILEGES IN SCHEMA <schema> GRANT SELECT ON TABLES TO <role>;
 GRANT INSERT ON <schema>.logs_search TO <role>;
+-- Privacy review page (/web/privacy): decisions and redaction rules
+GRANT INSERT ON <schema>.document_visibility_decisions TO <role>;
+GRANT USAGE ON SEQUENCE <schema>.document_visibility_decisions_seq TO <role>;
+GRANT INSERT, UPDATE ON <schema>.document_visibility_current TO <role>;
+GRANT INSERT, UPDATE ON <schema>.document_redactions TO <role>;
 ```
 
 Why each one:
@@ -556,6 +566,12 @@ Why each one:
   *not* optional in practice: it is flushed in the caller's transaction, so a
   denial poisons the session and the search returns
   `DetachedInstanceError` after having found its results.
+- **Privacy review** — the buttons on `/web/privacy` record visibility
+  decisions and redaction rules as this role. Without these grants the page
+  still shows the queue, but every decision fails with `permission denied`.
+  The import job writes its own decisions as the schema owner and needs
+  nothing here. Run them after the tables exist (the first import job run of
+  the release, or `kb tools visibility apply-policy --apply`, creates them).
 
 `mu2eai` should **not** have `CREATE`. Verify:
 

@@ -24,6 +24,7 @@ def _search_pgvector(
     embedding_time: float = 0.0,
     start_time: Optional[float] = None,
     max_chunks_per_doc: Optional[int] = None,
+    enforce_visibility: bool = False,
     **kwargs,
 ) -> Dict[str, Any]:
     """
@@ -91,6 +92,22 @@ def _search_pgvector(
     if timeout_ms > 0:
         session.execute(text(f"SET LOCAL statement_timeout = {timeout_ms}"))
 
+    # enforce_visibility (opt-in, see kb_search/the search() family) adds the
+    # same LEFT JOIN + condition to all three statements below: the count
+    # (so a filter whose only matches are hidden takes the no_match path),
+    # the exact path's `filtered` CTE, and the index path's per-row scalar
+    # subquery -- inside it, not as an outer join, to keep the index-friendly
+    # shape described there. No document_visibility_current row, or
+    # visible_search left NULL, means visible (COALESCE ... TRUE).
+    visibility_join = ""
+    visibility_condition = ""
+    if enforce_visibility:
+        visibility_join = """
+                LEFT JOIN document_visibility_current dvc
+                    ON dvc.raw_document_id = d.raw_document_id
+                   AND dvc.group_name = '*'"""
+        visibility_condition = "\n                  AND COALESCE(dvc.visible_search, TRUE)"
+
     # How many embedded chunks can pass the filters? Counted up to one past
     # SEARCH_EXACT_MAX_CHUNKS, so a broad filter stops early; the join starts
     # from the filtered documents, so a narrow one is cheap to count too.
@@ -110,8 +127,8 @@ def _search_pgvector(
                     SELECT 1
                     FROM {embedding_table.name} e
                     JOIN chunks c ON c.id = e.chunk_id
-                    JOIN documents d ON c.document_id = d.id
-                    WHERE {where_clause_sql}
+                    JOIN documents d ON c.document_id = d.id{visibility_join}
+                    WHERE {where_clause_sql}{visibility_condition}
                     LIMIT :count_cap
                 ) passing
             """),
@@ -147,8 +164,8 @@ def _search_pgvector(
             SELECT e.chunk_id, e.embedding
             FROM {embedding_table.name} e
             JOIN chunks c ON c.id = e.chunk_id
-            JOIN documents d ON c.document_id = d.id
-            WHERE {where_clause_sql}
+            JOIN documents d ON c.document_id = d.id{visibility_join}
+            WHERE {where_clause_sql}{visibility_condition}
         ),
         knn AS MATERIALIZED (
             SELECT
@@ -168,8 +185,8 @@ def _search_pgvector(
             WHERE (
                 SELECT TRUE
                 FROM chunks c
-                JOIN documents d ON c.document_id = d.id
-                WHERE c.id = e.chunk_id AND {where_clause_sql}
+                JOIN documents d ON c.document_id = d.id{visibility_join}
+                WHERE c.id = e.chunk_id AND {where_clause_sql}{visibility_condition}
                 LIMIT 1
             )
             ORDER BY e.embedding <=> CAST(:query_embedding AS vector)

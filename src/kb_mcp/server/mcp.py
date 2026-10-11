@@ -145,6 +145,10 @@ def _format_search_results(results: List[Dict[str, Any]], context_chars: int = 5
     2. [[CONTENT_START]]: The actual text or excerpts.
     3. [[DOCUMENT_END]]: Clear termination.
     """
+    from ..privacy.redaction import (
+        apply_replacements, find_replacements, offset_mapper, redact, rules_for,
+    )
+
     formatted_results = []
 
     for result in results:
@@ -158,6 +162,7 @@ def _format_search_results(results: List[Dict[str, Any]], context_chars: int = 5
             # Unique ID for the model to use in subsequent calls
             doc_identifier = f"{doc.source_id}_{doc.doc_id}"
             doc_id = doc.id or doc_identifier
+            redaction_rules = rules_for(doc.raw_document_id)
         except DetachedInstanceError as exc:
             # These are ORM attribute reads, so they lazy-load -- and a
             # detached instance means the session died after the search
@@ -172,6 +177,18 @@ def _format_search_results(results: List[Dict[str, Any]], context_chars: int = 5
                 "this one; a missing INSERT grant on logs_search is the "
                 "common cause."
             ) from exc
+        # Redact before cutting excerpts: chunk offsets are remapped onto the
+        # redacted text, so an excerpt edge can never split a secret and leave
+        # half of it outside the placeholder.
+        replacements = find_replacements(doc_text, redaction_rules)
+        if replacements:
+            doc_text = apply_replacements(doc_text, replacements)
+            start_at, end_at = offset_mapper(replacements), offset_mapper(replacements, end=True)
+            chunks = [
+                {**c, "char_start": start_at(c["char_start"]), "char_end": end_at(c["char_end"])}
+                if c.get("char_start") is not None and c.get("char_end") is not None else c
+                for c in chunks
+            ]
         doc_text_len = len(doc_text)
 
         # Prepare Content Body & Determine Status
@@ -290,8 +307,9 @@ def _format_search_results(results: List[Dict[str, Any]], context_chars: int = 5
         formatted_results.append({
             "source_id": doc.source_id,
             "doc_id": doc.doc_id,
-            "title": doc.title,
-            "text": final_text,
+            "title": redact(doc.title, redaction_rules),
+            # Summaries, chunk texts, title and metadata in the block.
+            "text": redact(final_text, redaction_rules),
             "content_status": status
         })
 
@@ -425,6 +443,7 @@ def kb_search(
             query=query,
             max_results=DEFAULT_MAX_RESULTS if max_results is None else max_results,
             filter=filter_dict,
+            enforce_visibility=True,
         )
         # Only pass rerank / doc_type_boost / chunk_strategy_boost to hybrid
         # search (which supports them).
@@ -510,7 +529,7 @@ def kb_get(identifier: str, offset: int = 0, max_chars: int | None = None) -> st
             return "ERROR: max_chars must be greater than 0"
         max_chars = min(max_chars, KB_GET_MAX_CHARS_LIMIT)
 
-        result = get(identifier=identifier)
+        result = get(identifier=identifier, enforce_visibility=True)
 
         if result is None:
             return "ERROR: Document not found"
@@ -527,7 +546,11 @@ def kb_get(identifier: str, offset: int = 0, max_chars: int | None = None) -> st
         else:
             doc = result
 
-        text = doc.text or ""
+        # Redact the whole text before paging, so offsets are stable across
+        # calls and a match straddling a page boundary is still caught.
+        from ..privacy.redaction import redact, rules_for
+        rules = rules_for(doc.raw_document_id)
+        text = redact(doc.text or "", rules)
         total = len(text)
         if offset > 0 and offset >= total:
             return (
@@ -589,11 +612,11 @@ def kb_get(identifier: str, offset: int = 0, max_chars: int | None = None) -> st
             closing = "[[DOCUMENT_END]]"
 
         # Return the natural text with metadata header
-        return f"""[[DOCUMENT_METADATA]]
+        return redact(f"""[[DOCUMENT_METADATA]]
 {meta_header}
 {graph_section}[[CONTENT_START]]
 {text[offset:end] or "No content available"}
-{closing}"""
+{closing}""", rules)
 
     except Exception as e:
         logger.error(f"Error in kb_get: {e}", exc_info=True)
@@ -639,7 +662,7 @@ def kb_get_image(identifier: str, image_filename: Optional[str] = None) -> Image
             image_identifier = identifier
 
         # Try to get the image document directly using identifier
-        image_doc = get(image_identifier)
+        image_doc = get(image_identifier, enforce_visibility=True)
 
         if not image_doc:
             raise ValueError(f"Image not found: {image_filename}")
@@ -649,6 +672,15 @@ def kb_get_image(identifier: str, image_filename: Optional[str] = None) -> Image
 
         if image_doc.doc_type != "image" or not image_doc.binary:
             raise ValueError(f"Document found but is not an image: {image_filename}")
+
+        # A redaction rule matching the image's description means the picture
+        # shows something redacted elsewhere; pixels cannot be redacted.
+        from ..privacy.redaction import find_replacements, rules_for
+
+        if find_replacements(image_doc.text or "", rules_for(image_doc.raw_document_id)):
+            raise ValueError(
+                "Image withheld: it shows content that is redacted in this knowledge base"
+            )
 
         # Determine format from metadata or filename
         image_format = "png"  # default
@@ -914,20 +946,46 @@ async def kb_research(question: str, ctx: Context = None) -> str:
         return f"ERROR: {str(e)}"
 
 
+def _redacting(fn):
+    """Wrap a text tool so its whole output passes the global redaction patterns.
+
+    The per-document rules are applied where each document's text is
+    formatted (kb_search, kb_get); this catch-all covers everything else a
+    tool can echo -- graph evidence excerpts, node names, kb_research
+    answers -- with the patterns and global span rules.
+    """
+    import functools
+    import inspect
+    from ..privacy.redaction import redact_output
+
+    if inspect.iscoroutinefunction(fn):
+        @functools.wraps(fn)
+        async def async_wrapper(*args, **kwargs):
+            out = await fn(*args, **kwargs)
+            return redact_output(out) if isinstance(out, str) else out
+        return async_wrapper
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        out = fn(*args, **kwargs)
+        return redact_output(out) if isinstance(out, str) else out
+    return wrapper
+
+
 def register_tools(mcp):
     """Register MCP tools with the FastMCP instance."""
     from ..config import get_server_config
 
-    mcp.tool()(kb_search)
-    mcp.tool()(kb_get)
+    mcp.tool()(_redacting(kb_search))
+    mcp.tool()(_redacting(kb_get))
     mcp.tool()(kb_get_image)  # Keep for explicit image retrieval by filename
     # Graph Tools (skipped when HIDE_GRAPH is set)
     if not get_server_config()['hide_graph']:
-        mcp.tool()(kb_lookup_node)
-        mcp.tool()(kb_find_path)
-        mcp.tool()(kb_node_relation_evidence)
+        mcp.tool()(_redacting(kb_lookup_node))
+        mcp.tool()(_redacting(kb_find_path))
+        mcp.tool()(_redacting(kb_node_relation_evidence))
     # Agentic research (long-running; excluded from worker agents' own tool lists)
-    mcp.tool()(kb_research)
+    mcp.tool()(_redacting(kb_research))
 
 
 def register_resources(mcp, oauth_provider, base_url):
@@ -959,16 +1017,19 @@ def register_resources(mcp, oauth_provider, base_url):
         from ..kb import get
 
         try:
-            doc = get(uid=doc_id)
+            doc = get(uid=doc_id, enforce_visibility=True)
             if doc is None:
                 return json.dumps({"error": "Document not found"}, indent=2)
 
+            from ..privacy.redaction import redact, rules_for
+
+            rules = rules_for(doc.raw_document_id)
             return json.dumps({
                 "source_id": doc.source_id,
                 "doc_id": doc.doc_id,
-                "title": doc.title or doc.title_gen,
-                "summary": doc.summary,
-                "text": doc.text,
+                "title": redact(doc.title or doc.title_gen, rules),
+                "summary": redact(doc.summary, rules),
+                "text": redact(doc.text, rules),
             }, indent=2)
         except Exception as e:
             return json.dumps({"error": str(e)}, indent=2)

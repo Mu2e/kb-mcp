@@ -12,7 +12,13 @@ from sqlalchemy import inspect as sqlalchemy_inspect
 from tqdm import tqdm
 
 from .database import get_db_session
-from .db_models import Document, PrivacyFilter
+from .db_models import (
+    Document,
+    PrivacyFilter,
+    DocumentVisibilityDecision,
+    DocumentVisibilityCurrent,
+    DOCUMENT_VISIBILITY_DEFAULT_GROUP,
+)
 from .embedding.db_models import Chunk, get_embedding_table
 from .embedding.chunking import resolve_strategy_name
 from ..config import get_embedding_config
@@ -1631,6 +1637,1351 @@ def summarize_all(
     )
 
     return result
+
+
+def _build_visibility_current_upsert(
+    raw_document_id: str,
+    group_name: str,
+    visible_search: bool,
+    visible_get: bool,
+    reason: Optional[str],
+    decision_id: str,
+    decision_seq: int,
+):
+    """Build the ON CONFLICT upsert into document_visibility_current for one decision.
+
+    Pulled out of `record_visibility_decision` as a pure function (takes the
+    already-flushed decision's id/seq as plain values, builds no session) so
+    the statement shape — in particular the ordering guard in `where=` — can
+    be compiled and inspected without a database. See
+    `DocumentVisibilityCurrent`'s docstring for why the guard compares `seq`
+    rather than merging toward the more restrictive value.
+    """
+    from sqlalchemy import func
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+    upsert = pg_insert(DocumentVisibilityCurrent).values(
+        raw_document_id=raw_document_id,
+        group_name=group_name,
+        visible_search=visible_search,
+        visible_get=visible_get,
+        reason=reason,
+        decision_id=decision_id,
+        decision_seq=decision_seq,
+    )
+    return upsert.on_conflict_do_update(
+        index_elements=[
+            DocumentVisibilityCurrent.raw_document_id,
+            DocumentVisibilityCurrent.group_name,
+        ],
+        set_={
+            "visible_search": upsert.excluded.visible_search,
+            "visible_get": upsert.excluded.visible_get,
+            "reason": upsert.excluded.reason,
+            "decision_id": upsert.excluded.decision_id,
+            "decision_seq": upsert.excluded.decision_seq,
+            "updated_time": func.now(),
+        },
+        where=(
+            DocumentVisibilityCurrent.decision_seq.is_(None)
+            | (DocumentVisibilityCurrent.decision_seq < upsert.excluded.decision_seq)
+        ),
+    )
+
+
+def record_visibility_decision(
+    raw_document_id: str,
+    visible_search: bool = True,
+    visible_get: bool = True,
+    reason: Optional[str] = None,
+    group_name: str = DOCUMENT_VISIBILITY_DEFAULT_GROUP,
+    run_id: Optional[str] = None,
+    model: Optional[str] = None,
+    meta: Optional[Dict[str, Any]] = None,
+    session=None,
+) -> Dict[str, Any]:
+    """Record a document visibility decision and resolve it into the current-state table.
+
+    Inserts an immutable row into `document_visibility_decisions`, then upserts
+    `document_visibility_current` for (raw_document_id, group_name) — but only
+    if this decision is newer than whatever currently holds that key. "Newer"
+    is decided by the decision's DB-assigned `seq`, not wall-clock time, so a
+    decision that was issued earlier can't clobber one issued later just
+    because its transaction happened to commit second (see
+    `DocumentVisibilityDecision.seq`).
+
+    No row in either table means "visible" (see `DocumentVisibilityDecision`'s
+    docstring) — pass explicit True values to record that a document was
+    reviewed and confirmed visible (stops a sweep from re-flagging it), or
+    False to hide it.
+
+    Args:
+        raw_document_id: The documents_raw.id this decision covers.
+        visible_search: Whether matching documents may appear in search results.
+        visible_get: Whether matching documents may be fetched directly (e.g. `kb get`).
+        reason: Free-text reason for this decision.
+        group_name: Which group this applies to (default: everyone).
+        run_id: The document_visibility_runs.id that produced this decision, if any.
+        model: LLM model used, if this decision was LLM-assisted.
+        meta: Additional metadata to store on the decision row.
+        session: Optional existing session to write within.
+
+    Returns:
+        Dictionary with the new decision's `decision_id` / `seq`, and
+        `applied` (False means a decision with a higher `seq` already held
+        that key, so this one lost the race and left current state alone —
+        the decision row itself is still recorded either way).
+    """
+    with get_db_session(session) as session:
+        decision = DocumentVisibilityDecision(
+            raw_document_id=raw_document_id,
+            group_name=group_name,
+            visible_search=visible_search,
+            visible_get=visible_get,
+            reason=reason,
+            run_id=run_id,
+            model=model,
+            meta=meta or {},
+        )
+        session.add(decision)
+        session.flush()  # assigns decision.id / decision.seq via the DB sequence
+
+        upsert = _build_visibility_current_upsert(
+            raw_document_id=raw_document_id,
+            group_name=group_name,
+            visible_search=visible_search,
+            visible_get=visible_get,
+            reason=reason,
+            decision_id=decision.id,
+            decision_seq=decision.seq,
+        )
+        result = session.execute(upsert)
+
+        return {
+            "decision_id": decision.id,
+            "seq": decision.seq,
+            "applied": result.rowcount > 0,
+        }
+
+
+SPREADSHEET_SOURCE_TYPES = (
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "application/vnd.ms-excel",
+    "application/csv",
+    "text/csv",
+)
+
+
+def _rule_oversized_spreadsheet(
+    session,
+    *,
+    source_id: Optional[str] = None,
+    max_chars: int = 500_000,
+    hide_get: bool = False,
+) -> List[Dict[str, Any]]:
+    """Spreadsheet raw documents whose longest parsed text exceeds max_chars.
+
+    The default matches the DocDB cron job's --max-embed-chars: these are
+    the financial spreadsheets (up to ~13M chars) it never chunks, which
+    otherwise reach search through their summary chunk alone. Limited to
+    spreadsheet source types on purpose -- the long PDFs above the same
+    size are real reports. Hidden from search; kb_get can still fetch them
+    unless hide_get.
+    """
+    from sqlalchemy import func
+
+    longest = func.max(func.length(Document.text)).label("chars")
+    query = (
+        session.query(Document.raw_document_id, Document.source_id, Document.source_type, longest)
+        .filter(
+            Document.raw_document_id.isnot(None),
+            Document.source_type.in_(SPREADSHEET_SOURCE_TYPES),
+        )
+        .group_by(Document.raw_document_id, Document.source_id, Document.source_type)
+        .having(longest > max_chars)
+    )
+    if source_id:
+        query = query.filter(Document.source_id == source_id)
+
+    return [
+        {
+            "raw_document_id": raw_id,
+            "visible_search": False,
+            "visible_get": not hide_get,
+            "reason": f"oversized spreadsheet: {chars:,} chars > {max_chars:,}",
+            "meta": {"rule": "oversized-spreadsheet", "chars": chars, "max_chars": max_chars,
+                     "source_type": source_type},
+        }
+        for raw_id, _source, source_type, chars in query.all()
+    ]
+
+
+VISIBILITY_RULES = {
+    "oversized-spreadsheet": _rule_oversized_spreadsheet,
+}
+
+
+def _already_decided(session, raw_document_ids, group_name: str) -> set:
+    """Raw documents with any decision for this group, either polarity.
+
+    A sweep never re-litigates a document once someone (or an earlier sweep)
+    has decided -- including an explicit `show`, which is how a reviewed
+    document stays visible.
+    """
+    if not raw_document_ids:
+        return set()
+    rows = (
+        session.query(DocumentVisibilityDecision.raw_document_id, DocumentVisibilityDecision.meta)
+        .filter(
+            DocumentVisibilityDecision.raw_document_id.in_(list(raw_document_ids)),
+            DocumentVisibilityDecision.group_name == group_name,
+        )
+        .all()
+    )
+    # The privacy pipeline's provisional decisions are not a review.
+    return {raw for raw, meta in rows if (meta or {}).get("origin") not in AUTO_VISIBILITY_ORIGINS}
+
+
+def visibility_sweep(
+    rule: str,
+    *,
+    apply: bool = False,
+    source_id: Optional[str] = None,
+    limit: Optional[int] = None,
+    group_name: str = DOCUMENT_VISIBILITY_DEFAULT_GROUP,
+    rule_options: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Run one visibility rule over the corpus; write its decisions only if `apply`.
+
+    Without `apply` nothing is written -- not even a run row -- and the
+    result lists what would change. With it, a DocumentVisibilityRun row
+    records the run (status, counts, trigger, log path) and every decision
+    points back to it through run_id.
+
+    Returns a dict with `rule`, `applied`, `matched` (raw documents the rule
+    selected), `already_decided` (skipped: they have a decision already),
+    `decisions` (the ones written, or that would be), `errors`, `run_id`.
+    """
+    import os
+    import socket
+    from .db_models import DocumentVisibilityRun
+
+    if rule not in VISIBILITY_RULES:
+        raise ValueError(f"unknown rule {rule!r}; available: {', '.join(sorted(VISIBILITY_RULES))}")
+    rule_options = rule_options or {}
+
+    with get_db_session() as session:
+        matched = VISIBILITY_RULES[rule](session, source_id=source_id, **rule_options)
+        decided = _already_decided(session, {m["raw_document_id"] for m in matched}, group_name)
+    pending = [m for m in matched if m["raw_document_id"] not in decided]
+    if limit is not None:
+        pending = pending[:limit]
+
+    result: Dict[str, Any] = {
+        "rule": rule,
+        "applied": apply,
+        "matched": len(matched),
+        "already_decided": len(decided),
+        "decisions": pending,
+        "errors": [],
+        "run_id": None,
+    }
+    if not apply:
+        return result
+
+    args = {"rule": rule, "source_id": source_id, "limit": limit, "group_name": group_name, **rule_options}
+    with get_db_session() as session:
+        run = DocumentVisibilityRun(
+            hostname=socket.gethostname(),
+            pid=os.getpid(),
+            trigger=os.getenv("KB_RUN_TRIGGER") or "manual",
+            log_path=os.getenv("KB_RUN_LOG"),
+            args=args,
+            documents_scanned=len(matched),
+            already_decided_skipped=len(decided),
+        )
+        session.add(run)
+        session.flush()
+        run_id = run.id
+    result["run_id"] = run_id
+
+    hidden = visible = 0
+    status = "success"
+    try:
+        # One transaction per decision: a failure loses that document only.
+        for d in pending:
+            try:
+                record_visibility_decision(
+                    d["raw_document_id"],
+                    visible_search=d["visible_search"],
+                    visible_get=d["visible_get"],
+                    reason=d["reason"],
+                    group_name=group_name,
+                    run_id=run_id,
+                    meta=d["meta"],
+                )
+            except Exception as e:  # noqa: BLE001 - recorded on the run, sweep continues
+                logger.error(f"visibility sweep: {d['raw_document_id']}: {e}")
+                result["errors"].append({"raw_document_id": d["raw_document_id"], "error": str(e)})
+                continue
+            if d["visible_search"] and d["visible_get"]:
+                visible += 1
+            else:
+                hidden += 1
+        if result["errors"]:
+            status = "partial"
+    except BaseException as e:
+        status = "failed"
+        with get_db_session() as session:
+            session.query(DocumentVisibilityRun).filter_by(id=run_id).update({"error": str(e)})
+        raise
+    finally:
+        from sqlalchemy import func
+        with get_db_session() as session:
+            session.query(DocumentVisibilityRun).filter_by(id=run_id).update({
+                "status": status,
+                "finished_time": func.now(),
+                "newly_hidden": hidden,
+                "newly_visible": visible,
+                "errors": len(result["errors"]),
+                "failures": result["errors"],
+            })
+    return result
+
+
+def sensitivity_candidates(
+    session,
+    *,
+    prompt_version: str,
+    source_id: Optional[str] = None,
+    max_chars: int = 500_000,
+    document_ids: Optional[List[str]] = None,
+    rescan: bool = False,
+    only_unscanned: bool = False,
+) -> Dict[str, Any]:
+    """Text documents a sensitivity scan should read, without their text.
+
+    Only doc_type "text": image descriptions and tables are already inline
+    in their parent's text. Documents over `max_chars` (the giant
+    spreadsheets, decided separately) and empty ones are left out, as are
+    those already scanned successfully under `prompt_version` unless
+    `rescan`. With `only_unscanned`, a successful scan under any prompt
+    version counts (the import job's mode: new documents only). Returns {"candidates": [{"document_id", "raw_document_id",
+    "chars"}], "already_scanned": int, "too_large": int}.
+    """
+    from sqlalchemy import func
+    from .db_models import DocumentSensitivityScan
+
+    chars = func.length(Document.text)
+    query = session.query(Document.id, Document.raw_document_id, chars).filter(
+        Document.doc_type == "text",
+        Document.text.isnot(None),
+        chars > 0,
+    )
+    if source_id:
+        query = query.filter(Document.source_id == source_id)
+    if document_ids:
+        query = query.filter(Document.id.in_(list(document_ids)))
+    rows = query.all()
+
+    scanned = set()
+    if not rescan:
+        done = session.query(DocumentSensitivityScan.document_id).filter(DocumentSensitivityScan.status == "ok")
+        if not only_unscanned:
+            done = done.filter(DocumentSensitivityScan.prompt_version == prompt_version)
+        scanned = {r[0] for r in done.distinct()}
+    candidates, too_large, already = [], 0, 0
+    for doc_id, raw_id, n in rows:
+        if doc_id in scanned:
+            already += 1
+        elif n > max_chars:
+            too_large += 1
+        else:
+            candidates.append({"document_id": doc_id, "raw_document_id": raw_id, "chars": n})
+    return {"candidates": candidates, "already_scanned": already, "too_large": too_large}
+
+
+def _scanned_text(title: Optional[str], summary: Optional[str], text: Optional[str]) -> str:
+    """The text the privacy scan reads for a document: title, AI summary, then the text.
+
+    Title and summary are shown to users (search results lead with the
+    summary), and a summary paraphrases rather than quotes, so a span
+    redaction of the text would not catch it: they are scanned with the text,
+    and a finding's span is checked against this same composition.
+    """
+    header = [f"[Title] {title}"] if title else []
+    if summary:
+        header.append(f"[AI-generated summary] {summary}")
+    return ("\n".join(header) + "\n\n[Document text]\n" if header else "") + (text or "")
+
+
+def _scan_one_document(client, model: str, candidate: Dict[str, Any], run_id: str, scan_options: Dict[str, Any]):
+    """Scan one document and write its DocumentSensitivityScan row (ok or error)."""
+    from .db_models import DocumentSensitivityScan
+    from ..privacy import sensitivity
+
+    with get_db_session() as session:
+        doc = session.get(Document, candidate["document_id"])
+        text = _scanned_text(doc.title or doc.title_gen, doc.summary, doc.text)
+        label = f"{doc.source_id}/{doc.doc_id}"
+        source_type = doc.source_type
+
+    row = {
+        "document_id": candidate["document_id"],
+        "raw_document_id": candidate["raw_document_id"],
+        "run_id": run_id,
+        "prompt_version": sensitivity.PROMPT_VERSION,
+        "model": model,
+        "text_chars": len(text),
+    }
+    try:
+        result = sensitivity.scan_text(
+            client, model, text,
+            title=title, source=label, source_type=source_type,
+            document_id=candidate["document_id"],
+            raw_document_id=candidate["raw_document_id"],
+            **scan_options,
+        )
+        row.update(
+            status="ok",
+            windows=result["windows"],
+            n_findings=len(result["findings"]),
+            max_severity=sensitivity.max_severity(result["findings"]),
+            findings=result["findings"],
+            prompt_tokens=result["prompt_tokens"],
+            completion_tokens=result["completion_tokens"],
+            seconds=result["seconds"],
+        )
+    except Exception as e:  # noqa: BLE001 - recorded on the row, the scan continues
+        logger.error(f"sensitivity scan: {label} ({candidate['document_id']}): {e}")
+        row.update(status="error", error=f"{type(e).__name__}: {e}"[:2000], n_findings=0, findings=[])
+
+    with get_db_session() as session:
+        if row["status"] == "ok":
+            # A success replaces earlier failed attempts for this version.
+            session.query(DocumentSensitivityScan).filter_by(
+                document_id=row["document_id"], prompt_version=row["prompt_version"], status="error",
+            ).delete(synchronize_session=False)
+        session.add(DocumentSensitivityScan(**row))
+    row["label"] = label
+    return row
+
+
+def sensitivity_scan(
+    *,
+    model: Optional[str] = None,
+    source_id: Optional[str] = None,
+    document_ids: Optional[List[str]] = None,
+    sample: Optional[int] = None,
+    seed: int = 0,
+    limit: Optional[int] = None,
+    max_minutes: Optional[float] = None,
+    concurrency: int = 8,
+    max_chars: int = 500_000,
+    window_chars: int = 24000,
+    overlap_chars: int = 800,
+    reasoning_effort: Optional[str] = "low",
+    rescan: bool = False,
+    only_unscanned: bool = False,
+    allowed_hosts=None,
+    progress=None,
+) -> Dict[str, Any]:
+    """Run the LLM sensitivity scan over text documents; findings go to review.
+
+    Writes one DocumentSensitivityScan row per document and a
+    DocumentVisibilityRun row for the run (args, status, counts, tokens).
+    Hides nothing. Resumable: documents already scanned under the current
+    prompt version are skipped, so a run stopped by `max_minutes`, `limit`
+    or Ctrl-C continues where it left off next time.
+
+    Args:
+        model: LLM (default: PRIVACY_FILTER_MODEL, i.e. DEFAULT_LLM_MODEL).
+        source_id / document_ids: Restrict the candidates.
+        sample: Scan a random sample of this many candidates (`seed` fixes it).
+        limit: Stop submitting after this many documents.
+        max_minutes: Stop submitting after this long; documents in flight finish.
+        concurrency: Parallel documents (each sends its windows in sequence).
+        max_chars: Skip documents with more text than this.
+        window_chars / overlap_chars / reasoning_effort: See sensitivity.scan_text.
+        rescan: Scan documents again even if already scanned at this version.
+        only_unscanned: Skip documents scanned under any prompt version.
+        allowed_hosts: Endpoints document text may go to (default:
+            sensitivity.DEFAULT_ALLOWED_HOSTS).
+        progress: Optional callable(dict) called after every document.
+
+    Returns:
+        Dict with run_id, status, endpoint, model, selected, already_scanned,
+        too_large, scanned, errors, by_severity, prompt_tokens,
+        completion_tokens, seconds, stopped (why it stopped early, or None).
+    """
+    import os
+    import random
+    import socket
+    import time
+    from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+    from sqlalchemy import func
+    from .db_models import DocumentVisibilityRun
+    from ..config import get_llm_config
+    from ..llm import get_openai_client
+    from ..privacy import sensitivity
+
+    from .database import init_db
+
+    model = model or get_llm_config()["privacy_filter_model"]
+    client = get_openai_client(model)
+    endpoint = sensitivity.check_endpoint(
+        client.base_url, allowed_hosts or sensitivity.DEFAULT_ALLOWED_HOSTS
+    )
+
+    init_db(create_tables=True)  # creates document_sensitivity_scans on first use
+    with get_db_session() as session:
+        selection = sensitivity_candidates(
+            session,
+            prompt_version=sensitivity.PROMPT_VERSION,
+            source_id=source_id,
+            max_chars=max_chars,
+            document_ids=document_ids,
+            rescan=rescan,
+            only_unscanned=only_unscanned,
+        )
+    candidates = selection["candidates"]
+    if sample is not None and sample < len(candidates):
+        candidates = random.Random(seed).sample(candidates, sample)
+    if limit is not None:
+        candidates = candidates[:limit]
+
+    args = {
+        "rule": "sensitivity-scan", "model": model, "endpoint": endpoint,
+        "prompt_version": sensitivity.PROMPT_VERSION, "source_id": source_id,
+        "document_ids": document_ids, "sample": sample, "seed": seed, "limit": limit,
+        "max_minutes": max_minutes, "concurrency": concurrency, "max_chars": max_chars,
+        "window_chars": window_chars, "overlap_chars": overlap_chars,
+        "reasoning_effort": reasoning_effort, "rescan": rescan, "only_unscanned": only_unscanned,
+    }
+    with get_db_session() as session:
+        run = DocumentVisibilityRun(
+            hostname=socket.gethostname(),
+            pid=os.getpid(),
+            trigger=os.getenv("KB_RUN_TRIGGER") or "manual",
+            log_path=os.getenv("KB_RUN_LOG"),
+            args=args,
+            already_decided_skipped=selection["already_scanned"],
+            meta={"kind": "sensitivity-scan"},
+        )
+        session.add(run)
+        session.flush()
+        run_id = run.id
+
+    result: Dict[str, Any] = {
+        "run_id": run_id, "status": "running", "endpoint": endpoint, "model": model,
+        "prompt_version": sensitivity.PROMPT_VERSION,
+        "selected": len(candidates), "already_scanned": selection["already_scanned"],
+        "too_large": selection["too_large"], "scanned": 0, "errors": 0,
+        "by_severity": {s: 0 for s in sensitivity.SEVERITIES},
+        "prompt_tokens": 0, "completion_tokens": 0, "seconds": 0.0, "stopped": None,
+    }
+    scan_options = {
+        "window_chars": window_chars, "overlap_chars": overlap_chars,
+        "reasoning_effort": reasoning_effort,
+    }
+    start = time.time()
+    deadline = start + max_minutes * 60 if max_minutes else None
+    failures: List[Dict[str, str]] = []
+
+    def collect(row):
+        if row["status"] == "ok":
+            result["scanned"] += 1
+            result["prompt_tokens"] += row["prompt_tokens"] or 0
+            result["completion_tokens"] += row["completion_tokens"] or 0
+            if row["max_severity"]:
+                result["by_severity"][row["max_severity"]] += 1
+        else:
+            result["errors"] += 1
+            failures.append({"document_id": row["document_id"], "error": row["error"]})
+        result["seconds"] = time.time() - start
+        if progress:
+            progress(dict(result, last=row))
+
+    executor = ThreadPoolExecutor(max_workers=concurrency)
+    pending = set()
+    submitted: Dict[Any, str] = {}
+    queue = iter(candidates)
+    status = "failed"
+    try:
+        exhausted = False
+        while True:
+            while not exhausted and len(pending) < concurrency:
+                if deadline and time.time() >= deadline:
+                    result["stopped"] = f"time budget of {max_minutes} min reached"
+                    exhausted = True
+                    break
+                candidate = next(queue, None)
+                if candidate is None:
+                    exhausted = True
+                    break
+                future = executor.submit(_scan_one_document, client, model, candidate, run_id, scan_options)
+                submitted[future] = candidate["document_id"]
+                pending.add(future)
+            if not pending:
+                break
+            done, pending = wait(pending, timeout=30, return_when=FIRST_COMPLETED)
+            for future in done:
+                try:
+                    row = future.result()
+                except Exception as e:  # noqa: BLE001 - e.g. the DB write failed; counted, scan continues
+                    logger.error(f"sensitivity scan: {submitted[future]}: {e}")
+                    row = {"status": "error", "document_id": submitted[future],
+                           "error": f"{type(e).__name__}: {e}"[:2000]}
+                collect(row)
+        status = "partial" if (result["errors"] or result["stopped"]) else "success"
+    except KeyboardInterrupt:
+        result["stopped"] = "interrupted"
+        status = "partial"
+        raise
+    except BaseException as e:
+        result["stopped"] = f"{type(e).__name__}: {e}"
+        raise
+    finally:
+        # Documents in flight finish and write their rows; queued ones are dropped.
+        executor.shutdown(wait=False, cancel_futures=True)
+        result["status"] = status
+        result["seconds"] = time.time() - start
+        with get_db_session() as session:
+            session.query(DocumentVisibilityRun).filter_by(id=run_id).update({
+                "status": status,
+                "finished_time": func.now(),
+                "documents_scanned": result["scanned"],
+                "newly_hidden": 0,
+                "newly_visible": 0,
+                "errors": result["errors"],
+                "error": result["stopped"] if status == "failed" else None,
+                "failures": failures,
+                "meta": {
+                    "kind": "sensitivity-scan",
+                    "selected": result["selected"],
+                    "too_large": result["too_large"],
+                    "by_severity": result["by_severity"],
+                    "prompt_tokens": result["prompt_tokens"],
+                    "completion_tokens": result["completion_tokens"],
+                    "seconds": round(result["seconds"], 1),
+                    "stopped": result["stopped"],
+                },
+            })
+    return result
+
+
+REDACTION_LABELS = {
+    "credentials": "credential",
+    "personal_data": "personal data",
+    "personnel": "personnel matter",
+    "individual_assessment": "assessment of a person",
+    "security": "security detail",
+    "other": "sensitive detail",
+}
+
+
+def add_redaction(
+    span: str,
+    *,
+    raw_document_id: Optional[str],
+    label: str,
+    reason: Optional[str] = None,
+    origin: str = "cli",
+    scan_id: Optional[str] = None,
+    created_by: Optional[str] = None,
+    session=None,
+) -> Dict[str, Any]:
+    """Store a span to redact from MCP output, for one raw document or (None) all.
+
+    Refuses spans too short to be specific (under 4 characters, or 6 for a
+    global span), which would redact unrelated text, and skips a span that
+    an active rule for the same scope already covers.
+
+    Returns {"id", "added"} -- added False when an identical active rule exists.
+    """
+    from sqlalchemy import func
+    from .db_models import DocumentRedaction
+    from ..privacy.redaction import clear_cache, span_regex
+
+    span = " ".join((span or "").split())
+    minimum = 4 if raw_document_id else 6
+    if len(span) < minimum:
+        raise ValueError(f"span {span!r} is too short to redact safely (minimum {minimum} characters)")
+    span_regex(span)
+
+    with get_db_session(session) as s:
+        existing = s.query(DocumentRedaction).filter(
+            DocumentRedaction.active.is_(True),
+            DocumentRedaction.raw_document_id.is_(None) if raw_document_id is None
+            else DocumentRedaction.raw_document_id == raw_document_id,
+            func.lower(DocumentRedaction.span) == span.lower(),
+        ).first()
+        if existing:
+            return {"id": existing.id, "added": False}
+        row = DocumentRedaction(
+            raw_document_id=raw_document_id, span=span, label=label, reason=reason,
+            origin=origin, scan_id=scan_id, created_by=created_by, active=True,
+        )
+        s.add(row)
+        s.flush()
+        rule_id = row.id
+    clear_cache()
+    return {"id": rule_id, "added": True}
+
+
+def redaction_candidates_from_findings(
+    session,
+    raw_document_id: str,
+    *,
+    prompt_version: str,
+    min_severity: str = "medium",
+    categories: Optional[List[str]] = None,
+) -> List[Dict[str, Any]]:
+    """Spans from the latest scans of a raw document's text that a redaction would cover.
+
+    Skips restriction notices (category "restricted": the notice is not the
+    secret; hide such documents instead), spans the global patterns already
+    redact, and spans that do not occur in the document text (the model
+    paraphrased). Returns [{"span", "label", "category", "severity", "scan_id", "reason"}].
+    """
+    from .db_models import DocumentSensitivityScan
+    from ..privacy import sensitivity
+    from ..privacy.redaction import redact, span_regex
+
+    rank = sensitivity.SEVERITY_RANK
+    scans = (
+        session.query(DocumentSensitivityScan, Document.title, Document.title_gen, Document.summary, Document.text)
+        .join(Document, Document.id == DocumentSensitivityScan.document_id)
+        .filter(
+            DocumentSensitivityScan.raw_document_id == raw_document_id,
+            DocumentSensitivityScan.prompt_version == prompt_version,
+            DocumentSensitivityScan.status == "ok",
+        )
+        .all()
+    )
+    out, seen = [], set()
+    for scan, title, title_gen, summary, doc_text in scans:
+        text = _scanned_text(title or title_gen, summary, doc_text)
+        for f in scan.findings or []:
+            category = f.get("category")
+            if category == "restricted" or (categories and category not in categories):
+                continue
+            if rank.get(f.get("severity"), 1) < rank[min_severity]:
+                continue
+            span = " ".join((f.get("span") or "").split())
+            if len(span) < 4 or span.lower() in seen:
+                continue
+            if redact(span) != span:  # a global pattern already covers it
+                continue
+            if not span_regex(span).search(text or ""):
+                continue
+            seen.add(span.lower())
+            out.append({
+                "span": span,
+                "label": REDACTION_LABELS.get(category, "sensitive detail"),
+                "category": category,
+                "severity": f.get("severity"),
+                "scan_id": scan.id,
+                "reason": f.get("reason") or "",
+            })
+    return out
+
+
+# Origins of visibility decisions made by the privacy pipeline rather than a
+# person. They are provisional: the policy may change or lift them on a later
+# run, a human `hide`/`show` (any other origin) always wins over them, and the
+# rule sweeps do not count them as "already decided".
+PRIVACY_HOLD_ORIGIN = "privacy-hold"
+PRIVACY_POLICY_ORIGIN = "privacy-policy"
+AUTO_VISIBILITY_ORIGINS = (PRIVACY_HOLD_ORIGIN, PRIVACY_POLICY_ORIGIN)
+
+# A "restricted" finding hides its document only when the quote is an actual
+# notice; the model also files shared-drive links and the like under it.
+_NOTICE_WORDS = __import__("re").compile(
+    r"proprietar|confidential|vertraulich|internal|distribut|export|\bitar\b|\bear\b"
+    r"|official\s+use|\bouo\b|\bcui\b|\bnda\b|non-disclosure|forbidden|embargo|reproduc|restricted",
+    __import__("re").IGNORECASE,
+)
+
+
+# Scans from this prompt version on feed the policy (earlier ones had other
+# categories and no exact spans).
+POLICY_MIN_PROMPT_VERSION = 3
+
+
+def _prompt_version_number(version: Optional[str]) -> int:
+    try:
+        return int(str(version).lstrip("v"))
+    except ValueError:
+        return 0
+
+
+def privacy_policy_actions(findings: List[Dict[str, Any]], text: str, replacements) -> Dict[str, Any]:
+    """What the privacy policy does about one document's findings. Pure; no database.
+
+    `text` is the scanned document text and `replacements` its
+    find_replacements() with the current rules, so findings a redaction
+    already covers are ignored. The rules (docs/guides/privacy.md):
+
+    - restriction notice (proprietary, confidential, internal, export
+      control, ...): hide from search and get
+    - credential, high (a real password): hide from search and get, and
+      redact it
+    - credential, medium: redact the exact span; without one, flag
+    - personal data / personnel / assessment, high (health, HR action):
+      redact the span if exact, and hide from search
+    - personal data, medium: redact the exact span
+    - anything else at medium or high: flag for review; low: nothing
+
+    Returns {"hide_search", "hide_get", "redact": [{"span", "label", "reason"}],
+    "flag": [str], "reasons": [str]}.
+    """
+    from ..privacy.redaction import covered_by_redaction, span_regex
+
+    out: Dict[str, Any] = {"hide_search": False, "hide_get": False, "redact": [], "flag": [], "reasons": []}
+    seen_spans = set()
+
+    def exact(span: str) -> bool:
+        if len(span) < 4 or not any(c.isalnum() for c in span):
+            return False
+        try:
+            return bool(span_regex(span).search(text or ""))
+        except ValueError:
+            return False
+
+    def redact(f, span):
+        if span.lower() not in seen_spans:
+            seen_spans.add(span.lower())
+            out["redact"].append({
+                "span": span,
+                "label": REDACTION_LABELS.get(f.get("category"), "sensitive detail"),
+                "reason": f"{f.get('severity')} {f.get('category')}: {f.get('reason') or ''}".strip(),
+            })
+
+    for f in findings:
+        if covered_by_redaction(f, text, replacements):
+            continue
+        category, severity = f.get("category"), f.get("severity")
+        span = " ".join((f.get("span") or "").split())
+        quote = (span or f.get("evidence") or "")[:80]
+        if severity not in ("medium", "high"):
+            continue
+        if category == "restricted":
+            if f.get("source") == "marker" or _NOTICE_WORDS.search(f"{span} {f.get('evidence', '')}"):
+                out["hide_search"] = out["hide_get"] = True
+                out["reasons"].append(f"restriction notice: {quote}")
+            else:
+                out["flag"].append(f"restricted? {quote}")
+        elif category == "credentials" and severity == "high":
+            out["hide_search"] = out["hide_get"] = True
+            out["reasons"].append(f"password or secret: {quote}")
+            if exact(span):
+                redact(f, span)
+        elif category == "credentials":
+            if exact(span):
+                redact(f, span)
+            else:
+                out["flag"].append(f"credential without an exact span: {quote}")
+        elif category in ("personal_data", "personnel", "individual_assessment") and severity == "high":
+            out["hide_search"] = True
+            out["reasons"].append(f"{category}: {quote}")
+            if exact(span):
+                redact(f, span)
+        elif category == "personal_data" and exact(span):
+            redact(f, span)
+        else:
+            out["flag"].append(f"{category}: {quote}")
+    return out
+
+
+def apply_privacy_policy(
+    *,
+    apply: bool = False,
+    raw_document_ids: Optional[List[str]] = None,
+    group_name: str = DOCUMENT_VISIBILITY_DEFAULT_GROUP,
+    max_chars: int = 500_000,
+) -> Dict[str, Any]:
+    """Turn the latest sensitivity scans into visibility decisions and redactions.
+
+    Considers raw documents whose scans have findings, and those on a
+    privacy hold. For each it computes `privacy_policy_actions` over the
+    latest scan per prompt version (from POLICY_MIN_PROMPT_VERSION on) of
+    each of its text documents -- a finding in any of them counts -- then:
+
+    - records a provisional hide (origin "privacy-policy") when the policy
+      hides more than the current state;
+    - lifts a privacy hold, or an earlier provisional hide, when the policy
+      no longer hides; a hold stays while any scannable text document
+      (non-empty, at most `max_chars`, the scan's own limit) is unscanned;
+    - turns a hold on a file the scan cannot read -- no text document, empty
+      text, or text over `max_chars` -- into a hide from search only, flagged
+      for review (kb_get still works, as with the oversized-spreadsheet rule);
+    - never changes a decision a person made (any other origin) -- the
+      redactions still apply;
+    - adds the redactions (they are idempotent).
+
+    Without `apply` nothing is written and the result lists the plan.
+    Returns {"applied", "documents", "hidden", "lifted", "redactions",
+    "flagged", "held", "skipped_human", "changes": [...], "run_id"}.
+    """
+    import os
+    import socket
+    from sqlalchemy import func
+    from .database import init_db
+    from .db_models import (
+        DocumentSensitivityScan, DocumentVisibilityRun, RawDocument,
+    )
+    from ..privacy.redaction import find_replacements, rules_for
+
+    # Runs as the schema owner (import job, CLI): create document_redactions
+    # on first use. Not in add_redaction, which the web server also calls as
+    # a role without CREATE rights.
+    if apply:
+        init_db(create_tables=True)
+
+    with get_db_session() as session:
+        # The latest scan per document *and prompt version*: the model varies
+        # between runs (v3 and v4 disagreed on ~15% of flagged documents), so
+        # a finding in any recent version counts. Versions before
+        # POLICY_MIN_PROMPT_VERSION used other categories and are ignored.
+        latest = (
+            session.query(
+                DocumentSensitivityScan.document_id,
+                DocumentSensitivityScan.prompt_version,
+                func.max(DocumentSensitivityScan.created_time).label("t"),
+            )
+            .filter(DocumentSensitivityScan.status == "ok")
+            .group_by(DocumentSensitivityScan.document_id, DocumentSensitivityScan.prompt_version)
+            .subquery()
+        )
+        scan_rows = (
+            session.query(DocumentSensitivityScan.raw_document_id, DocumentSensitivityScan.document_id,
+                          DocumentSensitivityScan.findings, DocumentSensitivityScan.prompt_version)
+            .join(latest, (DocumentSensitivityScan.document_id == latest.c.document_id)
+                  & (DocumentSensitivityScan.prompt_version == latest.c.prompt_version)
+                  & (DocumentSensitivityScan.created_time == latest.c.t))
+            .filter(DocumentSensitivityScan.status == "ok", DocumentSensitivityScan.raw_document_id.isnot(None))
+        )
+        if raw_document_ids:
+            scan_rows = scan_rows.filter(DocumentSensitivityScan.raw_document_id.in_(raw_document_ids))
+        scans = [(raw, did, f) for raw, did, f, version in scan_rows.all()
+                 if _prompt_version_number(version) >= POLICY_MIN_PROMPT_VERSION]
+        scanned_docs = {did for _, did, _ in scans}
+
+        # Plain columns, not the entity plus a JSONB dict: SQLAlchemy de-duplicates
+        # entity rows by hashing them, and a dict is unhashable.
+        current_rows = (
+            session.query(
+                DocumentVisibilityCurrent.raw_document_id,
+                DocumentVisibilityCurrent.visible_search,
+                DocumentVisibilityCurrent.visible_get,
+                DocumentVisibilityDecision.meta["origin"].astext,
+            )
+            .outerjoin(DocumentVisibilityDecision, DocumentVisibilityDecision.id == DocumentVisibilityCurrent.decision_id)
+            .filter(DocumentVisibilityCurrent.group_name == group_name)
+        )
+        if raw_document_ids:
+            current_rows = current_rows.filter(DocumentVisibilityCurrent.raw_document_id.in_(raw_document_ids))
+        current = {
+            raw: {"search": vs, "get": vg, "origin": origin}
+            for raw, vs, vg, origin in current_rows.all()
+        }
+
+        with_findings = {raw for raw, _, f in scans if f}
+        held = {raw for raw, cur in current.items() if cur["origin"] == PRIVACY_HOLD_ORIGIN}
+        auto_hidden = {raw for raw, cur in current.items()
+                       if cur["origin"] == PRIVACY_POLICY_ORIGIN and not (cur["search"] and cur["get"])}
+        todo = with_findings | held | auto_hidden
+
+        # Lengths first: only text the scan could read is loaded (the giant
+        # spreadsheets run to 13M characters and are never scanned).
+        text_docs: Dict[str, List[Any]] = {}
+        if todo:
+            lengths = session.query(
+                Document.id, Document.raw_document_id, func.coalesce(func.length(Document.text), 0),
+            ).filter(Document.raw_document_id.in_(list(todo)), Document.doc_type == "text").all()
+            readable = [did for did, _, n in lengths if 0 < n <= max_chars and did in scanned_docs]
+            # The same text the scan read, so a span found only in the
+            # title or summary is still matched and redacted.
+            texts = {
+                did: _scanned_text(title or title_gen, summary, text)
+                for did, title, title_gen, summary, text in session.query(
+                    Document.id, Document.title, Document.title_gen, Document.summary, Document.text,
+                ).filter(Document.id.in_(readable)).all()
+            } if readable else {}
+            for did, raw, n in lengths:
+                text_docs.setdefault(raw, []).append((did, n, texts.get(did) or ""))
+        labels = dict(
+            (r.id, f"{r.source_id}/{r.doc_id}")
+            for r in session.query(RawDocument.id, RawDocument.source_id, RawDocument.doc_id)
+            .filter(RawDocument.id.in_(list(todo))).all()
+        ) if todo else {}
+
+    findings_by_doc: Dict[str, List[Dict[str, Any]]] = {}
+    for _, did, f in scans:
+        findings_by_doc.setdefault(did, []).extend(f or [])
+    result: Dict[str, Any] = {
+        "applied": apply, "documents": len(todo), "hidden": 0, "lifted": 0, "redactions": 0,
+        "flagged": 0, "held": 0, "skipped_human": 0, "changes": [], "run_id": None,
+    }
+    plans = []
+    for raw in sorted(todo, key=lambda r: labels.get(r, r)):
+        docs = text_docs.get(raw, [])
+        actions = {"hide_search": False, "hide_get": False, "redact": [], "flag": [], "reasons": []}
+        rules = rules_for(raw)
+        for did, _, text in docs:
+            if did not in scanned_docs:
+                continue
+            a = privacy_policy_actions(findings_by_doc.get(did, []), text, find_replacements(text, rules))
+            actions["hide_search"] |= a["hide_search"]
+            actions["hide_get"] |= a["hide_get"]
+            known = {x["span"].lower() for x in actions["redact"]}
+            actions["redact"] += [x for x in a["redact"] if x["span"].lower() not in known]
+            actions["flag"] += [x for x in a["flag"] if x not in actions["flag"]]
+            actions["reasons"] += [x for x in a["reasons"] if x not in actions["reasons"]]
+        scannable = [did for did, n, _ in docs if 0 < n <= max_chars]
+        unscanned = any(did not in scanned_docs for did in scannable)
+        unreadable = [did for did, n, _ in docs if not 0 < n <= max_chars and did not in scanned_docs]
+        if not docs or (unreadable and not unscanned):
+            # Nothing (more) the scan can read: keep it out of search, flag it.
+            actions["hide_search"] = True
+            reason = ("no text document to scan" if not docs
+                      else f"text empty or over {max_chars:,} characters, not scanned")
+            actions["reasons"].append(reason)
+            actions["flag"].append(f"not scannable: {reason}")
+        cur = current.get(raw)
+        change = {"raw_document_id": raw, "label": labels.get(raw, raw), "visibility": None,
+                  "redact": actions["redact"], "flag": actions["flag"], "reasons": actions["reasons"]}
+
+        human = cur is not None and cur["origin"] not in AUTO_VISIBILITY_ORIGINS
+        if human:
+            result["skipped_human"] += bool(actions["hide_search"] or actions["hide_get"])
+        elif unscanned and cur is not None and cur["origin"] == PRIVACY_HOLD_ORIGIN:
+            result["held"] += 1  # stays held until every scannable text document is scanned
+        else:
+            want_search = not actions["hide_search"]
+            want_get = not actions["hide_get"]
+            have_search = cur["search"] if cur else True
+            have_get = cur["get"] if cur else True
+            if (want_search, want_get) != (have_search, have_get):
+                change["visibility"] = {"search": want_search, "get": want_get}
+                if want_search and want_get:
+                    result["lifted"] += 1
+                else:
+                    result["hidden"] += 1
+        result["redactions"] += len(actions["redact"])
+        result["flagged"] += bool(actions["flag"])
+        if change["visibility"] or change["redact"] or change["flag"]:
+            result["changes"].append(change)
+        plans.append(change)
+
+    if not apply:
+        return result
+
+    with get_db_session() as session:
+        run = DocumentVisibilityRun(
+            hostname=socket.gethostname(), pid=os.getpid(),
+            trigger=os.getenv("KB_RUN_TRIGGER") or "manual", log_path=os.getenv("KB_RUN_LOG"),
+            args={"rule": "privacy-policy", "raw_document_ids": raw_document_ids, "group_name": group_name},
+            documents_scanned=len(todo), meta={"kind": "privacy-policy"},
+        )
+        session.add(run)
+        session.flush()
+        run_id = run.id
+    result["run_id"] = run_id
+
+    errors: List[Dict[str, str]] = []
+    added = 0
+    for change in plans:
+        raw = change["raw_document_id"]
+        try:
+            if change["visibility"]:
+                lifting = change["visibility"]["search"] and change["visibility"]["get"]
+                record_visibility_decision(
+                    raw,
+                    visible_search=change["visibility"]["search"],
+                    visible_get=change["visibility"]["get"],
+                    reason=("privacy scan clean" if lifting
+                            else "; ".join(change["reasons"])[:1000] or "privacy policy"),
+                    group_name=group_name,
+                    run_id=run_id,
+                    meta={"origin": PRIVACY_POLICY_ORIGIN, "provisional": True,
+                          "reasons": change["reasons"][:20], "flags": change["flag"][:20]},
+                )
+            for r in change["redact"]:
+                if add_redaction(r["span"], raw_document_id=raw, label=r["label"], reason=r["reason"],
+                                 origin=PRIVACY_POLICY_ORIGIN, created_by="privacy-policy")["added"]:
+                    added += 1
+        except Exception as e:  # noqa: BLE001 - recorded on the run, the rest continues
+            logger.error(f"privacy policy: {change['label']}: {e}")
+            errors.append({"raw_document_id": raw, "error": str(e)[:500]})
+
+    with get_db_session() as session:
+        session.query(DocumentVisibilityRun).filter_by(id=run_id).update({
+            "status": "partial" if errors else "success",
+            "finished_time": func.now(),
+            "newly_hidden": result["hidden"],
+            "newly_visible": result["lifted"],
+            "errors": len(errors),
+            "failures": errors,
+            "meta": {"kind": "privacy-policy", "redactions_added": added, "flagged": result["flagged"],
+                     "held": result["held"], "skipped_human": result["skipped_human"]},
+        })
+    result["redactions_added"] = added
+    result["errors"] = errors
+    return result
+
+
+# Origin of decisions a reviewer makes from the review queue (CLI or web).
+# Like any non-automatic origin it is final: the policy never changes it.
+PRIVACY_REVIEW_ORIGIN = "review"
+
+
+def _latest_policy_findings(session, raw_document_ids) -> Dict[str, List[Dict[str, Any]]]:
+    """Findings of the latest scan per (text document, prompt version >= v3), by raw document.
+
+    Each finding gets "document_id". Duplicates across versions (same
+    category and span) are kept once.
+    """
+    from sqlalchemy import func
+    from .db_models import DocumentSensitivityScan
+
+    if not raw_document_ids:
+        return {}
+    latest = (
+        session.query(
+            DocumentSensitivityScan.document_id,
+            DocumentSensitivityScan.prompt_version,
+            func.max(DocumentSensitivityScan.created_time).label("t"),
+        )
+        .filter(DocumentSensitivityScan.status == "ok",
+                DocumentSensitivityScan.raw_document_id.in_(list(raw_document_ids)))
+        .group_by(DocumentSensitivityScan.document_id, DocumentSensitivityScan.prompt_version)
+        .subquery()
+    )
+    rows = (
+        session.query(DocumentSensitivityScan.raw_document_id, DocumentSensitivityScan.document_id,
+                      DocumentSensitivityScan.prompt_version, DocumentSensitivityScan.findings)
+        .join(latest, (DocumentSensitivityScan.document_id == latest.c.document_id)
+              & (DocumentSensitivityScan.prompt_version == latest.c.prompt_version)
+              & (DocumentSensitivityScan.created_time == latest.c.t))
+        .all()
+    )
+    out: Dict[str, List[Dict[str, Any]]] = {}
+    seen = set()
+    for raw, did, version, findings in rows:
+        if _prompt_version_number(version) < POLICY_MIN_PROMPT_VERSION:
+            continue
+        for f in findings or []:
+            key = (raw, f.get("category"), " ".join((f.get("span") or f.get("evidence") or "").split()).lower())
+            if key in seen:
+                continue
+            seen.add(key)
+            out.setdefault(raw, []).append({**f, "document_id": did})
+    return out
+
+
+def privacy_review_queue(group_name: str = DOCUMENT_VISIBILITY_DEFAULT_GROUP) -> Dict[str, Any]:
+    """What a person still has to look at, for `kb tools visibility review` and /web/privacy.
+
+    Sections (each a list of documents, oldest first within "held"):
+
+    - "held": on the privacy hold, i.e. waiting for the import job's scan
+    - "provisional": hidden by the privacy policy, not yet confirmed by a person
+    - "flagged": visible, with medium/high findings no redaction covers yet
+
+    A document leaves the queue once a person decides about it (any
+    non-automatic decision: review, hide/show on the CLI), and a flagged
+    one also once redactions cover all its findings.
+
+    Each document: raw_document_id, label, title, document_id (a text
+    document to link to), state {search, get, origin, reason, since},
+    findings (medium/high, each with "covered"), redactions (active rules).
+    """
+    from sqlalchemy import func
+    from .db_models import DocumentRedaction, DocumentSensitivityScan, RawDocument
+    from ..privacy.redaction import covered_by_redaction, find_replacements, rules_for
+    from ..privacy.sensitivity import SEVERITY_RANK
+
+    with get_db_session() as session:
+        states = {
+            raw: {"search": vs, "get": vg, "origin": origin, "reason": reason,
+                  "since": str(updated)[:16] if updated else None}
+            for raw, vs, vg, origin, reason, updated in session.query(
+                DocumentVisibilityCurrent.raw_document_id,
+                DocumentVisibilityCurrent.visible_search,
+                DocumentVisibilityCurrent.visible_get,
+                DocumentVisibilityDecision.meta["origin"].astext,
+                DocumentVisibilityCurrent.reason,
+                DocumentVisibilityCurrent.updated_time,
+            )
+            .outerjoin(DocumentVisibilityDecision, DocumentVisibilityDecision.id == DocumentVisibilityCurrent.decision_id)
+            .filter(DocumentVisibilityCurrent.group_name == group_name)
+            .all()
+        }
+        held = [r for r, s in states.items() if s["origin"] == PRIVACY_HOLD_ORIGIN and not s["get"]]
+        provisional = [r for r, s in states.items()
+                       if s["origin"] == PRIVACY_POLICY_ORIGIN and not (s["search"] and s["get"])]
+        decided = {r for r, s in states.items() if s["origin"] not in AUTO_VISIBILITY_ORIGINS}
+
+        # Flag candidates: anything with a medium/high finding, minus the above.
+        candidates = set()
+        with_findings = {
+            r for (r,) in session.query(DocumentSensitivityScan.raw_document_id)
+            .filter(DocumentSensitivityScan.status == "ok",
+                    DocumentSensitivityScan.max_severity.in_(["medium", "high"]))
+            .distinct()
+        }
+        all_findings = _latest_policy_findings(session, with_findings | set(held) | set(provisional))
+        for raw, findings in all_findings.items():
+            if raw in decided or raw in held or raw in provisional:
+                continue
+            if any(SEVERITY_RANK.get(f.get("severity"), 0) >= 1 for f in findings):
+                candidates.add(raw)
+
+        wanted = set(held) | set(provisional) | candidates
+        texts = {}
+        doc_of_raw = {}
+        if wanted:
+            lengths = session.query(Document.id, Document.raw_document_id, func.length(Document.text)).filter(
+                Document.raw_document_id.in_(list(wanted)), Document.doc_type == "text"
+            ).all()
+            for did, raw, _ in lengths:
+                doc_of_raw.setdefault(raw, did)
+            # Text is only needed to tell which findings a redaction covers;
+            # the giant spreadsheets are never scanned, so never needed.
+            readable = [did for did, _, n in lengths if n and n <= 2_000_000]
+            texts = dict(session.query(Document.id, Document.text).filter(Document.id.in_(readable)).all()) if readable else {}
+        info = {
+            r.id: (f"{r.source_id}/{r.doc_id}", (r.meta or {}).get("title") or "")
+            for r in session.query(RawDocument).filter(RawDocument.id.in_(list(wanted))).all()
+        } if wanted else {}
+        titles = dict(
+            session.query(Document.raw_document_id, func.max(func.coalesce(Document.title, Document.title_gen)))
+            .filter(Document.raw_document_id.in_(list(wanted)), Document.doc_type == "text")
+            .group_by(Document.raw_document_id).all()
+        ) if wanted else {}
+        redaction_counts = dict(
+            session.query(DocumentRedaction.raw_document_id, func.count())
+            .filter(DocumentRedaction.raw_document_id.in_(list(wanted)), DocumentRedaction.active.is_(True))
+            .group_by(DocumentRedaction.raw_document_id).all()
+        ) if wanted else {}
+
+    def entry(raw):
+        rules = rules_for(raw)
+        findings = []
+        for f in all_findings.get(raw, []):
+            if SEVERITY_RANK.get(f.get("severity"), 0) < 1:
+                continue
+            text = texts.get(f["document_id"], "")
+            findings.append({**f, "covered": covered_by_redaction(f, text, find_replacements(text, rules)) if text else False})
+        label, title = info.get(raw, (raw, ""))
+        return {
+            "raw_document_id": raw, "label": label, "title": titles.get(raw) or title,
+            "document_id": doc_of_raw.get(raw), "state": states.get(raw),
+            "findings": findings, "redactions": redaction_counts.get(raw, 0),
+        }
+
+    flagged = []
+    for raw in candidates:
+        e = entry(raw)
+        if any(not f["covered"] for f in e["findings"]):
+            flagged.append(e)
+    return {
+        "held": sorted((entry(r) for r in held), key=lambda e: e["state"]["since"] or ""),
+        "provisional": sorted((entry(r) for r in provisional), key=lambda e: e["label"]),
+        "flagged": sorted(flagged, key=lambda e: e["label"]),
+    }
+
+
+REVIEW_ACTIONS = ("confirm", "show", "hide", "hide-search", "redact", "unredact")
+
+
+def _current_visibility(raw_document_id: str, group_name: str) -> Optional[Dict[str, Any]]:
+    """The current visibility of a raw document and the origin of the decision behind it."""
+    with get_db_session() as session:
+        row = (
+            session.query(
+                DocumentVisibilityCurrent.visible_search,
+                DocumentVisibilityCurrent.visible_get,
+                DocumentVisibilityDecision.meta["origin"].astext,
+            )
+            .outerjoin(DocumentVisibilityDecision,
+                       DocumentVisibilityDecision.id == DocumentVisibilityCurrent.decision_id)
+            .filter(DocumentVisibilityCurrent.raw_document_id == raw_document_id,
+                    DocumentVisibilityCurrent.group_name == group_name)
+            .first()
+        )
+    return {"search": row[0], "get": row[1], "origin": row[2]} if row else None
+
+
+def privacy_review_action(
+    raw_document_id: str,
+    action: str,
+    *,
+    user: str,
+    reason: Optional[str] = None,
+    span: Optional[str] = None,
+    label: Optional[str] = None,
+    rule_id: Optional[str] = None,
+    group_name: str = DOCUMENT_VISIBILITY_DEFAULT_GROUP,
+) -> str:
+    """Apply one reviewer decision; returns a one-line description of what changed.
+
+    confirm      keep the current (provisional) visibility, now as a reviewed decision
+    show         visible in search and get
+    hide         hidden from search and get
+    hide-search  hidden from search, kb_get still works
+    redact       redact `span` (label `label`) in this document's MCP output
+    unredact     deactivate redaction rule `rule_id`
+
+    Visibility decisions get origin "review", so the policy never changes them.
+    """
+    from sqlalchemy import func
+    from .db_models import DocumentRedaction
+
+    if action not in REVIEW_ACTIONS:
+        raise ValueError(f"unknown action {action!r}; one of {', '.join(REVIEW_ACTIONS)}")
+    reason = (reason or "").strip() or f"reviewed by {user}"
+    meta = {"origin": PRIVACY_REVIEW_ORIGIN, "user": user}
+
+    if action == "redact":
+        if not span:
+            raise ValueError("redact needs the text to redact")
+        r = add_redaction(span, raw_document_id=raw_document_id, label=label or "private detail",
+                          reason=reason, origin=PRIVACY_REVIEW_ORIGIN, created_by=user)
+        return f"redacted {span!r}" if r["added"] else f"{span!r} was already redacted"
+    if action == "unredact":
+        from ..privacy.redaction import clear_cache
+        with get_db_session() as session:
+            rule = session.get(DocumentRedaction, rule_id) if rule_id else None
+            if rule is None or rule.raw_document_id != raw_document_id:
+                raise ValueError(f"no redaction rule {rule_id} for this document")
+            rule.active = False
+            rule.deactivated_time = func.now()
+            span = rule.span
+        clear_cache()
+        return f"no longer redacting {span!r}"
+
+    if action == "confirm":
+        # Only a provisional policy decision can be confirmed. Confirming a
+        # hold would turn "not scanned yet" into a final hidden decision that
+        # no later scan could lift; anything else already is final.
+        cur = _current_visibility(raw_document_id, group_name)
+        if cur is None or cur["origin"] != PRIVACY_POLICY_ORIGIN:
+            origin = cur["origin"] if cur else "none"
+            raise ValueError(f"nothing to confirm: the current decision is not a provisional "
+                             f"privacy-policy one (origin {origin}); use show, hide or hide-search")
+        visible = (cur["search"], cur["get"])
+    else:
+        visible = {"show": (True, True), "hide": (False, False), "hide-search": (False, True)}[action]
+    record_visibility_decision(
+        raw_document_id, visible_search=visible[0], visible_get=visible[1],
+        reason=reason, group_name=group_name, meta=meta,
+    )
+    state = ("visible" if all(visible) else "hidden from search and get" if not visible[1]
+             else "hidden from search")
+    return f"{'confirmed' if action == 'confirm' else 'set'}: {state}"
 
 
 def filter_all(
