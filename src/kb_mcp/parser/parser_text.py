@@ -16,7 +16,7 @@ class TextParser(BaseParser):
         mime_type = self.doc_type.lower()
         
         # HTML files - extract text content
-        if mime_type in ("text/html", "application/xhtml+xml"):
+        if mime_type in ("text/html", "application/xhtml+xml", "html", "htm"):
             return self._extract_html()
         
         # Plain text files - read directly

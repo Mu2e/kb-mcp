@@ -70,6 +70,8 @@ PARSER_MAP = {
     # Text
     'txt': TextParser,
     'text/plain': TextParser,
+    'html': TextParser,
+    'htm': TextParser,
     'text/html': TextParser,
     'text/markdown': TextParser,
     'text/xml': TextParser,
