@@ -82,6 +82,7 @@ def test_each_distinct_new_image_is_described_once(vision):
     assert "boilerplate" not in images[1]["meta"]
     assert usage["images_decorative"] == 3
     assert vision.remembered[boilerplate.image_hash(LOGO)]["decorative"] is True
+    assert vision.remembered[boilerplate.image_hash(LOGO)]["description"] is None   # only the label
     assert vision.remembered[boilerplate.image_hash(PLOT)] == {
         "description": "Line plot of a rising rate.", "decorative": False, "label": None, "bytes": len(PLOT)}
 
@@ -135,6 +136,35 @@ def test_remember_skips_placeholders_and_keeps_existing_rows(db):
     assert db.get(ImageHash, "h-new").decided_by == "vision"
     assert db.get(ImageHash, "h-failed") is None
     assert set(boilerplate.lookup(["h-new", "h-reviewed", "h-missing"])) == {"h-new", "h-reviewed"}
+
+
+def test_parse_time_decorative_later_marked_content_gets_described(db):
+    """A vision-demoted image stores only its label; once a reviewer marks it
+    content, lookup must not hand the label back as a description, and the
+    next description fills the registry row without touching the decision."""
+    from kb_mcp.kb.db_models import ImageHash
+
+    assert boilerplate.remember({"h-logo": {"description": None, "decorative": True,
+                                            "label": "decorative: odd logo"}}, model="m") == 1
+    row = db.get(ImageHash, "h-logo")
+    assert (row.decorative, row.description) == (True, None)
+    row.decorative, row.label, row.decided_by = False, None, "review"
+    db.commit()
+
+    assert boilerplate.lookup(["h-logo"]) == {}                      # described again, not the label
+    boilerplate.remember({"h-logo": {"description": "A small plot.", "decorative": False, "label": None}})
+    db.expire_all()
+    row = db.get(ImageHash, "h-logo")
+    assert (row.description, row.decided_by) == ("A small plot.", "review")
+
+
+def test_ingest_does_not_embed_decorative_images():
+    import inspect
+    from kb_mcp.kb import tools
+
+    source = inspect.getsource(tools.ingest)
+    loop = source[source.index("for doc in image_documents:"):]
+    assert loop.index('get("boilerplate")') < loop.index("chunk_and_embed")
 
 
 # --- existing corpus: registry, decisions, demotion --------------------------------------
@@ -204,6 +234,13 @@ def test_replace_inline_description_handles_brackets_and_leaves_others():
     assert new == ("Intro ![A plot](d-1.png) [image_id:d-1.png image_num:1] mid "
                    "![decorative: Fermilab logo](d-2.png) [image_id:d-2.png image_num:2] end")
     assert replace_inline_description(text, "d-9.png", "x") == (text, 0)
+
+    # Non-Docling parsers link the bare filename; the tag names the record.
+    pdf = "See ![A logo](image-1.png) [image_id:doc-image-1.png image_num:1] and [image_id:doc-image-10.png]"
+    new, count = replace_inline_description(pdf, "doc-image-1.png", "decorative: logo")
+    assert count == 1
+    assert new == ("See ![decorative: logo](image-1.png) [image_id:doc-image-1.png image_num:1] "
+                   "and [image_id:doc-image-10.png]")
 
 
 def test_refresh_counts_copies_documents_and_entries(db):

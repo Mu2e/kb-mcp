@@ -126,11 +126,13 @@ def lookup(hashes: Iterable[str]) -> Dict[str, Dict[str, Any]]:
 def remember(entries: Dict[str, Dict[str, Any]], model: Optional[str] = None) -> int:
     """Record newly described images: {hash: {"description", "decorative", "label", "bytes"}}.
 
-    Existing rows are left alone (in particular a reviewer's decision).
+    A decision already in the registry (in particular a reviewer's) is left
+    alone; an existing row that has no description yet gets this one.
     Returns the number of rows added; 0 on any database error.
     """
     entries = {h: e for h, e in entries.items()
-               if e.get("description") and e["description"] != UNAVAILABLE}
+               if (e.get("decorative") and e.get("label"))
+               or (e.get("description") and e["description"] != UNAVAILABLE)}
     if not entries:
         return 0
     try:
@@ -138,16 +140,19 @@ def remember(entries: Dict[str, Dict[str, Any]], model: Optional[str] = None) ->
         from ..kb.db_models import ImageHash
 
         with get_db_session() as session:
-            existing = {h for (h,) in session.query(ImageHash.image_hash)
+            existing = {row.image_hash: row for row in session.query(ImageHash)
                         .filter(ImageHash.image_hash.in_(list(entries))).all()}
             added = 0
             for h, e in entries.items():
                 if h in existing:
+                    row = existing[h]
+                    if not row.description and e.get("description") and not e.get("decorative"):
+                        row.description = e["description"]
                     continue
                 decorative = e.get("decorative")
                 session.add(ImageHash(
                     image_hash=h,
-                    description=e["description"],
+                    description=e.get("description"),
                     decorative=decorative,
                     label=e.get("label"),
                     decided_by=ImageHash.DECIDED_BY_VISION if decorative is not None else None,

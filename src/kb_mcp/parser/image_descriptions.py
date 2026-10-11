@@ -396,7 +396,10 @@ def generate_image_descriptions(
                 else:
                     _set_description(img_dict, description)
             decorative += len(copies_by_hash[h]) if label else 0
-            new_entries[h] = {"description": label or description, "decorative": bool(label),
+            # A decorative answer has no description: the registry keeps only
+            # the label, so a reviewer who later marks it content gets a fresh
+            # description at the next parse instead of the label back.
+            new_entries[h] = {"description": None if label else description, "decorative": bool(label),
                               "label": label, "bytes": len(first["binary"])}
         boilerplate.remember(new_entries, model=model)
         if decorative:

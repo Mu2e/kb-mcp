@@ -85,8 +85,9 @@ def refresh_registry(session=None) -> Dict[str, int]:
             func.length(Document.binary),
             Document.meta["description"].astext,
             Document.meta["boilerplate"]["description"].astext,
+            Document.meta["boilerplate"]["label"].astext,
         ).filter(Document.doc_type == "image", Document.meta["image_hash"].astext.isnot(None))
-        for h, parent_id, doc_id, size, description, original in rows.yield_per(5000):
+        for h, parent_id, doc_id, size, description, original, label in rows.yield_per(5000):
             s = stats.setdefault(h, {"copies": 0, "parents": set(), "entries": set(), "bytes": size,
                                      "description": None})
             s["copies"] += 1
@@ -94,7 +95,9 @@ def refresh_registry(session=None) -> Dict[str, int]:
             entry = _docdb_entry(doc_id)
             if entry:
                 s["entries"].add(entry)
-            usable = original or description
+            # A demoted record's own description is just its label; only the
+            # original it kept (if any) describes the image.
+            usable = original if label else (original or description)
             if usable and usable != boilerplate.UNAVAILABLE and not s["description"]:
                 s["description"] = usable
 
@@ -285,22 +288,23 @@ def replace_inline_description(text: str, image_ref: str, new_alt: str) -> tuple
     to the nearest `![` before it, so a description containing brackets is
     still replaced whole. Returns (new text, number of replacements).
     """
-    suffix = f"]({image_ref}) [image_id:{image_ref}"
+    # The link target is the record's doc_id (Docling) or the bare filename
+    # the markdown referenced (other parsers); the image_id tag is always the
+    # record's doc_id, so anchor on that and keep the link target as it is.
+    anchor = re.compile(r"\]\(([^()\s]*)\) \[image_id:" + re.escape(image_ref) + r"(?=[\] ])")
     new_alt = " ".join(new_alt.split()).replace("](", "] (")
     out, pos, count = [], 0, 0
-    while True:
-        end = text.find(suffix, pos)
-        if end < 0:
-            break
+    for match in anchor.finditer(text):
+        end = match.start()
+        if end < pos:
+            continue
         start = text.rfind("![", pos, end)
         if start < 0:
-            out.append(text[pos:end + len(suffix)])
-            pos = end + len(suffix)
             continue
         out.append(text[pos:start])
         out.append(f"![{new_alt}")
-        out.append(suffix)
-        pos = end + len(suffix)
+        out.append(match.group(0))
+        pos = match.end()
         count += 1
     out.append(text[pos:])
     return "".join(out), count
