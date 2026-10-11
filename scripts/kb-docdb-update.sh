@@ -221,13 +221,13 @@ if python3 -c 'import sys; from kb_mcp.config import get_privacy_config; sys.exi
                 --concurrency "${PRIVACY_SCAN_CONCURRENCY:-4}" --max-minutes "${PRIVACY_SCAN_MAX_MINUTES:-60}"; then
             echo "privacy scan done in $(( $(date +%s) - p_start ))s"
         else
-            echo "PRIVACY FAILED: the scan did not run; new documents stay held until a later run scans them"
+            echo "PRIVACY FAILED: the scan did not run or some documents failed to scan; they stay held until a later run scans them"
         fi
         echo "--- privacy policy ---"
         if kb tools visibility apply-policy --apply; then
             echo "privacy policy applied"
         else
-            echo "PRIVACY FAILED: apply-policy did not complete; new documents stay held"
+            echo "PRIVACY FAILED: apply-policy did not complete or some writes failed; those documents stay held"
         fi
     } >> "$LOG" 2>&1
 else

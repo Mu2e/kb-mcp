@@ -279,3 +279,10 @@ def test_rescan_and_new_prompt_version_include_scanned_documents(session):
 def test_candidates_restricted_to_document_ids(session):
     sel = sensitivity_candidates(session, prompt_version="v2", document_ids=["text-big", "image-1"])
     assert [c["document_id"] for c in sel["candidates"]] == ["text-big"]
+
+
+@pytest.mark.parametrize("answer", ['{"findings": {}}', '{"findings": "none"}', '{"findings": null}'])
+def test_findings_that_are_not_a_list_are_an_error_not_a_clean_scan(answer):
+    # Treated as "nothing found", a malformed answer would let the policy lift the hold.
+    with pytest.raises(ValueError, match="no 'findings' list"):
+        sensitivity.parse_findings(answer)

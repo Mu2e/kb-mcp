@@ -130,3 +130,22 @@ def test_non_admins_can_neither_read_nor_decide(client):
     r = client.post("/web/privacy/decide", data={"raw_document_id": "raw-1", "action": "show"},
                     follow_redirects=False)
     assert r.status_code == 303 and client.actions == []
+
+
+@pytest.mark.parametrize("origin", [tools.PRIVACY_HOLD_ORIGIN, tools.PRIVACY_REVIEW_ORIGIN, None])
+def test_confirm_refuses_anything_but_a_provisional_policy_decision(recorded, monkeypatch, origin):
+    # Confirming a hold would freeze "not scanned yet" into a final hidden decision.
+    current = {"search": False, "get": False, "origin": origin} if origin else None
+    monkeypatch.setattr(tools, "_current_visibility", lambda raw, group: current)
+    with pytest.raises(ValueError, match="nothing to confirm"):
+        tools.privacy_review_action("raw-1", "confirm", user="alice")
+    assert recorded["decisions"] == []
+
+
+def test_confirm_keeps_the_policy_visibility_as_a_review(recorded, monkeypatch):
+    monkeypatch.setattr(tools, "_current_visibility",
+                        lambda raw, group: {"search": False, "get": True, "origin": tools.PRIVACY_POLICY_ORIGIN})
+    tools.privacy_review_action("raw-1", "confirm", user="alice")
+    [(raw, kwargs)] = recorded["decisions"]
+    assert (kwargs["visible_search"], kwargs["visible_get"]) == (False, True)
+    assert kwargs["meta"]["origin"] == tools.PRIVACY_REVIEW_ORIGIN
