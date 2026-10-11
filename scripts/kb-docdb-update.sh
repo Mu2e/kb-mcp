@@ -167,9 +167,13 @@ fi
 
 # 3. The actual incremental import.
 #
-# --no-embed-images / --no-embed-tables: for now (2026-09-19) this job only
-# embeds text documents. Images (~13k unchunked) and tables (~900 unchunked,
-# leftovers of interrupted sweeps) are deliberately left for a separate pass.
+# Images are embedded: decorative ones (logos, banners) are demoted to a label
+# and skipped by the sweep, and kb_search leaves image records out unless a
+# filter asks for doc_type. Releases before the image registry must keep
+# --no-embed-images, or their sweep re-embeds every demoted image.
+#
+# --no-embed-tables: tables (~900 unchunked, leftovers of interrupted sweeps)
+# are deliberately left for a separate pass.
 #
 # --delay 1: explicit rather than relying on kb-import's own 0.5s default,
 # since this runs unattended twice a day and a slower, more polite pace to
@@ -201,7 +205,7 @@ export PYTHONUNBUFFERED=1
 export KB_RUN_TRIGGER="${KB_RUN_TRIGGER:-cron-script}"
 export KB_RUN_LOG="$LOG"
 stdbuf -oL -eL kb-import docdb --days "$DAYS" --skip-existing --delay 1 --max-embed-chars 500000 \
-    --no-embed-images --no-embed-tables >> "$LOG" 2>&1
+    --no-embed-tables >> "$LOG" 2>&1
 rc=$?
 end=$(date +%s)
 
