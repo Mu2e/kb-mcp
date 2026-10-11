@@ -30,11 +30,11 @@ _warned_lock = threading.Lock()
 # without depending on every call site spelling the string the same way.
 STAGE_TABLE_SUMMARY = "table_summary"
 STAGE_IMAGE_DESCRIPTION = "image_description"
+STAGE_IMAGE_CLASSIFICATION = "image_classification"
 STAGE_DOCUMENT_SUMMARY = "document_summary"
 STAGE_GRAPH_EXTRACTION = "graph_extraction"
 STAGE_GRAPH_MATCHING = "graph_matching"
 STAGE_PRIVACY_FILTER = "privacy_filter"
-STAGE_IMAGE_CLASSIFICATION = "image_classification"
 STAGE_EMBEDDING = "embedding"
 
 USAGE_FIELDS = (
