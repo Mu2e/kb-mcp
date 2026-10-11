@@ -241,8 +241,11 @@ def ingest(
                 except Exception as e:
                     logger.error(f"Error chunking/embedding document {doc.id}: {e}", exc_info=True)
 
-            # Chunk and embed image documents
+            # Chunk and embed image documents. Decorative ones (logos, banners)
+            # carry only a short label and are never embedded.
             for doc in image_documents:
+                if (doc.meta or {}).get("boilerplate"):
+                    continue
                 try:
                     chunks = doc.chunk_and_embed(
                         chunk_strategy="image",
@@ -1192,6 +1195,10 @@ def record_chunk_and_embed_all(
             Document.text.isnot(None),
             Document.text != ""
         ).outerjoin(Chunk, Document.id == Chunk.document_id).filter(Chunk.id.is_(None))
+        if doc_type == "image":
+            # Decorative images (logos, template graphics) keep their record
+            # but are never embedded: see kb_mcp.parser.boilerplate.
+            query = query.filter(Document.meta["boilerplate"].astext.is_(None))
 
         documents = query.all()
 

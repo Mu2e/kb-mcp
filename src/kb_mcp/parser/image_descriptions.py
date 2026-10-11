@@ -5,6 +5,7 @@ import logging
 from typing import List, Dict, Any, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+from . import boilerplate
 from .image_utils import detect_image_format
 from ..config import get_llm_config, get_parser_config
 from ..llm.retry import RateLimited, call_with_backoff
@@ -205,7 +206,37 @@ def generate_image_descriptions(
     
     if not images_with_binary:
         return image_dicts
-    
+
+    # Group copies of the same image: each distinct image is described once,
+    # and not at all when the registry already knows it (see boilerplate.py).
+    copies_by_hash: Dict[str, List[Dict[str, Any]]] = {}
+    for _, img_dict in images_with_binary:
+        h = boilerplate.image_hash(img_dict["binary"])
+        img_dict.setdefault("meta", {})["image_hash"] = h
+        copies_by_hash.setdefault(h, []).append(img_dict)
+    known = boilerplate.lookup(copies_by_hash)
+    for h, entry in known.items():
+        for img_dict in copies_by_hash[h]:
+            if entry["decorative"] and entry.get("label"):
+                boilerplate.mark_decorative(img_dict, entry["label"], "registry",
+                                            description=entry.get("description"))
+            else:
+                _set_description(img_dict, entry["description"])
+    reused = sum(len(copies_by_hash[h]) for h in known)
+    first_copies = [(idx, img_dict) for idx, img_dict in images_with_binary
+                    if img_dict["meta"]["image_hash"] not in known
+                    and copies_by_hash[img_dict["meta"]["image_hash"]][0] is img_dict]
+    if reused or len(first_copies) < len(images_with_binary):
+        logger.info(
+            "Images: %d total, %d distinct, %d known from the registry (no vision call), %d to describe",
+            len(images_with_binary), len(copies_by_hash), reused, len(first_copies),
+        )
+    if usage_out is not None and reused:
+        usage_out["images_reused"] = reused
+    images_with_binary = first_copies
+    if not images_with_binary:
+        return image_dicts
+
     try:
         from openai import OpenAI
 
@@ -350,26 +381,29 @@ def generate_image_descriptions(
                 base_url or "<default>", max_workers, throttled[0],
             )
 
-        # Update image dicts with descriptions (modifies original dicts in image_dicts).
-        # The parser may have seeded `text` with nearby_text + caption already
-        # — keep that prefix so the figure record carries surrounding-paragraph
-        # context, caption, and VLM description all in one searchable string.
-        # Order is paragraphs → caption → VLM description, matching the
-        # parser's seeding order in parser_docling.py.
-        for i, (_, _, image_identifier, img_dict) in enumerate(images_for_llm):
+        # Update image dicts with descriptions (modifies original dicts in
+        # image_dicts), every copy of an image getting its first copy's answer.
+        # A `DECORATIVE: ...` answer demotes the image to a short label.
+        new_entries: Dict[str, Dict[str, Any]] = {}
+        decorative = 0
+        for i, (_, _, image_identifier, first) in enumerate(images_for_llm):
             description = descriptions[i]
-            prefix = (img_dict.get("text") or "").strip()
-            if prefix:
-                img_dict["text"] = f"{prefix}\n\n{description}"
-            else:
-                img_dict["text"] = description
-            # Also keep the VLM description on its own. `text` deliberately
-            # bundles nearby_text + caption + description for retrieval, but
-            # callers that want just the description — e.g. parse.py inlining
-            # it into the parent document's text in place of the image — need
-            # it without the surrounding-paragraph prefix, which would
-            # otherwise duplicate prose that already sits next to the image.
-            img_dict.setdefault("meta", {})["description"] = description
+            label = boilerplate.parse_decorative(description)
+            h = first["meta"]["image_hash"]
+            for img_dict in copies_by_hash[h]:
+                if label:
+                    boilerplate.mark_decorative(img_dict, label, "vision")
+                else:
+                    _set_description(img_dict, description)
+            decorative += len(copies_by_hash[h]) if label else 0
+            # A decorative answer has no description: the registry keeps only
+            # the label, so a reviewer who later marks it content gets a fresh
+            # description at the next parse instead of the label back.
+            new_entries[h] = {"description": None if label else description, "decorative": bool(label),
+                              "label": label, "bytes": len(first["binary"])}
+        boilerplate.remember(new_entries, model=model)
+        if decorative:
+            logger.info("Images: %d decorative (logos, banners, template graphics) kept as labels", decorative)
 
         logger.info(f"Image description tokens — {usage.format_summary()}")
         if usage_out is not None:
@@ -381,6 +415,8 @@ def generate_image_descriptions(
                 usage_out["images_throttled"] = len(throttled)
             if failures:
                 usage_out["images_failed"] = len(failures)
+            if decorative:
+                usage_out["images_decorative"] = decorative
 
         return image_dicts
         
@@ -390,6 +426,26 @@ def generate_image_descriptions(
         logger.error(f"Error generating image descriptions: {e}")
     
     return image_dicts
+
+
+def _set_description(img_dict: Dict[str, Any], description: str) -> None:
+    """Store a description on an image record.
+
+    The parser may have seeded `text` with nearby_text + caption already
+    — keep that prefix so the figure record carries surrounding-paragraph
+    context, caption, and VLM description all in one searchable string.
+    Order is paragraphs → caption → VLM description, matching the
+    parser's seeding order in parser_docling.py.
+    """
+    prefix = (img_dict.get("text") or "").strip()
+    img_dict["text"] = f"{prefix}\n\n{description}" if prefix else description
+    # Also keep the VLM description on its own. `text` deliberately
+    # bundles nearby_text + caption + description for retrieval, but
+    # callers that want just the description — e.g. parse.py inlining
+    # it into the parent document's text in place of the image — need
+    # it without the surrounding-paragraph prefix, which would
+    # otherwise duplicate prose that already sits next to the image.
+    img_dict.setdefault("meta", {})["description"] = description
 
 
 def _create_image_description_prompt(
@@ -464,5 +520,6 @@ def _create_image_description_prompt(
 
 Output format:
 - 2–4 sentences. Start directly with the content (no "This image shows"). No reasoning/thinking trace, no preamble. Just the description.
+- Exception: if the image is only decoration — a logo, a banner, an institution's crest or wordmark, a slide-template graphic, a background, a bullet or arrow icon — answer with exactly one line `DECORATIVE: <what it is>`, e.g. `DECORATIVE: Fermilab logo`. The Mu2e logo (a sphere labelled "Mu2e" inside an oval or elliptical orbits) is decorative. Never use this for a plot, diagram, drawing, photograph of equipment or people, screenshot, table or equation, even a small one.
 """
 

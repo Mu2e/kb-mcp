@@ -289,3 +289,54 @@ def test_kb_search_reports_malformed_filter_as_error():
 
     assert "error" in result
     assert "exactly one field" in result["error"]
+
+
+# --- kb_search leaves image records out unless asked ---------------------
+
+@pytest.fixture
+def captured_search(monkeypatch):
+    import kb_mcp.kb as kb
+    import kb_mcp.config as config
+
+    calls = []
+    monkeypatch.setattr(kb, "search", lambda **kw: calls.append(kw) or {"results": []})
+    real = config.get_search_config
+    monkeypatch.setattr(config, "get_search_config", lambda: {**real(), "router_enabled": False})
+    return calls
+
+
+NO_IMAGES = {"term": {"doc_type": "image"}}
+
+
+def test_kb_search_excludes_images_by_default(captured_search):
+    from kb_mcp.server.mcp import kb_search
+
+    kb_search("tracker")
+    assert captured_search[-1]["filter"] == {"bool": {"must_not": [NO_IMAGES]}}
+
+    source = {"term": {"source_id": "mu2e-docdb"}}
+    kb_search("tracker", search_filter=source)
+    assert captured_search[-1]["filter"] == {"bool": {"must": [source], "must_not": [NO_IMAGES]}}
+
+
+@pytest.mark.parametrize("search_filter", [
+    {"term": {"doc_type": "image"}},
+    {"bool": {"must": [{"term": {"source_id": "mu2e-docdb"}}, {"terms": {"doc_type": ["text", "image"]}}]}},
+    {"bool": {"must_not": [{"term": {"doc_type": "table"}}]}},
+])
+def test_kb_search_keeps_a_doc_type_filter_as_given(captured_search, search_filter):
+    from kb_mcp.server.mcp import kb_search
+
+    kb_search("tracker", search_filter=search_filter)
+    assert captured_search[-1]["filter"] == search_filter
+
+
+def test_kb_search_figure_route_keeps_images(captured_search, monkeypatch):
+    import kb_mcp.config as config
+    from kb_mcp.server.mcp import kb_search
+
+    real = config.get_search_config
+    monkeypatch.setattr(config, "get_search_config", lambda: {**real(), "router_enabled": True})
+    kb_search("plot of the calorimeter energy resolution")
+    assert captured_search[-1]["filter"] is None
+    assert captured_search[-1]["doc_type_boost"] == {"image": 1.5}

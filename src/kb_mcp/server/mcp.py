@@ -316,6 +316,15 @@ def _format_search_results(results: List[Dict[str, Any]], context_chars: int = 5
     return formatted_results
 
 
+def _filter_names_field(node, field: str) -> bool:
+    """True if an Elasticsearch-style filter mentions `field` anywhere."""
+    if isinstance(node, dict):
+        return any(key == field or _filter_names_field(value, field) for key, value in node.items())
+    if isinstance(node, list):
+        return any(_filter_names_field(item, field) for item in node)
+    return False
+
+
 def kb_search(
     query: str,
     max_results: int | None = None,
@@ -359,6 +368,10 @@ def kb_search(
                 sort correctly for zero-padded or ISO-8601 values; and `must_not`
                 also excludes documents that lack the field entirely.
                 Anything unsupported is reported as an error, not matched silently.
+                Figures (doc_type image) are left out unless the filter names
+                doc_type: their descriptions are part of their documents' text
+                anyway. To search figures themselves, filter
+                {"term": {"doc_type": "image"}} and fetch one with kb_get_image.
         rerank: True to force cross-encoder reranking, False to disable. Omit to let
                 the server decide.
 
@@ -437,6 +450,15 @@ def kb_search(
                 # queries — keyed on the chunk's own strategy rather than its
                 # parent document's doc_type.
                 chunk_strategy_boost = route.chunk_strategy_boost
+
+        # Image records are left out unless the caller filters on doc_type or
+        # the router reads the query as a figure question (and boosts them):
+        # each figure's description is inlined in its parent's text, so the
+        # parent already matches, and image chunks otherwise crowd text results.
+        if not _filter_names_field(filter_dict, "doc_type") and not (doc_type_boost or {}).get("image"):
+            no_images = {"term": {"doc_type": "image"}}
+            filter_dict = ({"bool": {"must": [filter_dict], "must_not": [no_images]}} if filter_dict
+                           else {"bool": {"must_not": [no_images]}})
 
         # Build search kwargs
         search_kwargs = dict(
