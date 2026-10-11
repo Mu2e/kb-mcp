@@ -159,7 +159,8 @@ def _classify_one(client, model: str, row: Dict[str, Any]) -> Dict[str, Any]:
     data = json.loads(match.group(0))
     if not isinstance(data.get("decorative"), bool):
         raise ValueError(f"no decorative flag in answer: {content[:120]!r}")
-    return {"decorative": data["decorative"], "what": str(data.get("what") or "").strip()}
+    return {"decorative": data["decorative"], "what": str(data.get("what") or "").strip(),
+            "usage": getattr(response, "usage", None)}
 
 
 def classify_candidates(min_copies: int = 3, limit: Optional[int] = None,
@@ -192,6 +193,7 @@ def classify_images(min_copies: int = 3, limit: Optional[int] = None, model: Opt
     """
     from ..config import get_parser_config
     from ..llm.llm import get_openai_client
+    from ..llm.usage import STAGE_IMAGE_CLASSIFICATION, UsageAccumulator, record_llm_usage
 
     model = model or get_parser_config()["image_description_model"]
     rows = classify_candidates(min_copies=min_copies, limit=limit, include_decided=include_decided)
@@ -207,8 +209,12 @@ def classify_images(min_copies: int = 3, limit: Optional[int] = None, model: Opt
 
     results = {"candidates": len(rows), "decorative": 0, "content": 0, "errors": 0, "model": model,
                "first_error": None}
+    tokens = UsageAccumulator()
     with ThreadPoolExecutor(max_workers=max(1, concurrency)) as pool:
         for row, answer, error in pool.map(work, rows):
+            if answer is not None:
+                record_llm_usage(answer.get("usage"), stage=STAGE_IMAGE_CLASSIFICATION, model=model,
+                                 accumulator=tokens, meta={"image_hash": row["image_hash"]})
             if error is not None:
                 results["errors"] += 1
                 results["first_error"] = results["first_error"] or f"{type(error).__name__}: {error}"
@@ -226,6 +232,8 @@ def classify_images(min_copies: int = 3, limit: Optional[int] = None, model: Opt
             results["decorative" if answer["decorative"] else "content"] += 1
             if progress:
                 progress(row, answer)
+    results["tokens"] = tokens.summary()
+    logger.info(f"Image classification tokens — {tokens.format_summary()}")
     return results
 
 

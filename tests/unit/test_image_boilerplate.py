@@ -244,8 +244,9 @@ def test_classifier_answers_are_stored_but_not_over_a_review(db, monkeypatch):
 
     add_deck(db, 101, [(LOGO, LOGO_DESC)] * 3 + [(b"plot", "A plot.")] * 3)
     images.refresh_registry()
-    answers = {LOGO_DESC: {"decorative": True, "what": "Fermilab logo"},
-               "A plot.": {"decorative": False, "what": "rate plot"}}
+    used = {"prompt_tokens": 400, "completion_tokens": 20, "total_tokens": 420}
+    answers = {LOGO_DESC: {"decorative": True, "what": "Fermilab logo", "usage": used},
+               "A plot.": {"decorative": False, "what": "rate plot", "usage": used}}
     monkeypatch.setattr(images, "_classify_one", lambda client, model, row: answers[row["description"]])
     import kb_mcp.llm.llm as llm
     monkeypatch.setattr(llm, "get_openai_client", lambda model: object())
@@ -255,6 +256,10 @@ def test_classifier_answers_are_stored_but_not_over_a_review(db, monkeypatch):
     logo = db.get(ImageHash, boilerplate.image_hash(LOGO))
     db.refresh(logo)
     assert (logo.decorative, logo.label, logo.decided_by) == (True, "decorative: Fermilab logo", "llm")
+    from kb_mcp.kb.db_models import LLMUsage
+    rows = db.query(LLMUsage).filter(LLMUsage.stage == "image_classification").all()
+    assert len(rows) == 2 and sum(r.prompt_tokens for r in rows) == 800
+    assert result["tokens"]["totals"]["prompt_tokens"] == 800
 
 
 def test_apply_with_parents_demotes_then_restores(db):

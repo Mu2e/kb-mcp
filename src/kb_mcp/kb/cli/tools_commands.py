@@ -1532,6 +1532,10 @@ def cmd_images_classify(args):
                              progress=progress)
     print(f"Classified {result['candidates']} image(s) with {result['model']}: "
           f"{result['decorative']} decorative, {result['content']} content, {result['errors']} error(s).")
+    tokens = (result.get("tokens") or {}).get("totals") or {}
+    if tokens:
+        print(f"Tokens: {tokens.get('prompt_tokens', 0):,} prompt, {tokens.get('completion_tokens', 0):,} "
+              f"completion (recorded in llm_usage, stage image_classification).")
     if result.get("first_error"):
         print(f"First error: {result['first_error']}")
     if result["decorative"]:
