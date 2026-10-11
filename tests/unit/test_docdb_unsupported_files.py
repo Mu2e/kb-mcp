@@ -6,6 +6,8 @@ come back with an error, so every cron run that saw them was marked
 """
 import io
 
+import pytest
+
 from kb_mcp.imports.docdb import DocDBSource
 
 
@@ -95,3 +97,33 @@ def test_html_file_reaches_add_document(monkeypatch, tmp_path):
     result = src.process_item({"id": 58263}, tmp_path, session=None)
     assert added == ["docdb-58263-ResamplerVD101Comparison.html"]
     assert result["error"] is None
+
+
+@pytest.mark.parametrize("disposition", [
+    'attachment; filename="notebook.html"',
+    'attachment; Filename="notebook.html"',
+    "attachment; filename*=UTF-8''notebook.html",
+])
+def test_html_attachment_header_variants(disposition):
+    src = DocDBSource(login=False)
+    resp = _Response({"Content-Type": "text/html", "Content-Disposition": disposition})
+    src.session = _Session(resp)
+    assert src._get_file(resp.url) is not None
+
+
+def test_unsupported_skip_still_waits_before_the_next_request(monkeypatch, tmp_path):
+    # An already-imported entry never reaches DocDB and owes no delay; an
+    # entry skipped for unsupported files fetched its metadata, so it does.
+    import contextlib
+    import kb_mcp.kb as kb_mod
+    from kb_mcp.imports import base
+
+    src = DocDBSource(login=False, delay=0.5)
+    results = iter([{"skipped": True}, {"skipped": True, "contacted_server": True}])
+    monkeypatch.setattr(src, "process_item", lambda item, output_dir, session: next(results))
+    session = type("S", (), {"commit": lambda self: None, "rollback": lambda self: None})()
+    monkeypatch.setattr(kb_mod, "get_db_session", lambda: contextlib.nullcontext(session))
+    sleeps = []
+    monkeypatch.setattr(base.time, "sleep", sleeps.append)
+    src._process_items_sequential([{"id": "1"}, {"id": "2"}], tmp_path, None, {"failures": []})
+    assert sleeps == [0.5]

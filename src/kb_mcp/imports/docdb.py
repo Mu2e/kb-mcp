@@ -21,6 +21,10 @@ from ..kb import add_document
 
 logger = logging.getLogger(__name__)
 
+# A `filename` parameter in Content-Disposition, plain or RFC 5987 extended
+# (`filename*=UTF-8''...`); parameter names are case-insensitive.
+_FILENAME_PARAM = re.compile(r"(?:^|;)\s*filename\*?\s*=", re.IGNORECASE)
+
 # DocDB renders its timestamps in Fermilab local time with no zone marker,
 # e.g. "10 Apr 2026, 16:28".
 _DOCDB_TZ = ZoneInfo("America/Chicago")
@@ -346,7 +350,7 @@ class DocDBSource(Source):
         # An HTML body is normally the SSO login page, but an attached .html
         # file (e.g. an exported notebook) is HTML too. DocDB names a real
         # attachment in Content-Disposition; the login redirect does not.
-        is_attachment = "filename=" in response.headers.get("Content-Disposition", "")
+        is_attachment = bool(_FILENAME_PARAM.search(response.headers.get("Content-Disposition", "")))
         if "text/html" in content_type and not is_attachment:
             logger.warning(f"Got HTML instead of file from {url} — session may have expired")
             return None
@@ -680,6 +684,9 @@ class DocDBSource(Source):
                 "num_documents": 0,
                 "parsed": False,
                 "skipped": True,
+                # Unlike an already-imported entry, this one fetched its
+                # metadata, so the importer must still wait before the next.
+                "contacted_server": True,
                 "error": None,
             }
         return {
