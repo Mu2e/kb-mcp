@@ -257,7 +257,7 @@ def test_classifier_answers_are_stored_but_not_over_a_review(db, monkeypatch):
     assert (logo.decorative, logo.label, logo.decided_by) == (True, "decorative: Fermilab logo", "llm")
 
 
-def test_apply_demotes_then_restores(db):
+def test_apply_with_parents_demotes_then_restores(db):
     from kb_mcp.kb.db_models import Document
     from kb_mcp.kb.embedding.db_models import Chunk
     from kb_mcp.kb.images import apply_image_decisions, decide_images, refresh_registry
@@ -273,12 +273,12 @@ def test_apply_demotes_then_restores(db):
     decide_images([boilerplate.image_hash(LOGO)], decorative=True, what="Fermilab logo")
     db.expire_all()           # the registry was written through other sessions
 
-    dry = apply_image_decisions(apply=False, session=db)
+    dry = apply_image_decisions(apply=False, parents=True, session=db)
     assert (dry["demote_images"], dry["parents"]) == (2, 2) and dry["chars_saved"] > 0
     db.refresh(parent)
     assert parent.text == original_text                              # dry run changed nothing
 
-    done = apply_image_decisions(apply=True, rechunk=False, session=db)
+    done = apply_image_decisions(apply=True, parents=True, rechunk=False, session=db)
     assert (done["demote_images"], done["parents"]) == (2, 2)
     db.refresh(parent)
     db.refresh(logo_image)
@@ -291,12 +291,38 @@ def test_apply_demotes_then_restores(db):
     assert apply_image_decisions(apply=False, session=db)["demote_images"] == 0     # idempotent
 
     decide_images([boilerplate.image_hash(LOGO)], decorative=False)
-    restored = apply_image_decisions(apply=True, rechunk=False, session=db)
+    restored = apply_image_decisions(apply=True, parents=True, rechunk=False, session=db)
     assert restored["restore_images"] == 2
     db.refresh(parent)
     db.refresh(logo_image)
     assert parent.text == original_text
     assert logo_image.text == f"nearby\n\n{LOGO_DESC}" and "boilerplate" not in logo_image.meta
+
+
+def test_apply_default_leaves_parents_alone(db):
+    from kb_mcp.kb.db_models import Document
+    from kb_mcp.kb.embedding.db_models import Chunk
+    from kb_mcp.kb.images import apply_image_decisions, decide_images, refresh_registry
+
+    parent = add_deck(db, 101, [(LOGO, LOGO_DESC), (b"plot", "A plot.")])
+    original_text = parent.text
+    logo_image = db.query(Document).filter(Document.doc_id == "101-talk.pdf-_page_1_Figure_1.png").one()
+    for doc_id, strategy in ((parent.id, "tokens_512_51"), (logo_image.id, "image")):
+        db.add(Chunk(document_id=doc_id, text="chunk", chunk_index=0, chunk_strategy=strategy))
+    db.commit()
+    refresh_registry()
+    decide_images([boilerplate.image_hash(LOGO)], decorative=True, what="Fermilab logo")
+    db.expire_all()
+
+    dry = apply_image_decisions(apply=False, session=db)
+    assert (dry["demote_images"], dry["parents"], dry["chars_saved"]) == (1, 0, 0)
+    done = apply_image_decisions(apply=True, session=db)
+    assert (done["demote_images"], done["parents"], done["chunks_dropped"], done["rechunked"]) == (1, 0, 1, 0)
+    db.refresh(parent)
+    db.refresh(logo_image)
+    assert parent.text == original_text
+    assert logo_image.text == "decorative: Fermilab logo"
+    assert {c.chunk_strategy for c in db.query(Chunk)} == {"tokens_512_51"}   # only the logo's chunk went
 
 
 def test_record_sweep_skips_decorative_images(db, monkeypatch):

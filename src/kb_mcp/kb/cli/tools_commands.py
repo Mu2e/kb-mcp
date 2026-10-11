@@ -1569,22 +1569,24 @@ def cmd_images_decide(args):
 
 
 def cmd_images_apply(args):
-    """Demote/restore image records and their parents' inlined descriptions to match the registry."""
+    """Demote/restore image records (and, with --parents, their parents' inlined descriptions)."""
     from ..images import apply_image_decisions
 
-    result = apply_image_decisions(apply=args.apply, hashes=args.hash or None, rechunk=not args.no_rechunk,
-                                   limit_parents=args.limit_parents)
+    result = apply_image_decisions(apply=args.apply, hashes=args.hash or None, parents=args.parents,
+                                   rechunk=not args.no_rechunk, limit_parents=args.limit_parents)
     verb = "Demoted" if args.apply else "Would demote"
-    print(f"{verb} {result['demote_images']} image record(s), restore {result['restore_images']}; "
-          f"{result['parents']} parent document(s), {result['chars_saved']:,} characters of descriptions removed"
-          + ("" if args.apply else " (counted over up to 2000 parents)") + ".")
+    print(f"{verb} {result['demote_images']} image record(s), restore {result['restore_images']}"
+          + (f"; {result['parents']} parent document(s), {result['chars_saved']:,} characters of descriptions "
+             f"removed" + ("" if args.apply else " (counted over up to 2000 parents)") if args.parents
+             else "; parent texts left as they are (--parents to rewrite and re-chunk them)") + ".")
     if result["restore_missing"]:
         print(f"{result['restore_missing']} image(s) marked as content were demoted at parse time and have no "
               f"description to restore; re-parse their documents.")
     for ex in result["examples"]:
         print(f"  e.g. {ex['action']} {ex['image']}: {ex['alt']}")
     if args.apply:
-        print(f"Dropped {result['chunks_dropped']} chunk(s); re-chunked {result['rechunked']} parent(s)"
+        print(f"Dropped {result['chunks_dropped']} chunk(s)"
+              + (f"; re-chunked {result['rechunked']} parent(s)" if args.parents else "")
               + (f", {result['rechunk_errors']} failed (the next embedding sweep retries)"
                  if result["rechunk_errors"] else "") + ".")
     else:
@@ -2120,8 +2122,11 @@ def setup_commands(subparsers):
     images_decide.set_defaults(func=cmd_images_decide)
 
     images_apply = images_subparsers.add_parser(
-        "apply", help="Demote/restore image records and parent texts to match the registry (dry run by default)")
+        "apply", help="Demote/restore image records to match the registry (dry run by default)")
     images_apply.add_argument("--apply", action="store_true", help="Change the documents")
+    images_apply.add_argument("--parents", action="store_true",
+                              help="Also swap the inlined descriptions in parent texts for the label and "
+                                   "re-chunk/re-embed those parents")
     images_apply.add_argument("--hash", action="append", help="Only this image hash (repeatable)")
     images_apply.add_argument("--limit-parents", type=int, help="At most this many parent documents")
     images_apply.add_argument("--no-rechunk", action="store_true",

@@ -309,12 +309,19 @@ def _drop_text_chunks(session, document_id: str) -> int:
 
 
 def apply_image_decisions(apply: bool = False, hashes: Optional[Iterable[str]] = None,
-                          rechunk: bool = True, limit_parents: Optional[int] = None,
-                          session=None) -> Dict[str, Any]:
-    """Make image records and parent texts match the registry's decisions.
+                          parents: bool = False, rechunk: bool = True,
+                          limit_parents: Optional[int] = None, session=None) -> Dict[str, Any]:
+    """Make image records (and optionally parent texts) match the registry's decisions.
 
     Demotes images whose hash is decided decorative and restores demoted
     images whose hash is now decided as content. Dry run unless `apply`.
+
+    By default only the image records change: a demoted image loses its
+    chunks, so its copies stop showing up as separate search results. The
+    parents keep the full description inlined in their text, and their
+    chunks are untouched. With `parents`, the inline description is swapped
+    for the label too, and each changed parent is re-chunked and re-embedded
+    (`rechunk`) -- far more work, for the smaller gain of leaner parent chunks.
     """
     from .embedding.db_models import Chunk
 
@@ -360,6 +367,11 @@ def apply_image_decisions(apply: bool = False, hashes: Optional[Iterable[str]] =
             for doc, action, _ in items:
                 result["demote_images" if action == "demote" else "restore_images"] += 1
         if not apply:
+            for parent_id in parent_ids[:5]:
+                doc, action, alt = changes[parent_id][0]
+                result["examples"].append({"image": doc.doc_id, "action": action, "alt": alt[:120]})
+            if not parents:
+                return result
             result["parents"] = len(parent_ids)
             for parent in session.query(Document).options(defer(Document.binary)).filter(
                     Document.id.in_(parent_ids[:2000])):
@@ -367,9 +379,6 @@ def apply_image_decisions(apply: bool = False, hashes: Optional[Iterable[str]] =
                 for doc, _, alt in changes[parent.id]:
                     new_text, _ = replace_inline_description(new_text, doc.doc_id, alt)
                 result["chars_saved"] += len(parent.text or "") - len(new_text)
-            for parent_id in parent_ids[:5]:
-                doc, action, alt = changes[parent_id][0]
-                result["examples"].append({"image": doc.doc_id, "action": action, "alt": alt[:120]})
             return result
 
         for parent_id, items in changes.items():
@@ -393,6 +402,8 @@ def apply_image_decisions(apply: bool = False, hashes: Optional[Iterable[str]] =
                 result["chunks_dropped"] += session.query(Chunk).filter(
                     Chunk.document_id == doc.id).delete(synchronize_session=False)
 
+            if not parents:
+                continue
             parent = session.get(Document, parent_id) if parent_id else None
             if parent is None or not parent.text:
                 continue
