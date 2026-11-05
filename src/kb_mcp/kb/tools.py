@@ -192,9 +192,13 @@ def ingest(
         text_documents = [doc for doc in docs if doc.doc_type != "image"]
         image_documents = [doc for doc in docs if doc.doc_type == "image"]
 
-        # Step 2: Generate summaries (if requested)
+        # Step 2: Generate summaries (if requested). Tables are chunked and
+        # embedded below but not summarized: their summaries are never turned
+        # into summary chunks, and each one costs an LLM call.
         if generate_summary and text_documents:
             for doc in text_documents:
+                if doc.doc_type == "table":
+                    continue
                 try:
                     doc.generate_summary(
                         include_title=True,
