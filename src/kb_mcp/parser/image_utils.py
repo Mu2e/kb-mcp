@@ -46,6 +46,63 @@ def resize_image(img, max_dim: Optional[int] = 500):
     return img.resize((new_width, new_height), Image.Resampling.LANCZOS)
 
 
+def shrink_for_vision(image_bytes: bytes, max_dim: int = 1280, max_bytes: int = 800_000,
+                      quality: int = 80) -> bytes:
+    """Return image bytes small enough to send to a vision endpoint.
+
+    Hosted vision endpoints reject or fail on very large payloads (ALCF answers
+    HTTP 500/413 for 8-20 MB figures), and a description does not need the
+    original resolution. Images that are already small are returned untouched.
+    Larger ones are scaled so the long side is at most ``max_dim`` and
+    re-encoded as JPEG, then shrunk further until they fit ``max_bytes``.
+
+    Never raises: if the bytes cannot be decoded or Pillow is missing, the
+    original bytes are returned and the endpoint decides.
+
+    Args:
+        image_bytes: Original image bytes.
+        max_dim: Longest allowed side in pixels. 0 or None disables shrinking.
+        max_bytes: Target upper bound for the encoded size. 0 or None disables.
+        quality: Starting JPEG quality.
+    """
+    if not image_bytes or not HAS_PIL or not (max_dim or max_bytes):
+        return image_bytes
+    try:
+        img = Image.open(io.BytesIO(image_bytes))
+        img.load()
+        long_side = max(img.size)
+        too_big_dim = bool(max_dim) and long_side > max_dim
+        too_big_bytes = bool(max_bytes) and len(image_bytes) > max_bytes
+        if not (too_big_dim or too_big_bytes):
+            return image_bytes
+
+        if img.mode in ("RGBA", "LA", "P"):
+            rgba = img.convert("RGBA")
+            background = Image.new("RGB", rgba.size, (255, 255, 255))
+            background.paste(rgba, mask=rgba.split()[-1])
+            img = background
+        elif img.mode != "RGB":
+            img = img.convert("RGB")
+
+        dim = min(max_dim, long_side) if max_dim else long_side
+        q = quality
+        out = image_bytes
+        for _ in range(5):
+            resized = resize_image(img, dim)
+            buf = io.BytesIO()
+            resized.save(buf, format="JPEG", quality=q, optimize=True)
+            out = buf.getvalue()
+            if not max_bytes or len(out) <= max_bytes:
+                break
+            dim = int(dim * 0.75)
+            q = max(55, q - 8)
+        logger.debug("Shrunk image for vision: %d -> %d bytes", len(image_bytes), len(out))
+        return out
+    except Exception as e:  # undecodable, truncated, unsupported mode ...
+        logger.warning("Could not shrink image for vision (%s); sending original", e)
+        return image_bytes
+
+
 def image_to_base64(img, format: Optional[str] = None) -> str:
     """Convert PIL image to base64 string, preserving format when possible.
     
