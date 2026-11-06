@@ -7,7 +7,8 @@ from typing import List, Optional
 from .db_models import EvalDataset, EvalAudit
 from ..documents import get
 from ..database import get_db_session
-from ...llm import get_openai_client
+from ...eval_utils.qa_generation import QUESTION_CRITERIA
+from ...llm import STAGE_EVAL_AUDIT, get_openai_client, parse_json_reply, record_llm_usage
 from ...config import get_eval_config
 from ..database import get_db_session
 
@@ -91,7 +92,7 @@ def audit_question(
 
     Args:
         question_id: ID of the question to audit
-        model: Optional model name (defaults to EVAL_GEN_MODEL env var)
+        model: Optional model name (defaults to EVAL_AUDIT_MODEL env var)
         auditor_name: Name to record for this audit
         session: Database session
 
@@ -122,7 +123,7 @@ def audit_question(
         # Get model
         if model is None:
             eval_config = get_eval_config()
-            model = eval_config['gen_model']
+            model = eval_config['audit_model']
 
         client = get_openai_client(model)
 
@@ -132,25 +133,7 @@ def audit_question(
 Question: {question}
 {source_context}
 
-A good evaluation question must satisfy ALL of the following criteria:
-
-1. **Self-contained**: The question makes sense without reading the source document. It must not rely on implicit context like "the dewar", "the module", "Table 3", "the klystron mentioned above", or "the device described earlier". A reader with general HEP knowledge should understand what is being asked.
-
-2. **Externally motivated**: This is a question someone working on or studying the experiment would plausibly ask from the outside — about physics, detector design, computing systems, experimental methods, or engineering choices. It is NOT a reading-comprehension quiz on one specific document.
-
-3. **Answerable from the knowledge base**: The answer should be findable in technical documents about the experiment (detector notes, technical reports, proceedings). It should have a specific, factual answer.
-
-4. **Well-formed**: Clear, grammatically correct, and specific enough to have a definite answer.
-
-Examples of GOOD questions:
-- "What gas mixture is used in the Mu2e straw tracker?"
-- "What is the readout scheme for the BaBar electromagnetic calorimeter?"
-- "What clock frequency does the ATLAS Level-1 trigger operate at?"
-
-Examples of BAD questions (fail self-containedness):
-- "What is the maximum voltage of the forty feedthroughs in the dewar?" (assumes knowledge of which dewar)
-- "What range of insertion trials is shown in Table 3?" (pure document reference)
-- "What material is used for the component described in section 2.3?" (document-internal reference)
+""" + QUESTION_CRITERIA.replace("{", "{{").replace("}", "}}") + """
 
 Respond with ONLY a valid JSON object:
 {{
@@ -189,19 +172,16 @@ Respond with ONLY a valid JSON object:
             ],
             response_format={"type": "json_object"}
         )
+        record_llm_usage(response.usage, stage=STAGE_EVAL_AUDIT, model=model,
+                         meta={"question_id": question_id})
 
         # Parse response
         content = response.choices[0].message.content.strip()
         try:
-            result = json.loads(content)
-        except json.JSONDecodeError:
-            # Strip markdown code fences if present and retry
-            cleaned = content.strip("`").removeprefix("json").strip()
-            try:
-                result = json.loads(cleaned)
-            except json.JSONDecodeError as e:
-                logger.error(f"Failed to parse audit JSON for question {question_id}: {e}\nContent: {content}")
-                result = {"is_valid": False, "comments": f"Audit failed: malformed LLM response"}
+            result = parse_json_reply(content)
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse audit JSON for question {question_id}: {e}\nContent: {content}")
+            result = {"is_valid": False, "comments": f"Audit failed: malformed LLM response"}
 
         is_valid = result.get("is_valid", False)
         comments = result.get("comments", "")

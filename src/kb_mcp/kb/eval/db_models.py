@@ -505,16 +505,20 @@ def compute_generation_hash(
     source_type: str,
     prompt: Optional[str],
     meta: Optional[Dict],
+    name: Optional[str] = None,
 ) -> str:
     """Compute deterministic SHA256 hash of generation identifying fields.
     
-    Note: Only includes meta.personas (if present), not the full meta dict.
-    Prompt is excluded from hash as it may vary without changing generation identity.
+    Note: Only includes meta.personas and meta.model (if present), not the full
+    meta dict. Prompt is excluded from hash as it may vary without changing
+    generation identity. The model is included because questions from two
+    generators are two question sets to compare, not one; the name, when
+    given, because naming a generation asks for that generation.
     """
-    # Extract only personas from meta for hashing
     meta_for_hash = {}
-    if meta and "personas" in meta:
-        meta_for_hash["personas"] = meta["personas"]
+    for key in ("personas", "model"):
+        if meta and meta.get(key) is not None:
+            meta_for_hash[key] = meta[key]
     
     hash_data = {
         "generation_type": generation_type,
@@ -523,6 +527,8 @@ def compute_generation_hash(
         "source_type": source_type,
         "meta": meta_for_hash,
     }
+    if name:
+        hash_data["name"] = name
     hash_string = json.dumps(hash_data, sort_keys=True, separators=(',', ':'))
     return hashlib.sha256(hash_string.encode('utf-8')).hexdigest()
 
@@ -534,6 +540,7 @@ def get_or_create_eval_generation(
     source_type: str = "text",
     prompt: Optional[str] = None,
     meta: Optional[Dict] = None,
+    name: Optional[str] = None,
     session: Optional[Session] = None,
 ) -> EvalGeneration:
     """Get existing or create new EvalGeneration using database-intrinsic content hash."""
@@ -542,7 +549,7 @@ def get_or_create_eval_generation(
     with get_db_session(session) as session:
         # Compute content hash from all identifying fields
         content_hash = compute_generation_hash(
-            generation_type, generation_method, source_id, source_type, prompt, meta or {}
+            generation_type, generation_method, source_id, source_type, prompt, meta or {}, name
         )
 
         # Query by hash (uses unique index)
@@ -556,6 +563,7 @@ def get_or_create_eval_generation(
 
         # Create new
         generation = EvalGeneration(
+            name=name,
             generation_type=generation_type,
             generation_method=generation_method,
             source_id=source_id,
@@ -641,7 +649,9 @@ def get_eval_questions(
         question_id: Optional question ID to retrieve specific question
         generation_id: Optional filter by generation
         source_document_id: Optional filter by source document
-        audit_filter: Optional audit criteria (e.g., {"is_valid": True, "audit_type": "human_review"})
+        audit_filter: Optional audit criteria (e.g., {"is_valid": True, "audit_type": "human_review"}).
+            {"strict": True} instead selects questions with a valid and no invalid
+            audit, or whose latest human review is valid (what kb eval grid uses).
         limit: Optional limit on number of results
         offset: Optional offset for pagination
         session: Optional database session
@@ -667,8 +677,34 @@ def get_eval_questions(
         if source_document_id:
             query = query.filter(EvalDataset.source_document_id == source_document_id)
 
+        # Strict selection: usable only with a valid audit and no invalid one,
+        # unless a human reviewed it, in which case the latest human verdict
+        # decides. The plain filter below accepts a question if *any* audit
+        # matches, so an automated rejection (e.g. the overlap check) would be
+        # overridden by an LLM audit that passed it.
+        if audit_filter and audit_filter.get("strict"):
+            from sqlalchemy import and_, exists, not_, select
+
+            def _audit(*conds):
+                return exists().where(and_(EvalAudit.question_id == EvalDataset.id, *conds))
+
+            latest_human = (
+                select(EvalAudit.is_valid)
+                .where(EvalAudit.question_id == EvalDataset.id, EvalAudit.audit_type == "human_review")
+                .order_by(EvalAudit.created_time.desc())
+                .limit(1)
+                .scalar_subquery()
+            )
+            human_reviewed = _audit(EvalAudit.audit_type == "human_review")
+            automated_ok = and_(
+                _audit(EvalAudit.is_valid.is_(True)),
+                not_(_audit(EvalAudit.is_valid.is_(False))),
+            )
+            query = query.filter(
+                (human_reviewed & latest_human.is_(True)) | (not_(human_reviewed) & automated_ok)
+            )
         # Apply audit filter if provided
-        if audit_filter:
+        elif audit_filter:
             # Join with audit table and filter
             is_valid = audit_filter.get("is_valid")
             audit_type = audit_filter.get("audit_type")
