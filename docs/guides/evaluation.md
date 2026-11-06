@@ -1,155 +1,159 @@
 # Evaluation
 
-The evaluation module helps test and benchmark the quality of semantic search by generating synthetic questions from documents and measuring retrieval accuracy. See [database schema](database.md#evaluation) for details on how evaluation data is stored.
+The evaluation module measures how well the knowledge base answers questions: it
+generates questions from documents, filters them, answers them with one or more models
+in different modes, and scores the answers with an LLM judge. See
+[database schema](database.md#evaluation) for how evaluation data is stored.
 
-**Evaluation workflow:**
+**Workflow:**
 
-1. **[Generate](#1-generate-evaluation-dataset)** synthetic questions from documents using LLM-based strategies
-2. **[Audit](#2-audit-questions-optional)** (optional) - review and filter questions for quality
-3. **[Run](#3-run-evaluation)** evaluation runs to test retrieval accuracy
-4. **[View](#4-view-results)** results via web interface or programmatically
+1. **[Generate](#1-generate-questions)** questions from documents
+2. **[Audit](#2-audit-questions)** them (automatic overlap check, LLM audit, human review)
+3. **[Run](#3-run-evaluations)** evaluations -- usually as a [grid](#grid) over models, modes and judges
+4. **[Compare](#4-compare-and-report)** runs, list [source conflicts](#source-conflicts), build a report
 
-## 1. Generate Evaluation Dataset
+## Models and endpoints
 
-### CLI
+Every LLM step takes a model name (`--model`, `--judge-model`, `--answer-model`) or
+falls back to its setting: `EVAL_GEN_MODEL`, `EVAL_AUDIT_MODEL` (default: the judge
+model, so a generator never vets its own questions), `EVAL_JUDGE_MODEL`, and
+`EVAL_ANSWER_MODEL` (default `DEFAULT_LLM_MODEL`). Models are routed to endpoints with
+`OPENAI_BASE_URL_MODELS` / `OPENAI_API_KEY_MODELS`; keys may be a prefix such as
+`"argo:*"` to route a whole gateway. For ANL's Argo gateway, `scripts/argo-tunnel.sh start`
+keeps `argo-proxy` and an ssh forward to it running.
 
-```bash
-# Generate from source (default: 10 documents, 1 question each, keypoint method)
-kb eval generate --source-id inspire-hep
+Gateway refusals are never taken as answers: a reply carrying Argo's over-limit notice
+raises an error that stops the run, which can then be resumed (see [grid](#grid)).
 
-# Customize generation parameters
-kb eval generate --source-id inspire-hep --num-documents 10 --num-questions 1
-
-# Use persona method instead of keypoint
-kb eval generate --source-id inspire-hep --strategy persona
-
-# Process all documents (use with caution!)
-kb eval generate --source-id inspire-hep --num-documents 0
-```
-
-### Python
-
-```python
-from kb_mcp.kb.eval import generate_questions_from_source
-
-# Generate questions from inspire-hep source
-result = generate_questions_from_source(
-    source_id="inspire-hep",
-    num_documents=10,  # Default: 10 documents
-    num_questions_per_doc=1,  # Default: 1 question per document
-    generation_method="keypoint"  # Default: "keypoint"
-)
-
-generation_id = result["generation_id"]
-print(f"Generated {result['num_questions_generated']} questions")
-print(f"Generation ID: {generation_id}")
-```
-
-## 2. Audit Questions (Optional)
-
-Review and filter generated questions before running evaluations.
-
-### CLI
+## 1. Generate questions
 
 ```bash
-# Automated LLM audit (recommended)
-kb eval audit --generation-id <generation_id> --llm
+# From explicit documents (one documents.id per line, '#' comments allowed)
+kb eval generate --name my-gen --model gpt-oss:120b --strategy keypoint \
+    --num-questions 2 --doc-ids-file docs.txt
 
-# Use specific model for auditing
-kb eval audit --generation-id <generation_id> --llm --model gpt-4
+# A second generator on exactly the same documents, for comparison
+kb eval generate --name my-gen-gpt55 --model argo:gpt-5.5 --strategy keypoint \
+    --num-questions 2 --same-documents-as <generation_id>
 
-# Interactive human audit
-kb eval audit --generation-id <generation_id>
-
-# Audit more questions interactively
-kb eval audit --generation-id <generation_id> --limit 100
+# Random documents from a source
+kb eval generate --source-id mu2e-docdb --num-documents 10
 ```
 
-### Python
+The keypoint prompt shares its quality criteria with the auditor: questions must be
+self-contained, externally motivated, answerable, well-formed, and **not worded from the
+document**. Each question stores a reference answer and its wording overlap with the
+source; `kb eval overlap --generation-id <id>` reports overlap per question set. A
+generation's identity includes its model and name, so two generators never merge.
 
-```python
-from kb_mcp.kb.eval import get_unaudited_questions, audit_question
-
-# Get unaudited questions
-questions = get_unaudited_questions(generation_id=generation_id)
-
-# Audit using LLM
-for question in questions:
-    audit = audit_question(question_id=question.id, model="gpt-4")
-    print(f"Question {question.id}: {'Valid' if audit.is_valid else 'Invalid'}")
-```
-
-## 3. Run Evaluation
-
-### CLI
+## 2. Audit questions
 
 ```bash
-# Basic evaluation run (uses valid questions only)
-kb eval run --generation-id <generation_id> --name "my-eval-run" --max-results 5
+# Automatic: reject questions sharing > 40% of word pairs with their source
+kb eval audit --generation-id <id> --overlap-max 0.4 --limit 0
 
-# With LLM judge for answer quality assessment
-kb eval run --generation-id <generation_id> --name "with-judge" --use-judge --judge-model gpt-4
+# LLM audit against the shared criteria (EVAL_AUDIT_MODEL unless --model)
+kb eval audit --generation-id <id> --llm --model argo:claude-opus-5 --limit 0 --workers 6
 
-# Filter by audit type
-kb eval run --generation-id <generation_id> --name "llm-audited" --audit-type llm_judge
-
-# Use specific chunking strategy (e.g., only summary chunks)
-kb eval run --generation-id <generation_id> --name "summary-only" --chunking-strategy summary --audit-type llm_judge --use-judge
-
-# Include invalid questions
-kb eval run --generation-id <generation_id> --name "all-questions" --include-invalid
+# Interactive human review
+kb eval audit --generation-id <id>
 ```
 
-### Python
+Runs use **strict selection** by default in the grid (`--strict-audit` for `kb eval run`):
+a question is used only if it has a valid audit and no invalid one; a human review, if
+present, overrides the automatic audits.
 
-```python
-from kb_mcp.kb.eval import eval
+## 3. Run evaluations
 
-# Basic evaluation run
-result = eval(
-    name="my-eval-run",
-    generation_id=generation_id,
-    max_results=10
-)
-print(f"Hit rate: {result['num_hits']}/{result['num_questions']}")
+### Answer modes
 
-# With specific chunking strategy
-result = eval(
-    name="summary-chunks-only",
-    generation_id=generation_id,
-    chunking_strategy="summary",
-    max_results=10
-)
+| `--search-type` | What answers | Notes |
+|---|---|---|
+| `semantic`, `fulltext`, `hybrid` | -- (retrieval only) | hit = source document retrieved |
+| `llm_only` | the model alone | no knowledge base |
+| `rag` | one real `kb_search`, then one answer | what a client's first search achieves |
+| `agentic` | the model with the real MCP tools | `kb_search` and `kb_get`, server instructions, `research_question` prompt |
 
-# With audit filters and LLM judge
-result = eval(
-    name="llm-audited-with-judge",
-    generation_id=generation_id,
-    audit_filters={"is_valid": True, "audit_type": "llm_judge"},
-    use_llm_judge=True,
-    max_results=5
-)
+Agentic runs call the MCP tools in-process (same tool definitions and results as a
+connected client, without transport/auth). Limits: `EVAL_AGENTIC_MAX_TURNS` (10) and
+`EVAL_AGENTIC_TOOL_RESULT_MAX_CHARS` (100000), overridable per run with `--max-turns` and
+`--tool-result-max-chars`. An empty reply (no text, no tool call) gets a nudge rather than
+being taken as the answer; nudges are recorded in the trace.
+
+Retrieval is scored at two levels: **exact** (the source row) and **entry** (any file
+version or figure of the source's DocDB entry).
+
+### Grid
+
+```bash
+kb eval grid --prefix my-eval \
+    --generation-id <gen1> --generation-id <gen2> \
+    --search-type agentic --search-type rag --search-type llm_only \
+    --answer-model gpt-oss:120b --answer-model argo:claude-sonnet-5 \
+    --judge-model argo:gpt-5.5 --judge-model argo:claude-opus-5 \
+    --workers 4            # add --dry-run to see the plan first
 ```
 
-## 4. View Results
+Runs are named `<prefix>-<mode>-<answer model>-q<question set>-judge-<judge>[-v<N>]`.
+The grid is **resumable**: complete runs are skipped, and an interrupted run is
+continued in place (its answers are kept, only missing questions are answered). With
+several judges, answers are produced once and **re-judged** by the others. A newer judge
+prompt version re-judges existing answer runs instead of answering again.
 
-### Web Interface
+Single runs: `kb eval run ...`; re-judge one run: `kb eval rejudge --run-id <id> --judge-model <model>`.
 
-Access results via web interface:
+### Judge
 
-- Overview: `/web/eval`
-- Generation: `/web/eval/generation/{generation_id}`
-- Run details: `/web/eval/run/{run_id}`
-- Question details: `/web/eval/question/{question_id}`
-- Result details: `/web/eval/result/{result_id}`
+Answer-mode verdicts use judge prompt version 3 (recorded in each run's
+`judge_strategy` and name):
 
-### Python
+- Scoring is **strict against the reference answer**; extra correct detail is not
+  penalised. An answer giving both the reference value and a conflicting one, and noting
+  the disagreement, counts as correct.
+- Each verdict also records, in the result's `meta`, a **source relation**
+  (`matches_reference`, or a differing value attributed to a `newer_source`,
+  `older_source` or `conflicting_source` document), whether the answer acknowledges the
+  conflict, and the DocDB numbers the differing value is attributed to -- verified in
+  code (exists? newer or older than the question's source?).
+- A judge failure is stored as *not judged*, never as wrong; such runs count as
+  incomplete and are redone by the grid.
 
-```python
-from kb_mcp.kb.eval import get_summary_stats
+Version 2 accepted values from newer documents as correct and proved gameable; do not
+compare v2 accuracy with other versions.
 
-stats = get_summary_stats(run_id=run1['run_id'])
-print(f"Hit rate: {stats['hit_rate']:.2%}")
-print(f"Document hits: {stats['num_hits']}/{stats['num_questions']}")
-print(f"LLM judge hits: {stats['num_judge_hits']}/{stats['num_questions']}")
+## 4. Compare and report
+
+```bash
+kb eval compare --prefix my-eval                 # one row per run
+kb eval compare --prefix my-eval --per-question  # question x run verdict matrix
+kb logs tokens --stage eval_answer               # token use (tagged per run and question)
 ```
+
+The web UI's **Compare runs** page (`/web/eval/compare?prefix=my-eval`) shows the same
+table and a per-question matrix linking to each answer and conversation.
+
+### Source conflicts
+
+```bash
+kb eval conflicts --prefix my-eval [--json]
+```
+
+Lists questions whose answers differ from the reference because of another document,
+most corroborated first (several models citing the same existing newer document). These
+are candidates for an outdated reference -- input for human review, not verdicts.
+
+### Report
+
+`analysis/eval_report.py` (needs the `analysis` extra) writes a grid's numbers as LaTeX
+macros (`numbers.tex`), a `data.json`, and figures, for an internal note or slides:
+
+```bash
+python analysis/eval_report.py --prefix my-eval- --questions <gen1> --questions <gen2> --out <dir>
+```
+
+## Caveats
+
+- **Claude token counts through Argo are lower bounds**: argo-proxy's OpenAI-format usage
+  omits prompt-cache writes.
+- DocDB reports the same quantity differently over time, so reference answers age; see
+  [source conflicts](#source-conflicts).

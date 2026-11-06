@@ -13,17 +13,41 @@ from ..eval import (
     get_summary_stats,
 )
 from ..eval.db_models import get_eval_generation, get_eval_questions, get_eval_run
+from ...config import get_eval_config
+from ...eval_utils.judge import JUDGE_PROMPT_VERSION
 
 
 def cmd_eval_generate(args):
     """Generate evaluation questions from documents."""
     try:
-        if args.source_id:
+        num_questions = getattr(args, 'num_questions', 1) or 1
+        document_ids = list(args.doc_id or [])
+        if args.doc_ids_file:
+            with open(args.doc_ids_file) as fh:
+                document_ids += [line.split("#", 1)[0].strip() for line in fh if line.split("#", 1)[0].strip()]
+        if args.same_documents_as:
+            # Reuse another generation's documents, so two generators (or
+            # strategies) are compared on exactly the same material.
+            with get_db_session() as session:
+                questions = get_eval_questions(generation_id=args.same_documents_as, session=session)
+                document_ids += [q.source_document_id for q in questions if q.source_document_id]
+            document_ids = list(dict.fromkeys(document_ids))  # dedupe, keep order
+            if not document_ids:
+                print(f"Error: generation {args.same_documents_as} has no questions with a source document")
+                sys.exit(1)
+
+        if document_ids:
+            result = generate_questions_from_documents(
+                document_ids=document_ids,
+                num_questions_per_doc=num_questions,
+                generation_method=args.strategy,
+                model=args.model,
+                name=args.name,
+            )
+        elif args.source_id:
             # Use generate_questions_from_source when source_id is provided
             # Convert 0 to None to process all documents
             num_docs = None if args.num_documents == 0 else args.num_documents
-            # Ensure we have a valid num_questions value (default should be 1 from argparse)
-            num_questions = getattr(args, 'num_questions', 1) or 1
             result = generate_questions_from_source(
                 source_id=args.source_id,
                 num_documents=num_docs,
@@ -33,9 +57,7 @@ def cmd_eval_generate(args):
                 name=args.name,
             )
         else:
-            # For document-specific generation, we'd need document_ids
-            # This is not currently supported via CLI
-            print("Error: --source-id is required for question generation")
+            print("Error: one of --source-id, --doc-id, --doc-ids-file or --same-documents-as is required")
             print("  Example: kb eval generate --source-id inspire-hep")
             sys.exit(1)
 
@@ -51,8 +73,39 @@ def cmd_eval_generate(args):
         sys.exit(1)
 
 
+def _overlap_audit(args):
+    """Record an automated overlap_check audit for each question not yet checked."""
+    from ...eval_utils.overlap import question_overlap
+    from ..db_models import Document
+
+    questions = get_unaudited_questions(generation_id=args.generation_id, audit_type="overlap_check",
+                                        limit=None if args.limit == 0 else args.limit)
+    rejected = 0
+    for q in questions:
+        with get_db_session() as session:
+            doc = session.get(Document, q.source_document_id) if q.source_document_id else None
+            overlap = question_overlap(q.question, doc.text or "") if doc is not None else None
+        if overlap is None:
+            continue
+        ok = overlap["bigram_overlap"] <= args.overlap_max
+        rejected += not ok
+        add_audit(
+            question_id=q.id,
+            is_valid=ok,
+            audit_type="overlap_check",
+            auditor_name="overlap_check",
+            comments=(f"bigram overlap {overlap['bigram_overlap']:.0%} "
+                      f"{'<=' if ok else '>'} {args.overlap_max:.0%}; longest copied phrase "
+                      f"{overlap['longest_shared_words']} words"),
+            meta={"overlap": overlap, "overlap_max": args.overlap_max},
+        )
+    print(f"Overlap check: {len(questions)} questions, {rejected} above {args.overlap_max:.0%} marked invalid")
+
+
 def cmd_eval_audit(args):
     """Audit evaluation questions."""
+    if args.overlap_max is not None:
+        return _overlap_audit(args)
     try:
         # Get unaudited questions (convert 0 to None for unlimited)
         limit = None if args.limit == 0 else args.limit
@@ -152,12 +205,25 @@ def cmd_eval_audit(args):
         sys.exit(1)
 
 
+def _agentic_meta(args):
+    """Agent-loop limits for an agentic run, stored on the run so it records them."""
+    if args.search_type != "agentic":
+        return None
+    eval_config = get_eval_config()
+    return {
+        "max_turns": args.max_turns or eval_config["agentic_max_turns"],
+        "tool_result_max_chars": args.tool_result_max_chars or eval_config["agentic_tool_result_max_chars"],
+    }
+
+
 def cmd_eval_run(args):
     """Run an evaluation."""
     try:
         # Build audit filters
         audit_filters = {}
-        if not args.include_invalid:
+        if args.strict_audit:
+            audit_filters["strict"] = True
+        elif not args.include_invalid:
             audit_filters["is_valid"] = True
         if args.audit_type:
             audit_filters["audit_type"] = args.audit_type
@@ -174,7 +240,9 @@ def cmd_eval_run(args):
         if args.use_judge:
             judge_strategy = {
                 "enabled": True,
-                "model": args.judge_model,
+                # Resolved here so the run records which model judged it.
+                "model": args.judge_model or get_eval_config()["judge_model"],
+                "prompt_version": JUDGE_PROMPT_VERSION,
             }
 
         # Determine rerank setting
@@ -198,6 +266,7 @@ def cmd_eval_run(args):
             judge_strategy=judge_strategy,
             use_llm_judge=args.use_judge,
             workers=args.workers,
+            meta=_agentic_meta(args),
             rerank=rerank,
         )
 
@@ -208,6 +277,9 @@ def cmd_eval_run(args):
         if stats['num_questions'] > 0:
             hit_rate = stats['num_hits'] / stats['num_questions']
             print(f"  Hit rate: {hit_rate:.2%}")
+            entry_hits = stats.get('num_entry_hits', 0)
+            print(f"  Entry-level hits (any file/figure of the source entry): {entry_hits} "
+                  f"({entry_hits / stats['num_questions']:.2%})")
         print(f"  Total time: {stats['total_time_seconds']:.1f}s")
         print(f"  Avg retrieval time: {stats['avg_retrieval_time_seconds']:.3f}s")
 
@@ -356,6 +428,182 @@ def cmd_eval_load_benchmark(args):
         sys.exit(1)
 
 
+def _source_cell(row):
+    """"newer/older/conflicting/acknowledged" counts, or "-" for judge prompt v1 runs."""
+    if row.get("newer_source") is None:
+        return "-"
+    return (f"{row['newer_source']}/{row['older_source']}/"
+            f"{row['conflicting_source']}/{row['acknowledges_conflict']}")
+
+
+def _print_compare_table(rows, strip_prefix=None):
+    """Print compare_runs() rows as a fixed-width table."""
+    def frac(n, d):
+        return f"{n}/{d}" if d else "-"
+
+    def opt(v, fmt="{}"):
+        return fmt.format(v) if v is not None else "-"
+
+    header = f"{'Run':<58}{'Q':>5}{'Exact':>9}{'Entry':>9}{'Judge':>9}{'Saw':>6}{'Open':>6}{'Limit':>6}{'Stop':>5}{'Ans s':>7}{'New/Old/Cnf/Ack':>17}{'Ans tok':>13}{'Jdg tok':>11}"
+    print(header)
+    print("-" * len(header))
+    for r in rows:
+        name = r["name"] or r["run_id"][:8]
+        if strip_prefix and name.startswith(strip_prefix):
+            name = name[len(strip_prefix):].lstrip("-") or name
+        n = r["questions"]
+        print(
+            f"{name[:57]:<58}{n:>5}"
+            f"{frac(r['exact_hits'], n):>9}{frac(r['entry_hits'], n) if r['entry_hits'] is not None else '-':>9}"
+            f"{frac(r['judge_correct'], r['judged']):>9}"
+            f"{opt(r['agent_saw_source']):>6}{opt(r['agent_opened_source']):>6}"
+            f"{opt(r['turn_limit']):>6}{opt(r['stopped']):>5}"
+            f"{opt(r['avg_answer_seconds'], '{:.0f}'):>7}"
+            f"{_source_cell(r):>17}"
+            f"{opt(r['answer_tokens'], '{:,}'):>13}{opt(r['judge_tokens'], '{:,}'):>11}"
+        )
+    print()
+    print("Exact: source row in the retrieved list; Entry: any file/figure of the source's DocDB entry;")
+    print("Judge: answers judged correct; Saw/Open: agent saw the source in a tool result / opened it with kb_get;")
+    print("Limit/Stop: agent hit the turn limit / was stopped by the endpoint (e.g. context overflow).")
+    print("New/Old/Cnf/Ack (judge v2+): answers whose value came from a newer source (counted correct) / an older")
+    print("source (wrong) / another source of unclear age (wrong unless both values given) / that note the conflict.")
+    print("For agentic and llm_only runs, Exact/Entry come from a separate search the agent never sees.")
+
+
+def cmd_eval_grid(args):
+    """Run every combination of question set, search type, answering model and judge."""
+    from ..eval.grid import run_grid
+
+    agentic_meta = None
+    if "agentic" in args.search_type:
+        eval_config = get_eval_config()
+        agentic_meta = {
+            "max_turns": args.max_turns or eval_config["agentic_max_turns"],
+            "tool_result_max_chars": args.tool_result_max_chars or eval_config["agentic_tool_result_max_chars"],
+        }
+    outcomes = run_grid(
+        prefix=args.prefix,
+        generation_ids=args.generation_id,
+        search_types=args.search_type,
+        answer_models=args.answer_model or [None],
+        judge_models=args.judge_model or [None],
+        max_results=args.max_results,
+        workers=args.workers,
+        run_meta=agentic_meta,
+        audit_filters=None if args.include_invalid else {"strict": True},
+        dry_run=args.dry_run,
+    )
+    for o in outcomes:
+        how = f"  ({o['how']})" if o.get("how", "run") != "run" else ""
+        print(f"{o['status']:>8}  {o['name']}{how}")
+    if args.dry_run:
+        return
+    print()
+    from ..eval.grid import compare_runs
+    _print_compare_table(compare_runs(name_prefix=args.prefix), strip_prefix=args.prefix)
+
+
+def cmd_eval_rejudge(args):
+    """Judge an existing run's answers again with another judge model."""
+    from ..eval.rejudge import rejudge_run
+
+    stats = rejudge_run(args.run_id, args.judge_model, name=args.name, workers=args.workers)
+    print(f"Re-judged {stats['num_questions']} answers as run {stats['name']}")
+    print(f"  Run ID: {stats['run_id']}")
+    if stats["num_questions"]:
+        print(f"  Judged correct: {stats['num_judge_hits']}/{stats['num_questions']} "
+              f"({stats['num_judge_hits'] / stats['num_questions']:.0%})")
+    print(f"  Total time: {stats['total_time_seconds']:.1f}s")
+
+
+def cmd_eval_compare(args):
+    """Show runs side by side."""
+    from ..eval.grid import compare_runs
+
+    if not args.prefix and not args.run_id:
+        print("Error: give --prefix and/or --run-id")
+        sys.exit(1)
+    rows = compare_runs(name_prefix=args.prefix, run_ids=args.run_id)
+    if not rows:
+        print("No runs found.")
+        return
+    if args.json:
+        import json
+        print(json.dumps(rows, indent=2))
+        return
+    _print_compare_table(rows, strip_prefix=args.prefix)
+    if args.per_question:
+        from ..eval.grid import per_question_matrix
+        for block in per_question_matrix(name_prefix=args.prefix, run_ids=args.run_id):
+            print()
+            print(f"Questions from {block['generation_name']} (hardest first; judge verdict, else entry retrieved):")
+            for i, run in enumerate(block["runs"], 1):
+                name = run["name"] or run["run_id"][:8]
+                if args.prefix and name.startswith(args.prefix):
+                    name = name[len(args.prefix):].lstrip("-")
+                print(f"  [{i}] {name}")
+            print("  " + " ".join(f"{i:>2}" for i in range(1, len(block["runs"]) + 1)) + "  question")
+            for row in block["rows"]:
+                marks = " ".join(f"{('✓' if c['ok'] else '✗') if c else '·':>2}" for c in row["cells"])
+                print(f"  {marks}  {row['question'][:100]}")
+
+
+def cmd_eval_conflicts(args):
+    """List questions whose answers differ from the reference because of another document."""
+    from ..eval.grid import conflict_findings
+
+    findings = conflict_findings(args.prefix)
+    if args.json:
+        import json
+        print(json.dumps(findings, indent=2, default=str))
+        return
+    if not findings:
+        print("No source conflicts flagged (needs runs judged with judge prompt v3 or later).")
+        return
+    print(f"{len(findings)} questions with answers that differ from the reference because of another document")
+    print("(most corroborated first; input for human review, not verdicts)\n")
+    for i, f in enumerate(findings[: args.limit or None], 1):
+        print(f"{i}. {f['question']}")
+        print(f"   reference: {f['reference_answer']}   [{f['reference_source']}]")
+        if f["models_citing_same_newer_doc"] > 1:
+            print(f"   ** {f['models_citing_same_newer_doc']} models cite the same existing newer document **")
+        for a in f["answers"]:
+            docs = ", ".join(f"{d['docdb']} ({d['age']}{'' if d['exists'] else ', NOT FOUND'})" for d in a["differing_docs"]) or "none named"
+            ack = ", notes the conflict" if a["acknowledges_conflict"] else ""
+            print(f"   - {a['answer_model']}: {a['source_relation']}{ack}; cites {docs}")
+        print()
+
+
+def cmd_eval_overlap(args):
+    """Report how much of each question's wording comes from its source document."""
+    from ...eval_utils.overlap import question_overlap
+    from ..db_models import Document
+
+    for gid in args.generation_id:
+        with get_db_session() as session:
+            generation = get_eval_generation(generation_id=gid, session=session)
+            questions = get_eval_questions(generation_id=gid, session=session) or []
+            scored = []
+            for q in questions:
+                doc = session.get(Document, q.source_document_id) if q.source_document_id else None
+                if doc is not None:
+                    scored.append((question_overlap(q.question, doc.text or ""), q.question))
+        name = (generation.name if generation else None) or gid[:8]
+        if not scored:
+            print(f"{name}: no questions with a source document")
+            continue
+        n = len(scored)
+        mean_bigram = sum(o["bigram_overlap"] for o, _ in scored) / n
+        mean_longest = sum(o["longest_shared_words"] for o, _ in scored) / n
+        copied = sum(1 for o, _ in scored if o["longest_shared_words"] >= args.phrase_words)
+        print(f"{name}: {n} questions | mean bigram overlap {mean_bigram:.0%} | "
+              f"mean longest copied phrase {mean_longest:.1f} words | "
+              f"{copied} copy a phrase of {args.phrase_words}+ words")
+        for o, text in sorted(scored, key=lambda x: (-x[0]["longest_shared_words"], -x[0]["bigram_overlap"]))[:args.show]:
+            print(f"   {o['bigram_overlap']:>4.0%} {o['longest_shared_words']:>2}w  {text[:110]}")
+
+
 def setup_commands(subparsers):
     """Set up evaluation commands."""
     # Eval command
@@ -370,7 +618,9 @@ def setup_commands(subparsers):
     eval_generate_parser.add_argument("--strategy", default="keypoint", choices=["keypoint", "persona", "agentic"], help="Question generation strategy")
     eval_generate_parser.add_argument("--model", help="LLM model to use for generation")
     eval_generate_parser.add_argument("--source-id", help="Filter to specific source")
-    eval_generate_parser.add_argument("--doc-id", help="Filter to specific document")
+    eval_generate_parser.add_argument("--doc-id", action="append", metavar="UUID", help="Generate from this document (documents.id); repeatable")
+    eval_generate_parser.add_argument("--doc-ids-file", metavar="PATH", help="File with one document id (documents.id) per line; '#' starts a comment")
+    eval_generate_parser.add_argument("--same-documents-as", metavar="GENERATION_ID", help="Generate from the same documents as an earlier generation")
     eval_generate_parser.add_argument("--generation-id", help="Use existing generation ID (or create new if not exists)")
     eval_generate_parser.set_defaults(func=cmd_eval_generate)
 
@@ -379,7 +629,8 @@ def setup_commands(subparsers):
     eval_audit_parser.add_argument("--generation-id", help="Filter to specific generation")
     eval_audit_parser.add_argument("--limit", type=int, default=20, help="Max questions to audit")
     eval_audit_parser.add_argument("--llm", action="store_true", help="Use LLM for automated auditing instead of interactive")
-    eval_audit_parser.add_argument("--model", help="LLM model to use for auditing (if --llm)")
+    eval_audit_parser.add_argument("--model", help="LLM model to use for auditing (if --llm; default: EVAL_AUDIT_MODEL, else EVAL_JUDGE_MODEL)")
+    eval_audit_parser.add_argument("--overlap-max", type=float, metavar="FRACTION", help="Instead of an LLM/human audit, record an automated overlap_check audit: invalid when the question shares more than FRACTION of its word pairs with its source (e.g. 0.4); covers all unchecked questions unless --limit is given")
     eval_audit_parser.add_argument("--workers", type=int, default=1, metavar="N", help="Number of parallel LLM audit calls (default: 1, only applies with --llm)")
     eval_audit_parser.set_defaults(func=cmd_eval_audit)
 
@@ -389,6 +640,7 @@ def setup_commands(subparsers):
     eval_run_parser.add_argument("--description", help="Description for this run")
     eval_run_parser.add_argument("--search-type", default="semantic", choices=["semantic", "fulltext", "hybrid", "rag", "agentic", "llm_only"], help="Search/answer mode (default: semantic)")
     eval_run_parser.add_argument("--generation-id", help="Filter to questions from specific generation")
+    eval_run_parser.add_argument("--strict-audit", action="store_true", help="Use only questions with a valid and no invalid audit (a human review, if any, decides)")
     eval_run_parser.add_argument("--include-invalid", action="store_true", help="Include questions marked as invalid")
     eval_run_parser.add_argument("--audit-type", help="Filter by audit type (e.g., 'llm_judge', 'human_review')")
     eval_run_parser.add_argument("--embedding-name", help="Embedding model to use")
@@ -398,11 +650,60 @@ def setup_commands(subparsers):
     eval_run_parser.add_argument("--search-parser-name", help="Filter search to specific parser (e.g., 'marker', 'docling')")
     eval_run_parser.add_argument("--use-judge", action="store_true", help="Run LLM judge on results")
     eval_run_parser.add_argument("--judge-model", help="LLM model for judge (if --use-judge)")
-    eval_run_parser.add_argument("--answer-model", help="LLM model for answer generation in rag/agentic/llm_only modes (default: EVAL_GEN_MODEL)")
+    eval_run_parser.add_argument("--answer-model", help="LLM model for answer generation in rag/agentic/llm_only modes (default: EVAL_ANSWER_MODEL, else DEFAULT_LLM_MODEL)")
+    eval_run_parser.add_argument("--max-turns", type=int, metavar="N", help="agentic: max tool rounds before the agent must answer (default: EVAL_AGENTIC_MAX_TURNS, else 10)")
+    eval_run_parser.add_argument("--tool-result-max-chars", type=int, metavar="N", help="agentic: truncate each tool result to N chars, noting it for the model (default: EVAL_AGENTIC_TOOL_RESULT_MAX_CHARS, else 100000)")
     eval_run_parser.add_argument("--workers", type=int, default=1, metavar="N", help="Number of parallel question evaluations (default: 1)")
     eval_run_parser.add_argument("--rerank", action="store_true", help="Enable cross-encoder reranking")
     eval_run_parser.add_argument("--no-rerank", action="store_true", help="Disable cross-encoder reranking")
     eval_run_parser.set_defaults(func=cmd_eval_run)
+
+    # eval grid
+    eval_grid_parser = eval_subparsers.add_parser(
+        "grid", help="Run every combination of question set, search type, answer model and judge; skips runs that already have results")
+    eval_grid_parser.add_argument("--prefix", required=True, help="Run name prefix, e.g. pilot-20260927; each run is named <prefix>-<type>[-<model>]-q<set>[-judge-<judge>]")
+    eval_grid_parser.add_argument("--generation-id", action="append", required=True, help="Question set (generation) to evaluate; repeatable")
+    eval_grid_parser.add_argument("--search-type", action="append", required=True, choices=["semantic", "fulltext", "hybrid", "rag", "agentic", "llm_only"], help="Repeatable")
+    eval_grid_parser.add_argument("--answer-model", action="append", help="Answering model for rag/agentic/llm_only; repeatable (default: EVAL_ANSWER_MODEL)")
+    eval_grid_parser.add_argument("--judge-model", action="append", help="Judge model; repeatable, one run per judge (default: no judge)")
+    eval_grid_parser.add_argument("--max-results", type=int, default=10, help="Max search results to retrieve")
+    eval_grid_parser.add_argument("--max-turns", type=int, metavar="N", help="agentic: max tool rounds (default: EVAL_AGENTIC_MAX_TURNS, else 10)")
+    eval_grid_parser.add_argument("--tool-result-max-chars", type=int, metavar="N", help="agentic: per-tool-result cap (default: EVAL_AGENTIC_TOOL_RESULT_MAX_CHARS, else 100000)")
+    eval_grid_parser.add_argument("--workers", type=int, default=1, metavar="N", help="Parallel questions per run (default: 1)")
+    eval_grid_parser.add_argument("--include-invalid", action="store_true", help="Use every question, audited or not (default: only questions with a valid and no invalid audit)")
+    eval_grid_parser.add_argument("--dry-run", action="store_true", help="Only list the runs, marking which would be skipped")
+    eval_grid_parser.set_defaults(func=cmd_eval_grid)
+
+    # eval rejudge
+    eval_rejudge_parser = eval_subparsers.add_parser("rejudge", help="Judge an existing run's answers again with another judge (no new answers)")
+    eval_rejudge_parser.add_argument("--run-id", required=True, help="Answer-mode run (rag/agentic/llm_only) to re-judge")
+    eval_rejudge_parser.add_argument("--judge-model", required=True, help="Judge model for the new run")
+    eval_rejudge_parser.add_argument("--name", help="Name of the new run (default: source name with its judge suffix replaced)")
+    eval_rejudge_parser.add_argument("--workers", type=int, default=1, metavar="N", help="Parallel judge calls (default: 1)")
+    eval_rejudge_parser.set_defaults(func=cmd_eval_rejudge)
+
+    # eval compare
+    eval_compare_parser = eval_subparsers.add_parser("compare", help="Show runs side by side (retrieval hits, judge verdicts, agent behaviour, tokens)")
+    eval_compare_parser.add_argument("--prefix", help="Runs whose name starts with this")
+    eval_compare_parser.add_argument("--run-id", action="append", help="Run id; repeatable")
+    eval_compare_parser.add_argument("--json", action="store_true", help="Output as JSON")
+    eval_compare_parser.add_argument("--per-question", action="store_true", help="Also show a question-by-run matrix of verdicts, per question set")
+    eval_compare_parser.set_defaults(func=cmd_eval_compare)
+
+    # eval conflicts
+    eval_conflicts_parser = eval_subparsers.add_parser(
+        "conflicts", help="Questions whose answers differ from the reference because of another document (judge v3+ runs)")
+    eval_conflicts_parser.add_argument("--prefix", required=True, help="Runs whose name starts with this")
+    eval_conflicts_parser.add_argument("--limit", type=int, default=0, help="Show at most N questions (default: all)")
+    eval_conflicts_parser.add_argument("--json", action="store_true", help="Output as JSON (e.g. for a review tool)")
+    eval_conflicts_parser.set_defaults(func=cmd_eval_conflicts)
+
+    # eval overlap
+    eval_overlap_parser = eval_subparsers.add_parser("overlap", help="How much of each question's wording comes from its source document")
+    eval_overlap_parser.add_argument("--generation-id", action="append", required=True, help="Question set; repeatable")
+    eval_overlap_parser.add_argument("--phrase-words", type=int, default=5, help="Count questions copying a phrase at least this long (default: 5)")
+    eval_overlap_parser.add_argument("--show", type=int, default=3, help="Show the N most document-worded questions per set (default: 3)")
+    eval_overlap_parser.set_defaults(func=cmd_eval_overlap)
 
     # eval stats
     eval_stats_parser = eval_subparsers.add_parser("stats", help="Show evaluation statistics")

@@ -17,6 +17,8 @@ normalization, extracted so the ingest path doesn't have to import an agent.
 
 import logging
 import threading
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
@@ -37,6 +39,33 @@ STAGE_GRAPH_MATCHING = "graph_matching"
 STAGE_PRIVACY_FILTER = "privacy_filter"
 STAGE_SENSITIVITY_SCAN = "sensitivity_scan"
 STAGE_EMBEDDING = "embedding"
+# Evaluation: question generation, question audit, answering (rag/agentic/
+# llm_only runs) and judging are separate stages so the cost of building an
+# eval set can be told apart from the cost of scoring retrieval against it.
+STAGE_EVAL_GENERATION = "eval_generation"
+STAGE_EVAL_AUDIT = "eval_audit"
+STAGE_EVAL_ANSWER = "eval_answer"
+STAGE_EVAL_JUDGE = "eval_judge"
+
+# Extra meta merged into every llm_usage row written in the current context,
+# so calls deep in a pipeline can be attributed to what drove them (an eval
+# run and question) without passing ids through every function.
+_usage_context: ContextVar[Dict[str, Any]] = ContextVar("llm_usage_context", default={})
+
+
+@contextmanager
+def usage_context(**fields: Any):
+    """Tag every llm_usage row recorded inside the block with `fields`.
+
+    Context variables are per thread, so set this inside each worker, not
+    around a thread pool.
+    """
+    token = _usage_context.set({**_usage_context.get(), **fields})
+    try:
+        yield
+    finally:
+        _usage_context.reset(token)
+
 
 USAGE_FIELDS = (
     "prompt_tokens",
@@ -95,6 +124,17 @@ def usage_snapshot(usage: Any) -> Dict[str, int]:
         cached_prompt_tokens = _int_field(usage, "cached_prompt_tokens")
     else:
         cached_prompt_tokens = _int_field(prompt_details, "cached_tokens")
+
+    # OpenAI counts cached tokens inside prompt_tokens; Anthropic's usage does
+    # not (its input_tokens is only the uncached part), and argo-proxy passes
+    # Claude's count through unchanged -- a 7k-token prompt served from cache
+    # arrives as prompt_tokens=2, cached_tokens=6818. More cached than prompt
+    # tokens can only mean that convention, so add them back. Prompt-cache
+    # *writes* are not reported by that proxy at all and stay uncounted.
+    # Idempotent: an already-corrected snapshot has cached <= prompt.
+    if cached_prompt_tokens > prompt_tokens:
+        prompt_tokens += cached_prompt_tokens
+        total_tokens = prompt_tokens + completion_tokens
 
     # Input context actually processed, i.e. excluding what the provider
     # served from its prompt cache.
@@ -237,6 +277,7 @@ def record_llm_usage(
     Returns:
         The usage snapshot (all zeros if nothing was reported).
     """
+    meta = {**_usage_context.get(), **(meta or {})}
     if accumulator is not None:
         snapshot = accumulator.add(usage, stage=stage, model=model)
     else:

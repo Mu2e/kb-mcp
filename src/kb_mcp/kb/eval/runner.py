@@ -1,6 +1,7 @@
 """Execution engine for evaluation runs."""
 
 import logging
+import re
 import socket
 import time
 from typing import Dict, List, Optional
@@ -12,6 +13,7 @@ from ..search.search import search
 from ..embedding.utils import get_embedding_name
 from ...eval_utils.judge import llm_judge_answer
 from ...config import get_eval_config
+from ...llm import GatewayLimitExceeded
 from ..database import get_db_session
 
 logger = logging.getLogger(__name__)
@@ -68,8 +70,10 @@ def create_eval_run(
             embedding_name = get_embedding_name(session=session)
 
         run_meta = meta or {}
-        if answer_model:
-            run_meta = {**run_meta, "answer_model": answer_model}
+        # Record the answering model even when it came from the default, so a
+        # run can always be attributed to the model that produced its answers.
+        if search_type in ("rag", "agentic", "llm_only"):
+            run_meta = {**run_meta, "answer_model": answer_model or get_eval_config()["answer_model"]}
 
         run = EvalRun(
             name=name,
@@ -97,11 +101,11 @@ def _llm_only_answer(question: str, model: Optional[str] = None):
 
     Returns (answer_text, time_seconds).
     """
-    from ...llm import get_openai_client
+    from ...llm import STAGE_EVAL_ANSWER, get_openai_client, record_llm_usage
     from ...config import get_eval_config
 
     if model is None:
-        model = get_eval_config().get("judge_model")
+        model = get_eval_config()["answer_model"]
 
     client = get_openai_client(model)
     start = time.time()
@@ -114,190 +118,279 @@ def _llm_only_answer(question: str, model: Optional[str] = None):
         max_tokens=16384,
     )
     elapsed = time.time() - start
+    record_llm_usage(response.usage, stage=STAGE_EVAL_ANSWER, model=model, meta={"mode": "llm_only"})
     return response.choices[0].message.content.strip(), elapsed
 
 
-def _rag_answer(question: str, context: str, model: Optional[str] = None):
-    """Generate an answer from retrieved context using an LLM (RAG mode).
+def _rag_answer(
+    question: str,
+    model: Optional[str] = None,
+    source_document_id: Optional[str] = None,
+    source_entry_key: Optional[str] = None,
+    tool_result_max_chars: Optional[int] = None,
+):
+    """Single-shot RAG: one real kb_search with the question, then one answer.
 
-    Returns (answer_text, time_seconds).
+    Uses the same in-process MCP server as the agentic mode, so the context is
+    exactly what a client's first search returns (hybrid search, the server's
+    result formatting); comparing the two isolates what further searching and
+    reading add.
+
+    Returns (answer_text, time_seconds, trace) with a trace shaped like the
+    agentic one: the search, then a summary with saw_source.
     """
-    from ...llm import get_openai_client
-    from ...config import get_eval_config
-    import json as _json
+    import asyncio
 
-    if model is None:
-        model = get_eval_config().get("judge_model")
+    import openai
+
+    from ...llm import STAGE_EVAL_ANSWER, get_openai_client, record_llm_usage
+
+    eval_config = get_eval_config()
+    model = model or eval_config["answer_model"]
+    tool_result_max_chars = tool_result_max_chars or eval_config["agentic_tool_result_max_chars"]
+    server = _get_agentic_server()
+
+    start = time.time()
+    result = asyncio.run(server.call_tool("kb_search", {"query": question}))
+    context = "\n".join(getattr(c, "text", "") for c in result.content)
+    full_len = len(context)
+    saw_source = mentions_source(context, source_document_id, source_entry_key)
+    if full_len > tool_result_max_chars:
+        context = (context[:tool_result_max_chars]
+                   + f"\n[[TRUNCATED BY CLIENT: showing {tool_result_max_chars:,} of {full_len:,} chars]]")
 
     client = get_openai_client(model)
-    prompt = (
-        f"Answer the following question using only the provided context. "
-        f"Be concise and precise.\n\n"
-        f"Question: {question}\n\n"
-        f"Context:\n{context}\n\n"
-        f"Answer:"
-    )
-    start = time.time()
-    response = client.chat.completions.create(
-        model=model,
-        messages=[
-            {"role": "system", "content": "You are a precise scientific assistant. Answer only from the provided context."},
-            {"role": "user", "content": prompt},
-        ],
-        max_tokens=16384,
-    )
+    stopped_by = None
+    answer = ""
+    try:
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": server.instructions or ""},
+                {"role": "user", "content": (
+                    "Answer the question using only the knowledge base search results below. "
+                    "Be concise and precise, and cite the documents you used.\n\n"
+                    f"Question: {question}\n\nSearch results (kb_search):\n{context}"
+                )},
+            ],
+            max_tokens=16384,
+        )
+        record_llm_usage(response.usage, stage=STAGE_EVAL_ANSWER, model=model, meta={"mode": "rag"})
+        answer = (response.choices[0].message.content or "").strip()
+    except openai.BadRequestError as e:
+        stopped_by = f"request rejected: {e}"[:500]
     elapsed = time.time() - start
-    answer = response.choices[0].message.content.strip()
-    return answer, elapsed
+
+    trace = [
+        {"tool": "kb_search", "args": {"query": question}, "result_len": full_len,
+         "truncated": full_len > tool_result_max_chars, "is_error": bool(getattr(result, "is_error", False))},
+        {"summary": True, "tool_calls": 1, "hit_turn_limit": False, "stopped_by": stopped_by,
+         "saw_source": saw_source, "opened_source": False},
+    ]
+    return answer, elapsed, trace
+
+
+#: Tools the agentic eval exposes, in the order the MCP server registers them.
+#: Graph tools are left out for now, kb_research because it is itself an agent
+#: (a nested loop of its own, minutes per call), and kb_get_image because an
+#: image can't be returned as a chat-completions tool result.
+AGENTIC_TOOLS = ("kb_search", "kb_get")
+
+# Loop limits come from get_eval_config() (EVAL_AGENTIC_MAX_TURNS and
+# EVAL_AGENTIC_TOOL_RESULT_MAX_CHARS). The tool-result cap exists because
+# kb_get returns whole documents, and a few are far beyond any context window
+# (the largest is ~300M chars), so the eval client truncates -- and says so --
+# until the server pages kb_get itself.
+
+#: Prompts a client would send after an empty reply; nudges are recorded in
+#: the trace so affected answers stay identifiable.
+AGENTIC_MAX_NUDGES = 2
+_EMPTY_REPLY_NUDGE = (
+    "Your last reply contained neither an answer nor a tool call. Continue: call a tool "
+    "if you need more information, otherwise give your final answer."
+)
+_FINAL_ANSWER_REQUEST = (
+    "You have used all available tool calls. Write your final answer to the question now, "
+    "based on the information gathered above."
+)
+
+_agentic_server = None
+
+
+def _get_agentic_server():
+    """An in-process MCP server with the real kb-mcp tools and prompts.
+
+    Tools are called through MCPServer.call_tool, so arguments are validated
+    and results formatted exactly as for a connected client; only transport
+    and auth are skipped.
+    """
+    global _agentic_server
+    if _agentic_server is None:
+        from mcp.server.mcpserver import MCPServer
+        from ...server import mcp as mcp_tools
+        from ...server.mcp_prompts import get_server_instructions
+
+        server = MCPServer("kb-mcp-eval", instructions=get_server_instructions())
+        for name in AGENTIC_TOOLS:
+            server.tool()(getattr(mcp_tools, name))
+        mcp_tools.register_prompts(server)
+        _agentic_server = server
+    return _agentic_server
 
 
 def _agentic_answer(
     question: str,
-    source_id: Optional[str] = None,
-    parser_id: Optional[str] = None,
-    es_filter: Optional[Dict] = None,
-    max_results: int = 5,
     model: Optional[str] = None,
+    source_document_id: Optional[str] = None,
+    source_entry_key: Optional[str] = None,
+    max_turns: Optional[int] = None,
+    tool_result_max_chars: Optional[int] = None,
 ):
-    """Run the research_question agentic loop with kb_search/kb_get as tools.
+    """Answer a question the way an MCP client would, with the real kb-mcp tools.
 
-    The LLM can call kb_search and kb_get iteratively, mirroring the MCP
-    research_question prompt used in the web interface.
+    The model gets the server's instructions as system prompt, the server's
+    research_question prompt as the task, and the tool definitions the server
+    advertises, then calls tools until it answers or runs out of turns.
 
-    Returns (final_answer, time_seconds, trace).
+    Returns (final_answer, time_seconds, trace, conversation). `trace` also
+    records whether the question's source document -- any file or figure of
+    its entry -- showed up in any tool result ("saw") or in a kb_get result
+    ("opened"); see mentions_source.
     """
-    from ...llm import get_openai_client
-    from ...config import get_eval_config
-    from ..search.search import search as kb_search_fn
-    from ..documents import get as kb_get_fn
+    import asyncio
     import json as _json
 
-    if model is None:
-        model = get_eval_config().get("judge_model")
+    from ...llm import STAGE_EVAL_ANSWER, get_openai_client, record_llm_usage
+
+    eval_config = get_eval_config()
+    model = model or eval_config["answer_model"]
+    max_turns = max_turns or eval_config["agentic_max_turns"]
+    tool_result_max_chars = tool_result_max_chars or eval_config["agentic_tool_result_max_chars"]
 
     client = get_openai_client(model)
+    server = _get_agentic_server()
 
-    filter_str = None  # unused, kept for reference
+    async def _setup():
+        tools = await server.list_tools()
+        prompt = await server.get_prompt("research_question", {"question": question})
+        return tools, prompt
 
+    mcp_tools, prompt = asyncio.run(_setup())
     tools = [
         {
             "type": "function",
             "function": {
-                "name": "kb_search",
-                "description": "Search the knowledge base. Returns ranked documents with excerpts.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "query": {"type": "string", "description": "Search query"},
-                        "max_results": {"type": "integer", "default": max_results},
-                    },
-                    "required": ["query"],
-                },
+                "name": t.name,
+                "description": t.description or "",
+                "parameters": t.input_schema,
             },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "kb_get",
-                "description": "Retrieve the full text of a document by its ID.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "doc_id": {"type": "string", "description": "Document ID"},
-                    },
-                    "required": ["doc_id"],
-                },
-            },
-        },
+        }
+        for t in mcp_tools
     ]
-
-    system_prompt = (
-        "You are a scientific research assistant helping to answer questions about "
-        "legacy high-energy physics experiments. Use kb_search to find relevant documents "
-        "and kb_get to read full document content when needed. "
-        "After gathering information, provide a precise, concise answer."
-    )
-
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": (
-            f"Research the following question using the knowledge base:\n\n"
-            f"Question: {question}\n\n"
-            f"Steps:\n"
-            f"1. Use kb_search to find relevant documents\n"
-            f"2. Use kb_get on the most relevant document(s) if needed\n"
-            f"3. Provide a precise answer citing the sources"
-        )},
-    ]
+    messages = [{"role": "system", "content": server.instructions or ""}]
+    messages += [{"role": m.role, "content": m.content.text} for m in prompt.messages]
 
     trace = []
+    nudges = 0
+    saw_source = opened_source = False
     start = time.time()
-    max_iterations = 5
     got_final_answer = False
 
-    for _ in range(max_iterations):
-        response = client.chat.completions.create(
-            model=model,
-            messages=messages,
-            tools=tools,
-            tool_choice="auto",
-            max_tokens=16384,
-        )
+    import openai
+
+    msg = None
+    stopped_by = None
+    for _ in range(max_turns):
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                messages=messages,
+                tools=tools,
+                tool_choice="auto",
+                max_tokens=16384,
+            )
+        except openai.BadRequestError as e:
+            # Almost always the conversation outgrowing the model's context --
+            # an outcome of the run (a real client would hit it too), so it is
+            # recorded rather than failing the question.
+            stopped_by = f"request rejected: {e}"[:500]
+            break
+        record_llm_usage(response.usage, stage=STAGE_EVAL_ANSWER, model=model, meta={"mode": "agentic"})
         msg = response.choices[0].message
         messages.append(msg)
 
         if not msg.tool_calls:
-            # LLM gave a final text answer
+            if not (msg.content or "").strip() and nudges < AGENTIC_MAX_NUDGES:
+                # Neither an answer nor a tool call -- gpt-oss sometimes writes
+                # its tool call into its reasoning instead of emitting it. A
+                # client would prompt again rather than show a blank reply.
+                nudges += 1
+                trace.append({"nudge": "empty_reply"})
+                messages.append({"role": "user", "content": _EMPTY_REPLY_NUDGE})
+                continue
             got_final_answer = True
             break
 
-        # Execute tool calls
         for tc in msg.tool_calls:
-            fn = tc.function.name
-            args = _json.loads(tc.function.arguments)
-            trace.append({"tool": fn, "args": args})
+            name = tc.function.name
+            try:
+                args = _json.loads(tc.function.arguments or "{}")
+                result = asyncio.run(server.call_tool(name, args))
+                tool_result = "\n".join(getattr(c, "text", "") for c in result.content)
+                is_error = bool(getattr(result, "is_error", False))
+            except Exception as e:
+                args, tool_result, is_error = tc.function.arguments, f"Error: {e}", True
 
-            if fn == "kb_search":
-                search_response = kb_search_fn(
-                    query=args["query"],
-                    max_results=args.get("max_results", max_results),
-                    source_id=source_id,
-                    parser_id=parser_id,
-                    filter=es_filter,
+            full_len = len(tool_result)
+            if mentions_source(tool_result, source_document_id, source_entry_key):
+                saw_source = True
+                opened_source = opened_source or name == "kb_get"
+            if full_len > tool_result_max_chars:
+                tool_result = (
+                    tool_result[:tool_result_max_chars]
+                    + f"\n[[TRUNCATED BY CLIENT: showing {tool_result_max_chars:,} of {full_len:,} chars]]"
                 )
-                results = search_response.get("results", [])
-                tool_result = _json.dumps([
-                    {"doc_id": r["document"].doc_id, "excerpt": (r["document"].text or "")[:500]}
-                    for r in results if r.get("document")
-                ])
-            elif fn == "kb_get":
-                doc = kb_get_fn(identifier=args["doc_id"])
-                if isinstance(doc, list):
-                    doc = next((d for d in doc if d.parser_id == "marker"), doc[0] if doc else None)
-                tool_result = doc.text[:4000] if doc and doc.text else "Document not found"
-            else:
-                tool_result = "Unknown tool"
-
-            trace.append({"tool_result_len": len(tool_result)})
-            messages.append({
-                "role": "tool",
-                "tool_call_id": tc.id,
-                "content": tool_result,
+            trace.append({
+                "tool": name,
+                "args": args,
+                "result_len": full_len,
+                "truncated": full_len > tool_result_max_chars,
+                "is_error": is_error,
             })
+            messages.append({"role": "tool", "tool_call_id": tc.id, "content": tool_result})
 
-    # If loop exhausted max_iterations without a text turn, force a synthesis call
-    if not got_final_answer:
-        response = client.chat.completions.create(
-            model=model,
-            messages=messages,
-            tool_choice="none",
-            max_tokens=16384,
-        )
-        msg = response.choices[0].message
-        messages.append(msg)
+    # Out of turns without a text answer: ask for the answer with tools
+    # disabled, saying so explicitly -- without the instruction some models
+    # (opus-5) reply with reasoning only and no text. One retry if still empty.
+    if not got_final_answer and stopped_by is None:
+        messages.append({"role": "user", "content": _FINAL_ANSWER_REQUEST})
+        for attempt in range(2):
+            response = client.chat.completions.create(
+                model=model,
+                messages=messages,
+                tools=tools,
+                tool_choice="none",
+                max_tokens=16384,
+            )
+            record_llm_usage(response.usage, stage=STAGE_EVAL_ANSWER, model=model, meta={"mode": "agentic"})
+            msg = response.choices[0].message
+            messages.append(msg)
+            if (msg.content or "").strip():
+                break
+            trace.append({"nudge": "empty_final_answer"})
+            messages.append({"role": "user", "content": _FINAL_ANSWER_REQUEST})
 
     elapsed = time.time() - start
-    final_answer = msg.content or ""
+    final_answer = (msg.content or "") if (msg is not None and stopped_by is None) else ""
+    trace.append({
+        "summary": True,
+        "tool_calls": sum(1 for t in trace if "tool" in t),
+        "nudges": sum(1 for t in trace if "nudge" in t),
+        "hit_turn_limit": not got_final_answer and stopped_by is None,
+        "stopped_by": stopped_by,
+        "saw_source": saw_source,
+        "opened_source": opened_source,
+    })
 
     # Serialize full message history for storage
     conversation = []
@@ -311,6 +404,118 @@ def _agentic_answer(
         conversation.append(entry)
 
     return final_answer, elapsed, trace, conversation
+
+
+_ENTRY_NUMBER = re.compile(r"^(\d+)(?:[-/_]|$)")
+
+
+def document_entry_key(source_id: Optional[str], doc_id: Optional[str]) -> str:
+    """Key identifying the source entry a document row belongs to.
+
+    One DocDB entry is stored as several document rows: each attached file and
+    version ("55441-..._V3_pdf", "55441/..._V2", "55441-..._V3_docx") and every
+    figure and table cut from them ("55441-..._page_4_Figure_0.png"). All
+    share the leading entry number, which is what a reader means by "the
+    document". Doc ids without a leading number key on themselves.
+    """
+    doc_id = doc_id or ""
+    match = _ENTRY_NUMBER.match(doc_id)
+    return f"{source_id}:{match.group(1) if match else doc_id}"
+
+
+def describe_reference_source(doc) -> Optional[str]:
+    """One line naming a question's source document for the judge.
+
+    "mu2e-docdb 52249-intro_04_01_25 'Trigger meeting introduction', 2025-04-01"
+    -- the DocDB number and date let the judge tell newer sources from older.
+    """
+    if doc is None:
+        return None
+    title = getattr(doc, "title", None) or getattr(doc, "title_gen", None)
+    created = getattr(doc, "creating_time", None)
+    parts = [f"{doc.source_id} {doc.doc_id}"]
+    if title:
+        parts.append(f"'{title}'")
+    line = " ".join(parts)
+    return f"{line}, {created:%Y-%m-%d}" if created else line
+
+
+def verify_cited_docs(numbers, reference_doc=None) -> List[Dict]:
+    """Check DocDB numbers a judge attributed a differing value to.
+
+    For each number: does the knowledge base hold that DocDB entry, and is it
+    newer or older than the question's source (DocDB numbers increase over
+    time)? This does not prove the document states the value -- it filters
+    out invented or misremembered citations, so a flagged conflict can be
+    reported (and reviewed) with some confidence.
+    """
+    from sqlalchemy import or_
+
+    from ..db_models import Document
+
+    reference_number = None
+    if reference_doc is not None:
+        match = _ENTRY_NUMBER.match(reference_doc.doc_id or "")
+        reference_number = int(match.group(1)) if match else None
+    checked = []
+    with get_db_session() as session:
+        for number in numbers or []:
+            n = str(int(number))
+            exists = session.query(Document.id).filter(
+                Document.source_id == "mu2e-docdb",
+                or_(Document.doc_id == n, Document.doc_id.like(f"{n}-%"),
+                    Document.doc_id.like(f"{n}/%"), Document.doc_id.like(f"{n}\\_%", escape="\\")),
+            ).first() is not None
+            age = None
+            if reference_number is not None:
+                age = "newer" if int(n) > reference_number else "older" if int(n) < reference_number else "same"
+            checked.append({"docdb": int(n), "exists": exists, "age": age})
+    return checked
+
+
+def record_judge_fields(result_meta: Dict, judge_result: Dict, reference_doc=None) -> None:
+    """Store an answer-mode verdict's source fields in a result's meta.
+
+    The DocDB numbers a differing value is attributed to are verified against
+    the knowledge base (see verify_cited_docs); judge_source_verified is true
+    when at least one of them exists there.
+    """
+    if judge_result.get("source_relation") is not None:
+        result_meta["judge_source_relation"] = judge_result["source_relation"]
+        result_meta["judge_acknowledges_conflict"] = judge_result.get("acknowledges_conflict")
+    if judge_result.get("differing_docs"):
+        checked = verify_cited_docs(judge_result["differing_docs"], reference_doc)
+        result_meta["judge_differing_docs"] = checked
+        result_meta["judge_source_verified"] = any(d["exists"] for d in checked)
+
+
+_TOOL_RESULT_DOC_IDS = (
+    re.compile(r'"doc_id":\s*"([^"]+)"'),  # kb_search results
+    re.compile(r"^ID:\s*(\S+)", re.MULTILINE),  # kb_get / metadata headers
+)
+
+
+def mentions_source(
+    tool_result: str,
+    source_document_id: Optional[str] = None,
+    source_entry_key: Optional[str] = None,
+) -> bool:
+    """Whether a tool result shows the question's source document.
+
+    Matches the source's UUID, or -- since tools mostly identify documents by
+    their doc id ("52728-F10266664_...") -- any doc id in the result that
+    belongs to the source's entry (see document_entry_key).
+    """
+    if source_document_id and source_document_id in tool_result:
+        return True
+    if not source_entry_key:
+        return False
+    source_id = source_entry_key.split(":", 1)[0]
+    return any(
+        document_entry_key(source_id, doc_id) == source_entry_key
+        for pattern in _TOOL_RESULT_DOC_IDS
+        for doc_id in pattern.findall(tool_result)
+    )
 
 
 def evaluate_single_question(
@@ -415,6 +620,22 @@ def evaluate_single_question(
                     best_similarity = chunks[0].get("similarity")
                 break
 
+        # Entry-level hit: any row of the source's DocDB entry (another file
+        # version, or a figure/table from it) counts. The exact hit above
+        # under-counts whenever an entry has more than one row.
+        from ..db_models import Document
+        source_doc = session.get(Document, question.source_document_id)
+        entry_hit_rank = None
+        source_key = None
+        reference_source = describe_reference_source(source_doc)
+        if source_doc is not None:
+            source_key = document_entry_key(source_doc.source_id, source_doc.doc_id)
+            for rank, result in enumerate(search_results, start=1):
+                doc = result.get("document")
+                if doc and document_entry_key(doc.source_id, doc.doc_id) == source_key:
+                    entry_hit_rank = rank
+                    break
+
         # If not found, get best similarity from top result
         if not is_hit and search_results:
             top_result = search_results[0]
@@ -428,13 +649,15 @@ def evaluate_single_question(
         judge_time_seconds = None
         llm_answer = None
         result_meta = {
+            "entry_hit_rank": entry_hit_rank,
+            "source_entry_key": source_key,
             "num_retrieved": len(search_results),
             "source_document_id": question.source_document_id,
             "search_type": search_type,
         }
 
         judge_model = (run.judge_strategy or {}).get("model") if run.judge_strategy else None
-        answer_model = (run.meta or {}).get("answer_model") or get_eval_config().get("gen_model")
+        answer_model = (run.meta or {}).get("answer_model") or get_eval_config()["answer_model"]
 
         def _build_context(results, max_chars=720000):
             """Concatenate top retrieved doc texts into a single context string."""
@@ -463,10 +686,12 @@ def evaluate_single_question(
                 expected_answer=question.answer,
                 model=judge_model,
                 mode="answer",
+                reference_source=reference_source,
             )
             is_judge_hit = judge_result["is_hit"]
             justification = judge_result["justification"]
             judge_time_seconds = judge_result["time_seconds"]
+            record_judge_fields(result_meta, judge_result, source_doc)
 
         elif search_type in ("semantic", "fulltext", "hybrid"):
             # Retrieval-only: optionally judge whether context contains the answer
@@ -481,40 +706,47 @@ def evaluate_single_question(
                 is_judge_hit = judge_result["is_hit"]
                 justification = judge_result["justification"]
                 judge_time_seconds = judge_result["time_seconds"]
+                record_judge_fields(result_meta, judge_result, source_doc)
 
         elif search_type == "rag":
-            # RAG: LLM generates an answer from retrieved context, then judge scores it
-            if search_results:
-                context = _build_context(search_results)
-                llm_answer, llm_answer_time = _rag_answer(
-                    question=question.question,
-                    context=context,
-                    model=answer_model,
-                )
-                result_meta["llm_answer"] = llm_answer
-                result_meta["llm_answer_time"] = llm_answer_time
+            # Single-shot RAG: one real kb_search, then one answer (see _rag_answer)
+            llm_answer, llm_answer_time, rag_trace = _rag_answer(
+                question=question.question,
+                model=answer_model,
+                source_document_id=question.source_document_id,
+                source_entry_key=source_key,
+                tool_result_max_chars=(run.meta or {}).get("tool_result_max_chars"),
+            )
+            result_meta["llm_answer"] = llm_answer
+            result_meta["llm_answer_time"] = llm_answer_time
+            result_meta["agentic_trace"] = rag_trace
 
-                if use_llm_judge and run.judge_strategy and run.judge_strategy.get("enabled"):
-                    judge_result = llm_judge_answer(
-                        question=question.question,
-                        retrieved_context=llm_answer,
-                        expected_answer=question.answer,
-                        model=judge_model,
-                        mode="answer",
-                    )
-                    is_judge_hit = judge_result["is_hit"]
-                    justification = judge_result["justification"]
-                    judge_time_seconds = judge_result["time_seconds"]
+            if use_llm_judge and run.judge_strategy and run.judge_strategy.get("enabled"):
+                judge_result = llm_judge_answer(
+                    question=question.question,
+                    retrieved_context=llm_answer,
+                    expected_answer=question.answer,
+                    model=judge_model,
+                    mode="answer",
+                    reference_source=reference_source,
+                )
+                is_judge_hit = judge_result["is_hit"]
+                justification = judge_result["justification"]
+                judge_time_seconds = judge_result["time_seconds"]
+                record_judge_fields(result_meta, judge_result, source_doc)
 
         elif search_type == "agentic":
-            # Agentic: LLM runs the research_question loop with kb_search/kb_get tools
+            # Agentic: LLM answers through the real MCP tools (see _agentic_answer)
+            # The agent searches with its own arguments, as a real client does:
+            # the run's search filters and max_results are not imposed on it.
+            agentic_opts = {k: v for k, v in (run.meta or {}).items()
+                            if k in ("max_turns", "tool_result_max_chars")}
             llm_answer, llm_answer_time, agentic_trace, agentic_conversation = _agentic_answer(
                 question=question.question,
-                source_id=source_id_filter,
-                parser_id=parser_id_filter,
-                es_filter=es_filter,
-                max_results=run.max_results,
                 model=answer_model,
+                source_document_id=question.source_document_id,
+                source_entry_key=source_key,
+                **agentic_opts,
             )
             result_meta["llm_answer"] = llm_answer
             result_meta["llm_answer_time"] = llm_answer_time
@@ -528,10 +760,12 @@ def evaluate_single_question(
                     expected_answer=question.answer,
                     model=judge_model,
                     mode="answer",
+                    reference_source=reference_source,
                 )
                 is_judge_hit = judge_result["is_hit"]
                 justification = judge_result["justification"]
                 judge_time_seconds = judge_result["time_seconds"]
+                record_judge_fields(result_meta, judge_result, source_doc)
 
         # Create result record
         result = EvalResult(
@@ -587,12 +821,18 @@ def execute_eval_run(
     use_llm_judge: bool = False,
     workers: int = 1,
     rerank: Optional[bool] = None,
+    resume: bool = False,
     session=None,
 ) -> Dict:
     """Execute an evaluation run.
 
     Retrieves questions based on run configuration, evaluates each,
     and stores results.
+
+    With `resume`, an interrupted run is continued instead of redone: results
+    the judge could not score are dropped, questions that already have a
+    result are skipped, and only the rest are answered -- so answers already
+    paid for are kept when a run was cut short (e.g. by a gateway's limit).
 
     Args:
         run_id: Run ID to execute
@@ -656,6 +896,19 @@ def execute_eval_run(
         if skipped:
             logger.warning(f"Skipping {skipped} question(s) with no source_document_id")
 
+        if resume:
+            judged = bool((run.judge_strategy or {}).get("enabled"))
+            existing = db.query(EvalResult).filter(EvalResult.run_id == run.id).all()
+            kept = set()
+            for result in existing:
+                if judged and result.is_judge_hit is None:
+                    db.delete(result)
+                else:
+                    kept.add(result.question_id)
+            db.commit()
+            question_ids = [qid for qid in question_ids if qid not in kept]
+            logger.info(f"Resuming run {run_id}: {len(kept)} results kept, {len(question_ids)} questions left")
+
         # Detach a plain-dict copy of run config for workers to read without a session
         run_snapshot = EvalRun(
             id=run.id,
@@ -675,19 +928,25 @@ def execute_eval_run(
 
     start_time = time.time()
     num_hits = 0
+    num_entry_hits = 0
     num_processed = 0
     total_retrieval_time = 0.0
     lock = threading.Lock()
 
     def _evaluate(question_id: str):
-        # Each worker gets its own DB session
-        result = evaluate_single_question(
-            run=run_snapshot,
-            question_id=question_id,
-            use_llm_judge=use_llm_judge,
-            rerank=rerank,
-            session=None,
-        )
+        from ...llm import usage_context
+
+        # Each worker gets its own DB session. The usage context tags this
+        # question's answer and judge calls in llm_usage with the run, so a
+        # run's token cost can be read back (see `kb eval compare`).
+        with usage_context(eval_run_id=run_snapshot.id, eval_question_id=question_id):
+            result = evaluate_single_question(
+                run=run_snapshot,
+                question_id=question_id,
+                use_llm_judge=use_llm_judge,
+                rerank=rerank,
+                session=None,
+            )
         return result
 
     from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -702,6 +961,8 @@ def execute_eval_run(
                         num_processed += 1
                         if result.is_hit:
                             num_hits += 1
+                        if (result.meta or {}).get("entry_hit_rank") is not None:
+                            num_entry_hits += 1
                         if result.retrieval_time_seconds:
                             total_retrieval_time += result.retrieval_time_seconds
                         hit_rate = num_hits / num_processed if num_processed > 0 else 0.0
@@ -709,6 +970,12 @@ def execute_eval_run(
                             f"Hit rate: {hit_rate:.1%} ({num_hits}/{num_processed})",
                             refresh=False,
                         )
+                except GatewayLimitExceeded:
+                    # Every further call gets the same refusal: stop now and
+                    # leave the run incomplete, so a later grid run redoes it.
+                    for pending in futures:
+                        pending.cancel()
+                    raise
                 except Exception as e:
                     logger.error(f"Failed to evaluate question {futures[future]}: {e}")
                 finally:
@@ -727,6 +994,7 @@ def execute_eval_run(
         "run_id": run_id,
         "num_questions": num_processed,
         "num_hits": num_hits,
+        "num_entry_hits": num_entry_hits,
         "total_time_seconds": total_time,
         "avg_retrieval_time_seconds": avg_retrieval_time,
     }

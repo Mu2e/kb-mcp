@@ -6,10 +6,53 @@ import json
 import logging
 from typing import Dict, List, Optional
 
-from ..llm import get_openai_client
+from ..llm import STAGE_EVAL_GENERATION, GatewayLimitExceeded, get_openai_client, parse_json_reply, record_llm_usage
 from ..config import get_eval_config
 
 logger = logging.getLogger(__name__)
+
+# What makes a question usable in a retrieval benchmark. Shared by the question
+# generators and the auditor (kb.eval.audit), so the two can't drift apart: a
+# generator told only to write "natural" questions produced mostly
+# document-internal ones ("the trolley assembly"), which the auditor rejected.
+QUESTION_CRITERIA = """A good evaluation question must satisfy ALL of the following criteria:
+
+1. **Self-contained**: The question makes sense without reading the source document. It must not rely on implicit context like "the dewar", "the module", "Table 3", "the klystron mentioned above", or "the device described earlier". A reader with general HEP knowledge should understand what is being asked.
+
+2. **Externally motivated**: This is a question someone working on or studying the experiment would plausibly ask from the outside — about physics, detector design, computing systems, experimental methods, or engineering choices. It is NOT a reading-comprehension quiz on one specific document.
+
+3. **Answerable from the knowledge base**: The answer should be findable in technical documents about the experiment (detector notes, technical reports, proceedings). It should have a specific, factual answer.
+
+4. **Well-formed**: Clear, grammatically correct, and specific enough to have a definite answer.
+
+5. **Not worded from the document**: The question uses the terms a Mu2e collaborator would use without having read this particular document. It does not copy the document's own phrasing of a result or method, and does not rely on labels only this document uses (internal test or campaign names, drawing or part numbers, sector, figure or table labels, the document's nicknames for things). Established terminology such as subsystem names ("Cosmic Ray Veto", "Stopping Target Monitor") is fine. A question that echoes its source's wording is easy to retrieve for the wrong reason.
+
+Examples of GOOD questions:
+- "What gas mixture is used in the Mu2e straw tracker?"
+- "What is the readout scheme for the BaBar electromagnetic calorimeter?"
+- "What clock frequency does the ATLAS Level-1 trigger operate at?"
+
+Examples of BAD questions (fail self-containedness):
+- "What is the maximum voltage of the forty feedthroughs in the dewar?" (assumes knowledge of which dewar)
+- "What range of insertion trials is shown in Table 3?" (pure document reference)
+- "What material is used for the component described in section 2.3?" (document-internal reference)
+
+Example of a BAD question (worded from the document):
+- "What position resolutions were obtained for the Mu2e CRV KPP middle and top sectors by comparing reconstructed hit positions with the bottom-sector reference position?" (copies the note's method description and internal labels; a collaborator would ask "What position resolution along the counter does the Mu2e Cosmic Ray Veto achieve?")"""
+
+
+def format_document_context(title: Optional[str] = None, source_id: Optional[str] = None) -> str:
+    """Header lines naming where a document comes from, for generation prompts.
+
+    Without them the generator sees bare text and cannot name the experiment
+    or subsystem a question is about.
+    """
+    lines = []
+    if source_id:
+        lines.append(f"Source: {source_id}")
+    if title:
+        lines.append(f"Title: {title}")
+    return "\n".join(lines)
 
 AGENTIC_TAGS = [
     "data_resurrection",
@@ -115,8 +158,10 @@ Return ONLY a valid JSON object:
             response_format={"type": "json_object"}
         )
 
+        record_llm_usage(response.usage, stage=STAGE_EVAL_GENERATION, model=model,
+                         meta={"strategy": "agentic"})
         content = response.choices[0].message.content.strip()
-        result = json.loads(content)
+        result = parse_json_reply(content)
         qa_pairs = result.get("qa_pairs", [])
 
         valid_pairs = []
@@ -141,6 +186,8 @@ Return ONLY a valid JSON object:
     except json.JSONDecodeError as e:
         logger.error(f"Failed to parse JSON response: {e}")
         return {"qa_pairs": [], "type": "qa_pairs_agentic", "model": model, "prompt": user_prompt_template}
+    except GatewayLimitExceeded:
+        raise
     except Exception as e:
         logger.error(f"Error generating agentic QA pairs: {e}")
         return {"qa_pairs": [], "type": "qa_pairs_agentic", "model": model, "prompt": user_prompt_template}
@@ -150,6 +197,7 @@ def generate_qa_pairs_keypoint(
     document_text: str,
     num_questions: int = 5,
     model: Optional[str] = None,
+    document_context: str = "",
 ) -> Dict:
     """Generate question-keypoint pairs from document text.
 
@@ -159,15 +207,20 @@ def generate_qa_pairs_keypoint(
         document_text: Document text to generate from
         num_questions: Number of Q&A pairs to generate
         model: Optional model name (overrides EVAL_GEN_MODEL env var)
+        document_context: Optional header naming the document's source and
+            title (see format_document_context), so questions can name what
+            they are about instead of saying "the module".
 
     Returns:
-        Dict with 'qa_pairs' (list), 'type', 'model', 'prompt' keys
+        Dict with 'qa_pairs' (list), 'type', 'model', 'prompt' keys. Fewer than
+        num_questions pairs come back when the document doesn't support that
+        many questions meeting QUESTION_CRITERIA.
 
     Example:
         ```python
         result = generate_qa_pairs_keypoint("The flux is 42...", num_questions=3)
         result['qa_pairs'][0]
-        # Returns: {'question': 'What is the measured flux?', 'keypoint': 'The flux is 42'}
+        # Returns: {'question': 'What is the measured flux?', 'keypoint': 'The flux is 42', 'answer': '42'}
         ```
     """
     if model is None:
@@ -182,26 +235,34 @@ def generate_qa_pairs_keypoint(
         logger.info(f"Truncating text from {len(document_text)} to {max_input_chars} characters")
         document_text = document_text[:max_input_chars]
 
-    user_prompt = """Analyze the following document and generate {num_questions} question-keypoint pairs for evaluation.
+    user_prompt = """Analyze the following document and generate up to {num_questions} question-keypoint pairs for a knowledge base retrieval benchmark.
 
 For each pair:
 1. Extract a key fact or important statement from the document (the "keypoint")
-2. Generate a natural question that someone might ask to find this information
+2. Write a question that someone working on or studying the experiment might ask, whose answer is this fact
+3. Give a short, specific answer to the question, taken from the document
 
+""" + QUESTION_CRITERIA.replace("{", "{{").replace("}", "}}") + """
+
+To make questions self-contained, name what they are about: the experiment (e.g. Mu2e), the subsystem, and the specific component, using the source and title below where the text itself doesn't say. Never write "the assembly", "the detector", "this document", "the analysis" or similar references that only make sense next to the document.
+
+Write each question the way a collaborator who has NOT read this document would ask it: in your own words, with commonly used Mu2e terms, without the document's phrasing, internal labels or identifiers. The keypoint may quote the document; the question should not.
+
+Prefer facts that matter beyond this one document (design parameters, materials, methods, performance, decisions) over administrative details (who attended, document numbers, formatting). If the document does not support {num_questions} questions meeting all criteria, return fewer — even none. A short list of good questions is better than a full list with weak ones.
+
+Other requirements:
+- Be concise and clear, like a real user query
+- Do not quote the keypoint verbatim in the question
+- Cover different aspects of the document
+
+{document_context}
 Document:
 {document_text}
 
-The questions should:
-- Be natural and realistic (like real user queries)
-- Be concise and clear
-- Not directly quote the keypoint verbatim
-- Cover different aspects of the document
-
-Return ONLY a valid JSON object with a "qa_pairs" array:
+Return ONLY a valid JSON object with a "qa_pairs" array (possibly empty):
 {{
   "qa_pairs": [
-    {{"question": "...", "keypoint": "..."}},
-    {{"question": "...", "keypoint": "..."}}
+    {{"question": "...", "keypoint": "...", "answer": "..."}}
   ]
 }}"""
 
@@ -217,6 +278,7 @@ Return ONLY a valid JSON object with a "qa_pairs" array:
                     "role": "user",
                     "content": user_prompt.format(
                         num_questions=num_questions,
+                        document_context=document_context,
                         document_text=document_text
                         )
                 }
@@ -224,8 +286,10 @@ Return ONLY a valid JSON object with a "qa_pairs" array:
             response_format={"type": "json_object"}
         )
 
+        record_llm_usage(response.usage, stage=STAGE_EVAL_GENERATION, model=model,
+                         meta={"strategy": "keypoint"})
         content = response.choices[0].message.content.strip()
-        result = json.loads(content)
+        result = parse_json_reply(content)
         qa_pairs = result.get("qa_pairs", [])
 
         # Validate structure
@@ -234,7 +298,8 @@ Return ONLY a valid JSON object with a "qa_pairs" array:
             if "question" in pair and "keypoint" in pair:
                 valid_pairs.append({
                     "question": pair["question"],
-                    "keypoint": pair["keypoint"]
+                    "keypoint": pair["keypoint"],
+                    "answer": pair.get("answer"),
                 })
             else:
                 logger.warning(f"Skipping invalid QA pair: {pair}")
@@ -245,6 +310,7 @@ Return ONLY a valid JSON object with a "qa_pairs" array:
             "model": model,
             "prompt": user_prompt.format(
                 num_questions=num_questions,
+                document_context="{document_context}",
                 document_text="{document_text}"
             )
         }
@@ -258,9 +324,12 @@ Return ONLY a valid JSON object with a "qa_pairs" array:
             "model": model,
             "prompt": user_prompt.format(
                 num_questions=num_questions,
+                document_context="{document_context}",
                 document_text="{document_text}"
             )
         }
+    except GatewayLimitExceeded:
+        raise
     except Exception as e:
         logger.error(f"Error generating QA pairs: {e}")
         return {
@@ -269,6 +338,7 @@ Return ONLY a valid JSON object with a "qa_pairs" array:
             "model": model,
             "prompt": user_prompt.format(
                 num_questions=num_questions,
+                document_context="{document_context}",
                 document_text="{document_text}"
             )
         }
@@ -361,8 +431,10 @@ Return ONLY a valid JSON object with persona-based Q&A pairs:
             response_format={"type": "json_object"}
         )
 
+        record_llm_usage(response.usage, stage=STAGE_EVAL_GENERATION, model=model,
+                         meta={"strategy": "persona"})
         content = response.choices[0].message.content.strip()
-        result = json.loads(content)
+        result = parse_json_reply(content)
         qa_pairs = result.get("persona_qa_pairs", [])
 
         # Validate structure
@@ -437,6 +509,8 @@ Return ONLY a valid JSON object with persona-based Q&A pairs:
             "model": model,
             "prompt": prompt_template
         }
+    except GatewayLimitExceeded:
+        raise
     except Exception as e:
         logger.error(f"Error generating persona QA pairs: {e}")
         prompt_template = """Analyze the following document and generate {num_questions} question-answer pairs for each of these user personas:
