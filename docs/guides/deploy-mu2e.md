@@ -521,6 +521,11 @@ DB_SCHEMA=            # not necessarily "public"
 OPENAI_BASE_URL=
 OPENAI_API_KEY=
 
+# Hosts (besides loopback) allowed to reach the web UI, comma-separated IPs or
+# CIDRs. Empty = loopback only, i.e. the ssh tunnel. Set it here, not in
+# mu2e.env: the repository is public.
+WEB_ALLOWED_IPS=
+
 # Guards the web UI's write pages (upload, delete, re-chunk, API keys).
 # Browsing stays open in public mode, so this is what protects writes.
 ADMIN_PASSWORD=

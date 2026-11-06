@@ -160,6 +160,7 @@ def get_server_config() -> dict:
               default: 100000). A client can ask for less or more per call, up to `KB_GET_MAX_CHARS_LIMIT`.
             * `mcp_host` (str): Bind address for the MCP server (Env: `MCP_HOST`, falls back to `SERVER_HOST`, default: '127.0.0.1').
             * `web_host` (str): Bind address for the web UI server (Env: `WEB_HOST`, default: '127.0.0.1', i.e. loopback only).
+            * `web_allowed_ips` (str): Comma-separated IPs/CIDRs (besides loopback) allowed to reach the web UI (Env: `WEB_ALLOWED_IPS`, default: '' = loopback only).
             * `web_port` (int): Port for the web UI server (Env: `WEB_PORT`, default: `PORT` + 1).
     """
     log_level = _get_str("LOG_LEVEL", "INFO").upper()
@@ -184,6 +185,8 @@ def get_server_config() -> dict:
         # loopback by default. See kb_mcp.server.server.
         'mcp_host': _get_str("MCP_HOST", _get_str("SERVER_HOST", "127.0.0.1")),
         'web_host': _get_str("WEB_HOST", "127.0.0.1"),
+        # Peers allowed to reach the web UI when it is bound off loopback.
+        'web_allowed_ips': _get_str("WEB_ALLOWED_IPS", ""),
         'web_port': _get_int("WEB_PORT", _get_int("PORT", 8443) + 1),
     }
 
