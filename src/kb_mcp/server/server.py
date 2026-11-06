@@ -70,6 +70,7 @@ HOST = _server_config['host']
 MCP_HOST = _server_config['mcp_host']
 WEB_HOST = _server_config['web_host']
 WEB_PORT = _server_config['web_port']
+WEB_ALLOWED_IPS = _server_config['web_allowed_ips']
 USE_HTTPS = _server_config['use_https']
 
 auth_config = get_auth_config()
@@ -367,11 +368,24 @@ def main():
             mcp_host,
             mcp_port,
         )
-    if run_web and not WEB_REQUIRE_AUTH and web_host not in ("127.0.0.1", "localhost", "::1"):
+    web_networks = []
+    if run_web:
+        from .ip_allowlist import parse_allowed_ips
+
+        try:
+            web_networks = parse_allowed_ips(WEB_ALLOWED_IPS)
+        except ValueError as exc:
+            parser.error(f"invalid WEB_ALLOWED_IPS: {exc}")
+        if web_host not in ("127.0.0.1", "localhost", "::1"):
+            logger.info(
+                "Web UI reachable from loopback and %s",
+                [str(n) for n in web_networks] or "no other address",
+            )
+    web_off_loopback = web_host not in ("127.0.0.1", "localhost", "::1")
+    if run_web and web_off_loopback and not web_networks:
         logger.warning(
-            "Web UI has authentication disabled but is bound to %s, which is not "
-            "loopback. Anyone who can reach that address has full access. "
-            "Set WEB_REQUIRE_AUTH=true or bind WEB_HOST to 127.0.0.1.",
+            "Web UI is bound to %s but WEB_ALLOWED_IPS is empty, so only "
+            "loopback can reach it. Set WEB_ALLOWED_IPS to let other hosts in.",
             web_host,
         )
     if not MCP_REQUIRE_API_KEY and USE_HTTPS:
@@ -381,6 +395,14 @@ def main():
         if not USE_HTTPS:
             return {}
         return {"ssl_keyfile": "certs/key.pem", "ssl_certfile": "certs/cert.pem"}
+
+    def _restrict_web(web_app):
+        # Off loopback, only the allowlisted peers (plus loopback) get in.
+        if not web_off_loopback:
+            return web_app
+        from .ip_allowlist import IPAllowlistMiddleware
+
+        return IPAllowlistMiddleware(web_app, web_networks)
 
     async def _serve():
         servers = []
@@ -398,7 +420,7 @@ def main():
             servers.append(
                 uvicorn.Server(
                     uvicorn.Config(
-                        create_web_app(), host=web_host, port=web_port, **_ssl_kwargs()
+                        _restrict_web(create_web_app()), host=web_host, port=web_port, **_ssl_kwargs()
                     )
                 ).serve()
             )
