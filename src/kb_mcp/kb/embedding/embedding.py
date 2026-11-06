@@ -635,6 +635,52 @@ def get_embedding_vector(
             return None
 
 
+def _build_ivfflat_index(session, table_name: str, index_name: str, lists: int,
+                         maintenance_work_mem: str = "2GB") -> None:
+    """(Re)build an IVFFlat index without blocking searches.
+
+    The new index is built CONCURRENTLY under a temporary name, so queries keep
+    using the old one while it builds, and is then swapped in. It runs on its own
+    AUTOCOMMIT connection because CREATE INDEX CONCURRENTLY cannot run inside a
+    transaction block. maintenance_work_mem is raised for that connection only:
+    the 64 MB server default is too small for IVFFlat on a large table
+    ("memory required is ... MB").
+
+    Raises RuntimeError if the new index is left invalid; the old index is then untouched.
+    """
+    from sqlalchemy import text
+
+    tmp_name = f"{index_name}_new"
+    session.commit()  # settle any open transaction on this session first
+    with session.bind.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+        conn.execute(text(f"SET maintenance_work_mem = '{maintenance_work_mem}'"))
+        conn.execute(text("SET statement_timeout = 0"))
+        conn.execute(text(f'DROP INDEX IF EXISTS "{tmp_name}"'))
+        conn.execute(text(f"""
+            CREATE INDEX CONCURRENTLY "{tmp_name}"
+            ON "{table_name}"
+            USING ivfflat (embedding vector_cosine_ops)
+            WITH (lists = {lists})
+        """))
+        valid = conn.execute(
+            text("SELECT indisvalid FROM pg_index WHERE indexrelid = to_regclass(:n)"),
+            {"n": f'"{tmp_name}"'},
+        ).scalar()
+        if not valid:
+            conn.execute(text(f'DROP INDEX IF EXISTS "{tmp_name}"'))
+            raise RuntimeError("concurrent index build left an invalid index; existing index kept")
+        # Swap atomically so there is no moment without an index.
+        conn.exec_driver_sql("BEGIN")
+        try:
+            conn.execute(text(f'DROP INDEX IF EXISTS "{index_name}"'))
+            conn.execute(text(f'ALTER INDEX "{tmp_name}" RENAME TO "{index_name}"'))
+            conn.exec_driver_sql("COMMIT")
+        except Exception:
+            conn.exec_driver_sql("ROLLBACK")
+            raise
+        conn.execute(text(f'ANALYZE "{table_name}"'))
+
+
 def optimize_embedding_index(embedding_name: str, session=None) -> Dict[str, Any]:
     """
     Optimize IVFFlat index for an embedding table by recalculating optimal 'lists' parameter.
@@ -643,7 +689,8 @@ def optimize_embedding_index(embedding_name: str, session=None) -> Dict[str, Any
     of embeddings. This function:
     1. Counts embeddings in the table
     2. Calculates optimal 'lists' parameter (roughly sqrt(count) or count/1000, min 10, max 1000)
-    3. Rebuilds the index with the optimized parameter
+       (lists should track about rows/1000, so re-run this after a large import)
+    3. Rebuilds the index with the optimized parameter, concurrently, so searches are not blocked
     
     Args:
         embedding_name: Short name of the embedding (e.g., "openai-small")
@@ -732,52 +779,15 @@ def optimize_embedding_index(embedding_name: str, session=None) -> Dict[str, Any
         indexes = inspector.get_indexes(embedding_table.name)
         index_exists = any(idx['name'] == index_name for idx in indexes)
         
-        if not index_exists:
-            # Create index if it doesn't exist
-            try:
-                # Quote identifiers to handle special characters like hyphens
-                session.execute(text(f"""
-                    CREATE INDEX "{index_name}"
-                    ON "{embedding_table.name}"
-                    USING ivfflat (embedding vector_cosine_ops)
-                    WITH (lists = {optimal_lists})
-                """))
-                session.commit()
-                return {
-                    "embedding_name": embedding_name,
-                    "embedding_count": embedding_count,
-                    "optimal_lists": optimal_lists,
-                    "index_rebuilt": True,
-                    "message": f"Created IVFFlat index with lists={optimal_lists} for {embedding_count} embeddings"
-                }
-            except Exception as e:
-                return {
-                    "embedding_name": embedding_name,
-                    "embedding_count": embedding_count,
-                    "optimal_lists": optimal_lists,
-                    "index_rebuilt": False,
-                    "message": f"Failed to create index: {e}"
-                }
-
-        # Rebuild index with optimized parameter
         try:
-            # Drop and recreate index
-            # Quote identifiers to handle special characters like hyphens
-            session.execute(text(f'DROP INDEX IF EXISTS "{index_name}"'))
-            session.execute(text(f"""
-                CREATE INDEX "{index_name}"
-                ON "{embedding_table.name}"
-                USING ivfflat (embedding vector_cosine_ops)
-                WITH (lists = {optimal_lists})
-            """))
-            session.commit()
-            
+            _build_ivfflat_index(session, embedding_table.name, index_name, optimal_lists)
+            verb = "Rebuilt" if index_exists else "Created"
             return {
                 "embedding_name": embedding_name,
                 "embedding_count": embedding_count,
                 "optimal_lists": optimal_lists,
                 "index_rebuilt": True,
-                "message": f"Rebuilt IVFFlat index with lists={optimal_lists} for {embedding_count} embeddings"
+                "message": f"{verb} IVFFlat index with lists={optimal_lists} for {embedding_count} embeddings"
             }
         except Exception as e:
             session.rollback()
