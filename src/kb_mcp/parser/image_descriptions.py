@@ -6,7 +6,7 @@ from typing import List, Dict, Any, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from . import boilerplate
-from .image_utils import detect_image_format
+from .image_utils import detect_image_format, shrink_for_vision
 from ..config import get_llm_config, get_parser_config
 from ..llm.retry import RateLimited, call_with_backoff
 from ..llm.usage import STAGE_IMAGE_DESCRIPTION, UsageAccumulator
@@ -175,6 +175,9 @@ def generate_image_descriptions(
       DEFAULT_IMAGE_DESCRIPTION_MODEL). Must be served by the endpoint it
       routes to.
     - PARSE_IMAGE_DESCRIPTION_NUMWORKERS: Number of parallel workers (default: 6)
+    - PARSE_IMAGE_DESCRIPTION_MAX_DIM / PARSE_IMAGE_DESCRIPTION_MAX_BYTES: images above
+      either limit are downscaled and re-encoded as JPEG before being sent (defaults:
+      1280 px, 800000 bytes; 0 disables).
     - OPENAI_BASE_URL: Base URL for OpenAI API (optional)
     - OPENAI_BASE_URL_MODELS: JSON map of model -> base URL, so the vision model
       can live on a different host than the default chat model (optional)
@@ -300,8 +303,14 @@ def generate_image_descriptions(
         # Note: img_dict references point to the same dict objects in image_dicts (not copies)
         images_for_llm = []
         for idx, img_dict in images_with_binary:
-            # Get binary data
-            image_bytes = img_dict["binary"]
+            # Get binary data. The stored bytes (and the registry hash) stay as
+            # extracted; only the copy sent to the endpoint is shrunk, because
+            # multi-megabyte figures make the vision endpoint fail.
+            image_bytes = shrink_for_vision(
+                img_dict["binary"],
+                max_dim=parser_config.get('image_description_max_dim', 1280),
+                max_bytes=parser_config.get('image_description_max_bytes', 800000),
+            )
 
             # Encode to base64
             image_base64 = base64.b64encode(image_bytes).decode()
