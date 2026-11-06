@@ -493,7 +493,7 @@ def setup_commands(subparsers):
 
     embedding_optimize_parser = embedding_subparsers.add_parser(
         "optimize-index",
-        help="Rebuild the IVFFlat index sized for the current row count (run after bulk imports)",
+        help="Rebuild the IVFFlat index sized for the current row count, without blocking searches (run after bulk imports)",
     )
     embedding_optimize_parser.add_argument("--embedding-name", help="Embedding config short name (e.g., 'st_MiniLML6v2')")
     embedding_optimize_parser.set_defaults(func=cmd_embedding_optimize_index)
