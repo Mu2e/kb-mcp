@@ -7,7 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
-from ..database import get_db_session, init_db
+from ..database import get_db_session, get_engine, init_db
 from ..db_models import Document, DocumentParserOutput, Source
 
 logger = logging.getLogger(__name__)
@@ -199,8 +199,25 @@ def _handle_duplicate(
     return None
 
 
-def _ensure_db_initialized() -> None:
-    """Ensure database is initialized (lazy loading)."""
+def _ensure_db_initialized(session=None) -> None:
+    """Ensure the database this call is about to use is initialized (lazy loading).
+
+    init_db() prepares the globally *configured* engine (get_engine(), from
+    whatever .env/KB_ENV_FILE this process resolves) -- not any particular
+    session. A caller that passes its own `session` already owns getting
+    that session's schema ready (it's bound to a different engine on
+    purpose, e.g. an isolated test database); running init_db() against the
+    unrelated global engine in that case is a surprising side effect at
+    best, and a real network call to a possibly-unrelated (even production)
+    database at worst. So skip only when the session is bound to a different
+    engine than the global one. A session opened from the global engine
+    (web routes pass their own, and the servers never call init_db() at
+    startup) still relies on this lazy init, as does no session at all.
+    """
+    if session is not None:
+        bind = session.get_bind()
+        if getattr(bind, "engine", bind) is not get_engine():
+            return
     global _db_initialized
     if not _db_initialized:
         init_db(create_tables=True)
@@ -310,7 +327,7 @@ def add_parsed(
         ValueError: If data is not Document or dict, or if both text and binary are None
     """
     # Ensure database is initialized (lazy loading)
-    _ensure_db_initialized()
+    _ensure_db_initialized(session=session)
 
     # Get deduplication level
     if dedup_level is None:
@@ -411,7 +428,7 @@ def add_parsed_many(
         ValueError: If documents list is empty
     """
     # Ensure database is initialized (lazy loading)
-    _ensure_db_initialized()
+    _ensure_db_initialized(session=session)
 
     if not documents:
         raise ValueError("Cannot add empty list of documents")
@@ -568,7 +585,7 @@ def add_document(
         ```
     """
     # Ensure database is initialized (lazy loading)
-    _ensure_db_initialized()
+    _ensure_db_initialized(session=session)
 
     # Validate required parameters
     if not source_id:
@@ -950,7 +967,7 @@ def _get(
           - list[Document] if multiple matches found
           - None if no matches found
     """
-    _ensure_db_initialized()
+    _ensure_db_initialized(session=session)
 
     with get_db_session(session) as session:
         query = session.query(Document)
@@ -1388,7 +1405,7 @@ def add_source(
     Returns:
         Source object (created or updated)
     """
-    _ensure_db_initialized()
+    _ensure_db_initialized(session=session)
 
     with get_db_session(session) as session:
         # Use merge to create or update (upsert pattern)
@@ -1428,7 +1445,7 @@ def get_or_create_parser(
     """
     from ..db_models import Parser
 
-    _ensure_db_initialized()
+    _ensure_db_initialized(session=session)
 
     with get_db_session(session) as session:
         # Query first to see if parser exists
@@ -1519,7 +1536,7 @@ def get_or_create_raw_document(
     """
     from ..db_models import RawDocument
 
-    _ensure_db_initialized()
+    _ensure_db_initialized(session=session)
 
     if not content_hash:
         raise ValueError("content_hash is required for raw document deduplication")
@@ -1590,7 +1607,7 @@ def insert_raw_document(
     """
     from ..db_models import RawDocument
 
-    _ensure_db_initialized()
+    _ensure_db_initialized(session=session)
 
     if not content_hash:
         raise ValueError("content_hash is required for raw document deduplication")
@@ -1810,7 +1827,7 @@ def get_document_counts(session=None) -> Optional[List[tuple]]:
     from sqlalchemy import text
     from ..database import summary_views_available
 
-    _ensure_db_initialized()
+    _ensure_db_initialized(session=session)
     with get_db_session(session) as session:
         if not summary_views_available(session.connection()):
             return None
