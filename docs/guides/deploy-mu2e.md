@@ -30,7 +30,7 @@ The repeatable loop: identical for a first install and every upgrade.
 ### 0. Cut the release
 
 ```bash
-git push mu2e develop && git tag v0.2.10 && git push mu2e v0.2.7
+git push mu2e develop && git tag v0.2.10 && git push mu2e v0.2.10
 ```
 
 Tag the **tip**, not the version-bump commit, if anything landed after it.
