@@ -404,6 +404,20 @@ def main():
 
         return IPAllowlistMiddleware(web_app, web_networks)
 
+    def _web_sockets():
+        # asyncio sets IPV6_V6ONLY on any socket it binds to "::", whatever
+        # net.ipv6.bindv6only says, so uvicorn's own bind would accept IPv6
+        # only. Bind the dual-stack socket here and hand it over.
+        if web_host != "::":
+            return None
+        import socket
+
+        sock = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+        sock.bind((web_host, web_port))
+        return [sock]
+
     async def _serve():
         servers = []
 
@@ -422,7 +436,7 @@ def main():
                     uvicorn.Config(
                         _restrict_web(create_web_app()), host=web_host, port=web_port, **_ssl_kwargs()
                     )
-                ).serve()
+                ).serve(sockets=_web_sockets())
             )
 
         await asyncio.gather(*servers)
