@@ -130,3 +130,131 @@ def test_a_zero_timeout_sets_no_bound(monkeypatch):
     s = FakeSession(count=5)
     run(s, filter={"term": {"source_id": "x"}})
     assert not [q for q in s.sql if "statement_timeout" in q]
+
+
+# --- the summary view: skip the live count for a coarse source/type filter ---
+#
+# Counting what `source_id=mu2e-docdb` or `doc_type=image` passes live took
+# 14 s cold and over 45 s (2026-11-12). kb_chunk_counts answers a filter on
+# source_id and/or doc_type alone; it is used only to skip the count when it
+# says more than the exact limit, so a stale view cannot hide a match.
+
+
+class ViewSession(FakeSession):
+    """FakeSession that also answers the kb_chunk_counts query."""
+
+    def __init__(self, count, view_total=None, view_error=False):
+        super().__init__(count)
+        self.view_total = view_total
+        self.view_error = view_error
+
+    def execute(self, stmt, params=None):
+        sql = str(stmt)
+        if "kb_chunk_counts" in sql:
+            self.sql.append(sql)
+            self.params.append(params or {})
+            if self.view_error:
+                raise RuntimeError('relation "kb_chunk_counts" does not exist')
+            return SimpleNamespace(scalar=lambda: self.view_total)
+        return super().execute(stmt, params)
+
+    def view_queries(self):
+        return [q for q in self.sql if "kb_chunk_counts" in q]
+
+    def live_counts(self):
+        return [q for q in self.sql if "count(*)" in q]
+
+
+def test_a_broad_coarse_filter_skips_the_live_count():
+    s = ViewSession(count=5, view_total=535_000)
+    out = run(s, filter={"term": {"doc_type": "image"}})
+    assert s.live_counts() == []
+    (query,) = s.vector_queries()
+    assert "SELECT TRUE" in query
+    assert out["metadata"]["vector_path"] == "index"
+    assert out["metadata"]["filtered_chunks"] == 535_000
+    (params,) = [p for q, p in zip(s.sql, s.params) if "kb_chunk_counts" in q]
+    assert params == {"doc_type": ["image"]}
+
+
+def test_a_view_total_within_the_exact_limit_ranks_exactly_without_counting():
+    s = ViewSession(count=5, view_total=163_000 // 1000)       # 163, limit 1000
+    out = run(s, filter={"term": {"doc_type": "table"}})
+    assert s.live_counts() == []
+    (query,) = s.vector_queries()
+    assert "filtered AS MATERIALIZED" in query
+    assert out["metadata"]["vector_path"] == "exact"
+    assert out["metadata"]["filtered_chunks"] == 163
+
+
+def test_a_view_total_of_none_is_counted_live():
+    """The view may lag an import, so "no chunks" is never taken on its word."""
+    for view_total in (0, None):
+        s = ViewSession(count=0, view_total=view_total)
+        out = run(s, filter={"term": {"source_id": "mu2e-wiki"}})
+        assert len(s.live_counts()) == 1
+        assert s.vector_queries() == []
+        assert out["metadata"]["vector_path"] == "no_match"
+
+
+def test_a_missing_view_falls_back_to_the_live_count():
+    s = ViewSession(count=5000, view_error=True)
+    out = run(s, filter={"term": {"source_id": "mu2e-docdb"}})
+    assert len(s.live_counts()) == 1
+    assert out["metadata"]["vector_path"] == "index"
+
+
+@pytest.mark.parametrize("filters", [
+    {"filter": {"range": {"update_time": {"gte": "2026-10-01"}}}},
+    {"filter": {"bool": {"must": [{"term": {"source_id": "x"}}, {"range": {"creating_time": {"gte": "2025"}}}]}}},
+    {"filter": {"bool": {"must_not": [{"term": {"doc_type": "image"}}]}}},
+    {"filter": {"term": {"docdb_id": "58830"}}},
+    {"filter": {"wildcard": {"doc_id": "58716*"}}},
+    {"filter": {"term": {"source_id": "x"}}, "enforce_visibility": True},
+    {"filter": {"term": {"source_id": "x"}}, "author": "Simon"},
+])
+def test_any_other_filter_never_reads_the_view(filters):
+    s = ViewSession(count=5, view_total=999_999)
+    run(s, **filters)
+    assert s.view_queries() == []
+    assert len(s.live_counts()) == 1
+
+
+def test_source_and_type_arguments_count_like_a_filter():
+    s = ViewSession(count=5, view_total=999_999)
+    pg._search_pgvector(
+        s, TABLE, [0.1, 0.2, 0.3], max_results=5, source_id="mu2e-docdb",
+        doc_type="text", chunking_strategy=None)
+    assert s.live_counts() == []
+    (params,) = [p for q, p in zip(s.sql, s.params) if "kb_chunk_counts" in q]
+    assert params == {"source_id": ["mu2e-docdb"], "doc_type": ["text"]}
+
+
+def test_a_chunking_strategy_needs_the_live_count():
+    s = ViewSession(count=5, view_total=999_999)
+    pg._search_pgvector(
+        s, TABLE, [0.1, 0.2, 0.3], max_results=5, source_id="mu2e-docdb",
+        doc_type=None, chunking_strategy="section_512")
+    assert s.view_queries() == [] and len(s.live_counts()) == 1
+
+
+@pytest.mark.parametrize("filter,expected", [
+    (None, {}),
+    ({"term": {"source_id": "a"}}, {"source_id": {"a"}}),
+    ({"terms": {"source_id": ["a", "b"]}}, {"source_id": {"a", "b"}}),
+    ({"bool": {"must": [{"term": {"source_id": "a"}}, {"term": {"doc_type": "text"}}]}},
+     {"source_id": {"a"}, "doc_type": {"text"}}),
+    ({"bool": {"must": {"term": {"doc_type": "text"}}}}, {"doc_type": {"text"}}),
+    ({"bool": {"must": [{"terms": {"source_id": ["a", "b"]}}, {"term": {"source_id": "b"}}]}},
+     {"source_id": {"b"}}),
+    ({"bool": {"must": [{"term": {"source_id": "a"}}, {"term": {"source_id": "b"}}]}},
+     {"source_id": set()}),
+    ({"term": {"doc_id": "1"}}, None),
+    ({"term": {"source_id": ["a"]}}, None),
+    ({"bool": {"must": [{"term": {"source_id": "a"}}], "should": [{"term": {"doc_type": "text"}}]}}, None),
+    ({"bool": {"must_not": [{"term": {"source_id": "a"}}]}}, None),
+    ({"term": {"source_id": "a"}, "range": {"x": {"gte": 1}}}, None),
+    ({"match": {"source_id": "a"}}, None),
+])
+def test_coarse_constraints(filter, expected):
+    assert pg._coarse_constraints(filter) == expected
