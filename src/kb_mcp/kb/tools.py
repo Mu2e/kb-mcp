@@ -2033,7 +2033,8 @@ def _scan_one_document(client, model: str, candidate: Dict[str, Any], run_id: st
 
     with get_db_session() as session:
         doc = session.get(Document, candidate["document_id"])
-        text = _scanned_text(doc.title or doc.title_gen, doc.summary, doc.text)
+        title = doc.title or doc.title_gen
+        text = _scanned_text(title, doc.summary, doc.text)
         label = f"{doc.source_id}/{doc.doc_id}"
         source_type = doc.source_type
 
