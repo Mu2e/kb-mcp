@@ -74,6 +74,35 @@ def test_findings_covered_by_patterns_are_ignored():
         {"hide_search": False, "hide_get": False, "redact": [], "flag": [], "reasons": []}
 
 
+@pytest.mark.parametrize("finding,text", [
+    (f("personnel", "high", "Jane Doe resigns"), "Note: Jane Doe resigns as L2 manager, effective May 1."),
+    (f("personal_data", "high", "knee replacement"), "I am having a knee replacement on June 9th."),
+    (f("restricted", "medium", "General Atomics Proprietary Information"), "Slide 4. General Atomics Proprietary Information"),
+])
+def test_a_hide_survives_the_next_run_after_its_span_is_redacted(finding, text):
+    # The first run hides and redacts the span; the second sees the span
+    # redacted. A hide must not be lifted for that (it was: MB-409).
+    from types import SimpleNamespace
+    from kb_mcp.privacy.redaction import span_regex
+
+    first = actions([finding], text)
+    assert first["hide_search"]
+    rule = SimpleNamespace(span=finding["span"], label="x", regex=span_regex(finding["span"]))
+    second = tools.privacy_policy_actions([finding], text, find_replacements(text, [rule]))
+    assert second["hide_search"] == first["hide_search"] and second["hide_get"] == first["hide_get"]
+
+
+def test_a_redaction_only_finding_is_done_once_its_span_is_redacted():
+    from types import SimpleNamespace
+    from kb_mcp.privacy.redaction import span_regex
+
+    text = "user tier3 password manager entry: TierIIIUser! (do not share)"
+    finding = f("credentials", "high", "TierIIIUser!")
+    rule = SimpleNamespace(span="TierIIIUser!", label="credential", regex=span_regex("TierIIIUser!"))
+    a = tools.privacy_policy_actions([finding], text, find_replacements(text, [rule]))
+    assert not a["hide_search"] and not a["redact"] and not a["flag"]
+
+
 def test_high_personal_data_hides_from_search_and_redacts():
     text = "I am having a knee replacement on June 9th and will be out three weeks"
     a = actions([f("personal_data", "high", "knee replacement on June 9th")], text)

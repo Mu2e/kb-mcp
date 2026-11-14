@@ -2472,9 +2472,17 @@ def privacy_policy_actions(findings: List[Dict[str, Any]], text: str, replacemen
             })
 
     for f in findings:
-        if covered_by_redaction(f, text, replacements):
-            continue
         category, severity = f.get("category"), f.get("severity")
+        # A finding a redaction already covers is handled -- but only if its
+        # rule is to redact. A rule that hides must keep hiding: the policy
+        # redacts the span of a hidden document too, so treating that as
+        # covered lifted the hide again on the next run (MB-409: a resignation
+        # letter hidden on 2026-10-09, lifted by the next run because its
+        # 12-character span was redacted by then).
+        hides = category == "restricted" or (
+            severity == "high" and category in ("personal_data", "personnel", "individual_assessment"))
+        if not hides and covered_by_redaction(f, text, replacements):
+            continue
         span = " ".join((f.get("span") or "").split())
         quote = (span or f.get("evidence") or "")[:80]
         if severity not in ("medium", "high"):
