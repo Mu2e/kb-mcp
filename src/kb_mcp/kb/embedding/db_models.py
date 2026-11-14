@@ -638,6 +638,13 @@ class Chunk(Base):
         Index("idx_chunks_document_id_start", "document_id", "char_start_index"),
         # GIN index for full-text search (PostgreSQL only)
         Index("idx_chunks_text_search_vector", "text_search_vector", postgresql_using="gin"),
+        # Covering index for the vector search: it maps each candidate chunk
+        # to its document from the index alone (an index-only scan), without
+        # reading the chunk row. Cold, a row read cost ~19 ms per candidate
+        # against ~1.8 ms from this index (2026-11-13, 300 random chunks).
+        # create_all() adds it only to new databases; `kb tools db-maintain`
+        # builds it on existing ones (database.SEARCH_INDEXES).
+        Index("idx_chunks_id_document_id", "id", postgresql_include=["document_id"]),
     )
 
     def __repr__(self) -> str:

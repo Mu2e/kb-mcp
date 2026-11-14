@@ -258,3 +258,41 @@ def test_a_chunking_strategy_needs_the_live_count():
 ])
 def test_coarse_constraints(filter, expected):
     assert pg._coarse_constraints(filter) == expected
+
+
+def _cte(query, name):
+    """The body of one CTE of the vector query, up to the next CTE."""
+    body = query.split(f"{name} AS (", 1)[1]
+    return body.split("\n        ),", 1)[0]
+
+
+@pytest.mark.parametrize("count", [None, 10])  # index path, exact path
+def test_candidates_are_grouped_without_reading_chunk_rows(count):
+    # Mapping a candidate to its document must need only chunks.id and
+    # chunks.document_id, which idx_chunks_id_document_id answers from the
+    # index; the other chunk columns are read for the returned chunks only.
+    s = FakeSession(count=count)
+    run(s, filter={"term": {"doc_type": "text"}} if count else None)
+    (query,) = s.vector_queries()
+    nearest = _cte(query, "nearest")
+    assert "c.document_id" in nearest
+    for column in ("chunk_index", "chunk_strategy", "char_start_index", "token_length", "section_path"):
+        assert column not in nearest
+    final = query.split("FROM diverse_chunks dc", 1)[1]
+    assert "JOIN chunks c ON c.id = dc.chunk_id" in final
+
+
+def test_hnsw_settings_ride_along_on_the_index_path(monkeypatch):
+    monkeypatch.setenv("SEARCH_HNSW_EF_SEARCH", "123")
+    monkeypatch.setenv("SEARCH_HNSW_MAX_SCAN_TUPLES", "4567")
+    s = FakeSession(count=None)
+    run(s)
+    assert "SET LOCAL hnsw.ef_search = 123" in s.settings()
+    assert "SET LOCAL hnsw.iterative_scan = relaxed_order" in s.settings()
+    assert "SET LOCAL hnsw.max_scan_tuples = 4567" in s.settings()
+
+
+def test_the_exact_path_sets_no_index_settings():
+    s = FakeSession(count=10)
+    run(s, filter={"term": {"doc_type": "text"}})
+    assert not [x for x in s.settings() if "hnsw" in x or "ivfflat" in x]

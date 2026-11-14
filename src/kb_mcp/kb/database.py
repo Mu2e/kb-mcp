@@ -368,6 +368,42 @@ def refresh_summary_views(conn) -> None:
         conn.execute(text(f"REFRESH MATERIALIZED VIEW CONCURRENTLY {name}"))
 
 
+# Indexes the search needs on tables that already exist. The models declare
+# them too, but create_all() never adds an index to an existing table, so
+# `kb tools db-maintain` builds them here: CONCURRENTLY, so ingestion keeps
+# writing while they build (a few minutes for chunks at 2.2M rows).
+#  - idx_chunks_id_document_id: see the Chunk model.
+SEARCH_INDEXES = {
+    "idx_chunks_id_document_id": "ON chunks (id) INCLUDE (document_id)",
+}
+
+
+def ensure_search_indexes(conn) -> list:
+    """Build any missing search index; returns the names built (PostgreSQL only).
+
+    `conn` must be in autocommit mode (CREATE INDEX CONCURRENTLY cannot run in
+    a transaction). An index left invalid by an interrupted concurrent build
+    exists but is never used, so it is dropped and built again. A role that may
+    not create in the schema skips this, like ensure_summary_views().
+    """
+    if conn.dialect.name != "postgresql":
+        return []
+    if not conn.execute(text("SELECT has_schema_privilege(current_user, current_schema(), 'CREATE')")).scalar():
+        return []
+    built = []
+    for name, definition in SEARCH_INDEXES.items():
+        valid = conn.execute(
+            text("SELECT i.indisvalid FROM pg_index i WHERE i.indexrelid = to_regclass(:n)"), {"n": name}
+        ).scalar()
+        if valid:
+            continue
+        if valid is False:
+            conn.execute(text(f"DROP INDEX CONCURRENTLY IF EXISTS {name}"))
+        conn.execute(text(f"CREATE INDEX CONCURRENTLY IF NOT EXISTS {name} {definition}"))
+        built.append(name)
+    return built
+
+
 def _setup_fulltext_search_trigger(engine: Engine) -> None:
     """Set up PostgreSQL trigger for auto-updating text_search_vector on chunks.
 

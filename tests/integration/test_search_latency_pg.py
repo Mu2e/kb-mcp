@@ -66,7 +66,12 @@ def corpus():
         pytest.skip(f"knowledge base not reachable: {e}")
     if not doc_id:
         pytest.skip("no mu2e-docdb documents")
-    return {"doc_id_prefix": doc_id[:3]}
+    with get_db_session() as session:
+        day = session.execute(text(
+            "SELECT creating_time::date FROM documents WHERE creating_time IS NOT NULL "
+            "ORDER BY creating_time DESC OFFSET 5000 LIMIT 1")).scalar()
+    day = day.isoformat() if day else _iso(365)
+    return {"doc_id_prefix": doc_id[:3], "doc_id": doc_id, "day": day}
 
 
 def _cases(corpus):
@@ -80,6 +85,14 @@ def _cases(corpus):
             {"term": {"source_id": "mu2e-docdb"}}, {"term": {"doc_type": "text"}}]}}},
         "time range, update_time since 90 days": {"filter": {"range": {"update_time": {"gte": _iso(90)}}}},
         "time range, creating_time 2 years": {"filter": {"range": {"creating_time": {"gte": _iso(730)}}}},
+        "exact docdb id": {"filter": {"term": {"doc_id": corpus["doc_id"]}}},
+        "docdb id range": {"filter": {"range": {"doc_id": {"gte": "50000", "lte": "59999"}}}},
+        "docdb id range and type": {"filter": {"bool": {"must": [
+            {"range": {"doc_id": {"gte": "50000", "lte": "59999"}}}, {"term": {"doc_type": "text"}}]}}},
+        "exact date": {"filter": {"range": {"creating_time": {"gte": corpus["day"], "lte": corpus["day"] + "T23:59:59"}}}},
+        "date range, 1 month": {"filter": {"range": {"creating_time": {"gte": _iso(60), "lte": _iso(30)}}}},
+        "date range and type": {"filter": {"bool": {"must": [
+            {"range": {"creating_time": {"gte": _iso(365)}}}, {"term": {"doc_type": "text"}}]}}},
         "doc_id prefix": {"filter": {"wildcard": {"doc_id": corpus["doc_id_prefix"] + "*"}}},
     }
 
@@ -98,6 +111,8 @@ COARSE = {
 @pytest.mark.parametrize("case", [
     "no filter", "source_id", "doc_type=text", "doc_type=image", "doc_type=table", "source_id and doc_type",
     "time range, update_time since 90 days", "time range, creating_time 2 years", "doc_id prefix",
+    "exact docdb id", "docdb id range", "docdb id range and type", "exact date",
+    "date range, 1 month", "date range and type",
 ])
 def test_filtered_search_is_fast(case, corpus, monkeypatch):
     from kb_mcp.kb.search import search_semantic

@@ -1139,6 +1139,18 @@ def cmd_db_maintain(args):
             refresh_summary_views(conn)
             print("  done.")
 
+    # Indexes the search needs that create_all() cannot add to an existing
+    # table (database.SEARCH_INDEXES). Built CONCURRENTLY, so writes go on;
+    # only the first run builds anything, later runs just check.
+    from ..database import ensure_search_indexes
+    with engine.connect() as conn:
+        conn = conn.execution_options(isolation_level="AUTOCOMMIT")
+        conn.execute(text(f"SET maintenance_work_mem = '{args.maintenance_work_mem}'"))
+        conn.execute(text("SET statement_timeout = 0"))
+        built = ensure_search_indexes(conn)
+        if built:
+            print(f"Built search indexes: {', '.join(built)}")
+
     # Guard rail: a document with thousands of chunks crowds every search
     # (the bulk parse once let 103 spreadsheets take 32% of all embeddings,
     # 2026-11-15). EMBED_MAX_TEXT_CHARS prevents it; this shows a slip.

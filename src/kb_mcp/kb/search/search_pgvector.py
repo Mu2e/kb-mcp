@@ -297,18 +297,17 @@ def _search_pgvector(
             ORDER BY e.embedding <=> CAST(:query_embedding AS vector)
             LIMIT :initial_limit
         )"""
+    # Grouping the candidates by document needs only (chunk id, document id),
+    # which idx_chunks_id_document_id answers without reading chunk rows; the
+    # rest of each chunk's row is read in the final SELECT, for the chunks
+    # returned only. Reading it for every candidate cost ~19 ms per candidate
+    # cold (2026-11-13), most of a cold search at initial_limit = 500-1000.
     vector_query = f"""
         WITH {knn_ctes},
         nearest AS (
             SELECT
-                c.id AS chunk_id,
+                k.chunk_id,
                 c.document_id,
-                c.chunk_index,
-                c.chunk_strategy,
-                c.char_start_index,
-                c.char_end_index,
-                c.token_length,
-                c.section_path,
                 k.distance
             FROM knn k
             JOIN chunks c ON c.id = k.chunk_id
@@ -335,15 +334,16 @@ def _search_pgvector(
         SELECT
             dc.chunk_id,
             dc.document_id,
-            dc.chunk_index,
-            dc.chunk_strategy,
-            dc.char_start_index,
-            dc.char_end_index,
-            dc.token_length,
-            dc.section_path,
+            c.chunk_index,
+            c.chunk_strategy,
+            c.char_start_index,
+            c.char_end_index,
+            c.token_length,
+            c.section_path,
             dc.score,
             dc.rank_in_doc
         FROM diverse_chunks dc
+        JOIN chunks c ON c.id = dc.chunk_id
         WHERE dc.document_id IN (SELECT document_id FROM top_documents)
         ORDER BY dc.score DESC
     """
@@ -363,6 +363,13 @@ def _search_pgvector(
     #    0.8; by default, every list). With only broad filters reaching this
     #    path it rarely matters, but it bounds a filter that passes many
     #    chunks none of which are near the query. SEARCH_IVFFLAT_MAX_PROBES.
+    #  - hnsw.ef_search / hnsw.iterative_scan / hnsw.max_scan_tuples: the same
+    #    three for an HNSW index, which the planner prefers when one exists.
+    #    Without iterative scan HNSW returns its ef_search nearest candidates
+    #    and drops those the filter rejects, so a filtered search returns fewer
+    #    rows than asked for (measured 2026-11-13: doc_type=image gave 1 of
+    #    20). SEARCH_HNSW_EF_SEARCH, SEARCH_HNSW_MAX_SCAN_TUPLES. Settings for
+    #    the index type that is not there are harmless.
     #  - work_mem: room for the sorts, which otherwise spill to disk.
     # The exact path computes every distance on purpose, so it takes only
     # work_mem: the index settings, and enable_seqscan = off, are for the
@@ -374,6 +381,9 @@ def _search_pgvector(
             f"SET LOCAL ivfflat.probes = {int(search_config['ivfflat_probes'])}",
             "SET LOCAL ivfflat.iterative_scan = relaxed_order",
             f"SET LOCAL ivfflat.max_probes = {int(search_config['ivfflat_max_probes'])}",
+            f"SET LOCAL hnsw.ef_search = {int(search_config['hnsw_ef_search'])}",
+            "SET LOCAL hnsw.iterative_scan = relaxed_order",
+            f"SET LOCAL hnsw.max_scan_tuples = {int(search_config['hnsw_max_scan_tuples'])}",
             "SET LOCAL work_mem = '64MB'",
             "SET LOCAL enable_seqscan = off",
         )
