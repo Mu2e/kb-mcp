@@ -40,11 +40,19 @@ def test_marker_findings_always_hide():
     assert a["hide_get"]
 
 
-def test_real_password_hides_and_redacts():
+def test_real_password_is_redacted_and_flagged_not_hidden():
     text = "user tier3 password manager entry: TierIIIUser! (do not share)"
     a = actions([f("credentials", "high", "TierIIIUser!")], text)
-    assert a["hide_search"] and a["hide_get"]
+    assert not a["hide_search"] and not a["hide_get"]
     assert [r["span"] for r in a["redact"]] == ["TierIIIUser!"]
+    assert a["flag"] and "check for others" in a["flag"][0]
+
+
+@pytest.mark.parametrize("span", ["", "zz", "NotInTheText99"])
+def test_real_password_that_cannot_be_redacted_hides(span):
+    text = "user tier3 password manager entry: ???????? (do not share)"
+    a = actions([f("credentials", "high", span)], text)
+    assert a["hide_search"] and a["hide_get"] and not a["redact"]
 
 
 def test_medium_credential_is_redacted_not_hidden():

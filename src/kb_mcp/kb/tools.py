@@ -2437,8 +2437,9 @@ def privacy_policy_actions(findings: List[Dict[str, Any]], text: str, replacemen
 
     - restriction notice (proprietary, confidential, internal, export
       control, ...): hide from search and get
-    - credential, high (a real password): hide from search and get, and
-      redact it
+    - credential, high (a real password): redact the exact span and flag
+      for review (the scan may not quote every password a document holds);
+      without an exact span, hide from search and get
     - credential, medium: redact the exact span; without one, flag
     - personal data / personnel / assessment, high (health, HR action):
       redact the span if exact, and hide from search
@@ -2485,10 +2486,15 @@ def privacy_policy_actions(findings: List[Dict[str, Any]], text: str, replacemen
             else:
                 out["flag"].append(f"restricted? {quote}")
         elif category == "credentials" and severity == "high":
-            out["hide_search"] = out["hide_get"] = True
-            out["reasons"].append(f"password or secret: {quote}")
+            # Redact the password and keep the document (a UPS manual's
+            # default password, a review's access code); hide it only when
+            # the password cannot be redacted because the span is not exact.
             if exact(span):
                 redact(f, span)
+                out["flag"].append(f"password redacted, check for others: {quote}")
+            else:
+                out["hide_search"] = out["hide_get"] = True
+                out["reasons"].append(f"password or secret without an exact span: {quote}")
         elif category == "credentials":
             if exact(span):
                 redact(f, span)

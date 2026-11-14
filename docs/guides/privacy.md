@@ -30,7 +30,7 @@ flowchart LR
     B --> C[parse, summarize,<br/>embed]
     C --> D[privacy scan<br/>vllm.fnal.gov]
     D --> E{privacy policy}
-    E -->|restriction notice,<br/>real password| F[hidden<br/>search + get]
+    E -->|restriction notice,<br/>password not redactable| F[hidden<br/>search + get]
     E -->|health, HR action| G[hidden<br/>from search]
     E -->|private detail,<br/>credential| H[visible,<br/>span redacted]
     E -->|clean| I[visible]
@@ -89,7 +89,7 @@ counts — and ignores findings a redaction already covers:
 | Finding | Action |
 |---|---|
 | restriction notice (medium or high) | **hide from search and get** |
-| credential, high (a real password) | **hide from search and get**, and redact it |
+| credential, high (a real password) | redact the exact span and flag for review; no exact span: **hide from search and get** |
 | credential, medium | redact the exact span (no exact span: flag) |
 | personal data / personnel / assessment, high | redact the span if exact, **hide from search** |
 | personal data, medium | redact the exact span |
