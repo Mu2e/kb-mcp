@@ -409,6 +409,25 @@ to live queries if the views do not exist. So the job must run a release that
 knows them, or they stop being refreshed; the dropdown counts are as fresh as
 the last import.
 
+`db-maintain` also builds the search's indexes where they are missing, all
+`CONCURRENTLY`, so searches and imports carry on while they build:
+
+- `kb_chunk_counts`, a third view: chunks per source and type, so a search
+  filtered only by `source_id` or `doc_type` skips a slow live count.
+- `idx_chunks_id_document_id` on `chunks`: maps a search candidate to its
+  document without reading the chunk row (~0.2 GB, a few minutes once).
+- The vector index that `SEARCH_VECTOR_INDEX` names (default `hnsw`): ~4.3 GB
+  and ~5 minutes for 2.2M vectors, with 6 GB `maintenance_work_mem` on the
+  build connection (`--hnsw-maintenance-work-mem`). The first run after
+  upgrading to a release that has it builds it; once it is valid, searches use
+  it instead of IVFFlat. The IVFFlat index is kept. To go back, set
+  `SEARCH_VECTOR_INDEX=ivfflat` in the job's env file and run
+  `kb embedding hnsw-index --drop hnsw`; to free the IVFFlat index once HNSW
+  is verified, `kb embedding hnsw-index --drop ivfflat`.
+
+So the first import after such an upgrade runs longer. To build them at a
+time you choose, run `kb tools db-maintain` by hand right after deploying.
+
 A failed run exits non-zero and its log ends with a `FAILURE :` line; every
 run also appears in `kb logs imports`. Upgrading is the normal release loop:
 the crontab runs `<deploy-root>/current`, so deploying a new release is enough.

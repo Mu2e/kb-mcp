@@ -323,6 +323,25 @@ def cmd_embedding_optimize_index(args):
         sys.exit(1)
 
 
+def cmd_embedding_hnsw_index(args):
+    """Build the HNSW index next to the IVFFlat one, or drop one of them.
+
+    Once a valid HNSW index exists the planner uses it for searches, so run
+    this only where the server runs code that sends the hnsw.* settings
+    (otherwise filtered searches return too few results). --drop hnsw goes
+    back to IVFFlat at once; --drop ivfflat frees the old index once HNSW is
+    verified.
+    """
+    try:
+        from ..embedding import hnsw_index
+
+        print(hnsw_index(args.embedding_name, drop=args.drop, m=args.m, ef_construction=args.ef_construction,
+                         maintenance_work_mem=args.maintenance_work_mem, parallel_workers=args.parallel_workers))
+    except Exception as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+
+
 def cmd_embedding_vacuum(args):
     """Run VACUUM ANALYZE on an embedding table to refresh planner statistics."""
     try:
@@ -497,6 +516,22 @@ def setup_commands(subparsers):
     )
     embedding_optimize_parser.add_argument("--embedding-name", help="Embedding config short name (e.g., 'st_MiniLML6v2')")
     embedding_optimize_parser.set_defaults(func=cmd_embedding_optimize_index)
+
+    embedding_hnsw_parser = embedding_subparsers.add_parser(
+        "hnsw-index",
+        help="Build an HNSW index next to the IVFFlat one (searches then use it), or drop one of the two",
+    )
+    embedding_hnsw_parser.add_argument("--embedding-name", help="Embedding config short name (default: the configured one)")
+    embedding_hnsw_parser.add_argument("--drop", choices=["hnsw", "ivfflat"],
+                                       help="Drop this index instead of building (ivfflat only while a valid HNSW index exists)")
+    embedding_hnsw_parser.add_argument("--m", type=int, default=16, help="HNSW links per node (default: 16)")
+    embedding_hnsw_parser.add_argument("--ef-construction", type=int, default=64,
+                                       help="HNSW build candidate list size (default: 64)")
+    embedding_hnsw_parser.add_argument("--maintenance-work-mem", default="6GB",
+                                       help="Session maintenance_work_mem for the build; the graph must fit (default: 6GB)")
+    embedding_hnsw_parser.add_argument("--parallel-workers", type=int, default=None,
+                                       help="Session max_parallel_maintenance_workers (default: the server's)")
+    embedding_hnsw_parser.set_defaults(func=cmd_embedding_hnsw_index)
 
     embedding_vacuum_parser = embedding_subparsers.add_parser(
         "vacuum",

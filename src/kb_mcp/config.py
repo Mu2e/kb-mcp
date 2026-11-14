@@ -586,6 +586,16 @@ def get_import_log_dirs() -> list:
             dirs.append(p)
     return dirs
 
+def _vector_index() -> str:
+    value = (_get_str("SEARCH_VECTOR_INDEX", "hnsw") or "hnsw").strip().lower()
+    if value not in ("hnsw", "ivfflat"):
+        # Not raised: get_search_config() runs on every search.
+        import warnings
+        warnings.warn(f"SEARCH_VECTOR_INDEX must be 'hnsw' or 'ivfflat', not {value!r}; using 'hnsw'")
+        return "hnsw"
+    return value
+
+
 def get_search_config() -> dict:
     """Search settings.
 
@@ -597,6 +607,7 @@ def get_search_config() -> dict:
             * `rrf_k` (int): Reciprocal Rank Fusion constant (Env: `SEARCH_RRF_K`, default: 60).
             * `ivfflat_probes` (int): IVFFlat lists searched per semantic query (Env: `SEARCH_IVFFLAT_PROBES`, default: 128).
             * `ivfflat_max_probes` (int): Most lists a filtered semantic query's iterative index scan may read (Env: `SEARCH_IVFFLAT_MAX_PROBES`, default: 256).
+            * `vector_index` (str): Vector index the embedding tables should have, "hnsw" or "ivfflat" (Env: `SEARCH_VECTOR_INDEX`, default: "hnsw"). `kb tools db-maintain` builds it where missing and never drops the other kind; a new embedding table is created with it.
             * `hnsw_ef_search` (int): Candidate list size of an HNSW index scan (Env: `SEARCH_HNSW_EF_SEARCH`, default: 200).
             * `hnsw_max_scan_tuples` (int): Most rows a filtered semantic query's iterative HNSW scan may visit (Env: `SEARCH_HNSW_MAX_SCAN_TUPLES`, default: 20000).
             * `exact_max_chunks` (int): A filtered semantic query that at most this many embedded chunks pass ranks them exactly instead of through the index (Env: `SEARCH_EXACT_MAX_CHUNKS`, default: 300000).
@@ -608,6 +619,7 @@ def get_search_config() -> dict:
         'rrf_k': _get_int("SEARCH_RRF_K", 60),
         'ivfflat_probes': _get_int("SEARCH_IVFFLAT_PROBES", 128),
         'ivfflat_max_probes': _get_int("SEARCH_IVFFLAT_MAX_PROBES", 256),
+        'vector_index': _vector_index(),
         'hnsw_ef_search': _get_int("SEARCH_HNSW_EF_SEARCH", 200),
         'hnsw_max_scan_tuples': _get_int("SEARCH_HNSW_MAX_SCAN_TUPLES", 20000),
         'exact_max_chunks': _get_int("SEARCH_EXACT_MAX_CHUNKS", 300000),

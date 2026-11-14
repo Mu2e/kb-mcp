@@ -1151,6 +1151,23 @@ def cmd_db_maintain(args):
         if built:
             print(f"Built search indexes: {', '.join(built)}")
 
+    # The vector index SEARCH_VECTOR_INDEX names (default HNSW), on every
+    # embedding table that lacks it. Built CONCURRENTLY; the other kind is
+    # never dropped here (kb embedding hnsw-index --drop ivfflat does that).
+    # Once the HNSW index is valid the planner uses it. Roll back with
+    # SEARCH_VECTOR_INDEX=ivfflat and `kb embedding hnsw-index --drop hnsw`.
+    from ...config import get_search_config
+    if get_search_config()["vector_index"] == "hnsw":
+        from ..embedding.embedding import _build_hnsw_index, hnsw_index_name
+        for table, _dim in embedding_tables:
+            print(f"Checking HNSW index on {table}...")
+            if _build_hnsw_index(engine, table, hnsw_index_name(table),
+                                 maintenance_work_mem=args.hnsw_maintenance_work_mem,
+                                 parallel_workers=args.parallel_workers):
+                print(f"  built {hnsw_index_name(table)}.")
+            else:
+                print("  present.")
+
     # Guard rail: a document with thousands of chunks crowds every search
     # (the bulk parse once let 103 spreadsheets take 32% of all embeddings,
     # 2026-11-15). EMBED_MAX_TEXT_CHARS prevents it; this shows a slip.
@@ -3109,6 +3126,15 @@ def setup_commands(subparsers):
     db_maintain_parser.add_argument(
         "--chunk-warn", type=int, default=2000,
         help="Warn about documents with more chunks than this (default: 2000)",
+    )
+    db_maintain_parser.add_argument(
+        "--hnsw-maintenance-work-mem", default="6GB",
+        help="Session maintenance_work_mem for building a missing HNSW index (default: 6GB; the graph must fit, "
+             "~4-5 GB for 2.2M 384-d vectors, or the build is far slower)",
+    )
+    db_maintain_parser.add_argument(
+        "--parallel-workers", type=int, default=None,
+        help="Session max_parallel_maintenance_workers for index builds (default: the server's)",
     )
     db_maintain_parser.set_defaults(func=cmd_db_maintain)
 
