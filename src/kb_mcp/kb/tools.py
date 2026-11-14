@@ -1827,8 +1827,45 @@ def _rule_oversized_spreadsheet(
     ]
 
 
+# The project's monthly CAM cost reports ("47502 Accelerator Systems CAM
+# docs" and the like): per-control-account cost sheets, "BED Analysis"
+# summaries and totals, posted every month. They list purchases with
+# purchase-card holders and are of no use to an agent; the Mu2e review of
+# 2026-11-14 took them out of search (kb_get still fetches them). Matched on
+# the DocDB file name, which every report in the series carries.
+COST_REPORT_NAME_PATTERNS = ("%cost_report%", "%cost report%")
+
+
+def _rule_cost_report(
+    session,
+    *,
+    source_id: Optional[str] = None,
+    hide_get: bool = False,
+) -> List[Dict[str, Any]]:
+    """Raw documents whose DocDB file name marks a monthly cost report."""
+    from sqlalchemy import or_
+    from .db_models import RawDocument
+
+    query = session.query(RawDocument.id, RawDocument.doc_id).filter(
+        or_(*[RawDocument.doc_id.ilike(p) for p in COST_REPORT_NAME_PATTERNS])
+    )
+    if source_id:
+        query = query.filter(RawDocument.source_id == source_id)
+    return [
+        {
+            "raw_document_id": raw_id,
+            "visible_search": False,
+            "visible_get": not hide_get,
+            "reason": "monthly cost report; kept out of search",
+            "meta": {"rule": "cost-report", "doc_id": doc_id},
+        }
+        for raw_id, doc_id in query.order_by(RawDocument.doc_id).all()
+    ]
+
+
 VISIBILITY_RULES = {
     "oversized-spreadsheet": _rule_oversized_spreadsheet,
+    "cost-report": _rule_cost_report,
 }
 
 

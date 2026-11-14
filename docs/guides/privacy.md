@@ -205,6 +205,22 @@ import job's next `--only-unscanned` scan.
 `document_visibility_runs` (every scan and policy run is a run row with its
 counts).
 
+## Standing rules
+
+Some kinds of document are handled by a rule instead of the scan. `kb tools
+visibility sweep --rule <rule> --apply` applies one to every document nobody
+has decided yet (a decision someone made, or an earlier sweep, is never
+changed), and a sweep's decision is final for the policy like a person's.
+
+| Rule | Selects | Decision |
+|---|---|---|
+| `cost-report` | the monthly CAM cost reports, by DocDB file name ("Cost_Report", "Cost Report") | hidden from search; `kb_get` still works (`--hide-get` hides that too) |
+| `oversized-spreadsheet` | spreadsheets over 500,000 characters, which the scan skips | hidden from search (`--hide-get` likewise) |
+
+The DocDB import job runs the `cost-report` sweep after every import, so new
+reports never reach search; it was applied to the 310 reports up to
+September 2026 in the review of 2026-11-14.
+
 ## Limits
 
 - **The LLM misses things and varies between runs.** Formats with a pattern

@@ -1578,6 +1578,8 @@ def cmd_visibility_sweep(args):
     rule_options = {}
     if args.rule == "oversized-spreadsheet":
         rule_options = {"max_chars": args.max_chars, "hide_get": args.hide_get}
+    elif args.rule == "cost-report":
+        rule_options = {"hide_get": args.hide_get}
 
     try:
         result = visibility_sweep(
@@ -2787,8 +2789,9 @@ def setup_commands(subparsers):
         ),
     )
     vis_sweep_parser.add_argument(
-        "--rule", required=True, choices=["oversized-spreadsheet"],
-        help="oversized-spreadsheet: spreadsheets over --max-chars, hidden from search",
+        "--rule", required=True, choices=["oversized-spreadsheet", "cost-report"],
+        help="oversized-spreadsheet: spreadsheets over --max-chars, hidden from search; "
+             "cost-report: the monthly CAM cost reports (by DocDB file name), hidden from search",
     )
     vis_sweep_parser.add_argument("--apply", action="store_true", help="Write the decisions (default: dry run)")
     vis_sweep_parser.add_argument("--source-id", help="Restrict to a single source")
@@ -2800,7 +2803,7 @@ def setup_commands(subparsers):
     )
     vis_sweep_parser.add_argument(
         "--hide-get", action="store_true",
-        help="oversized-spreadsheet: also hide from kb_get (default: search only)",
+        help="Also hide from kb_get (default: search only)",
     )
     vis_sweep_parser.add_argument("--json", action="store_true", help="Output as JSON")
     vis_sweep_parser.set_defaults(func=cmd_visibility_sweep)

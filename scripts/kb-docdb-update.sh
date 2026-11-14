@@ -209,6 +209,18 @@ stdbuf -oL -eL kb-import docdb --days "$DAYS" --skip-existing --delay 1 --max-em
 rc=$?
 end=$(date +%s)
 
+# 3a'. Standing visibility rules (docs/guides/privacy.md): the monthly cost
+# reports stay out of search. A sweep only decides documents nobody has
+# decided yet, so it is cheap to run every time; failing does not fail the run.
+{
+    echo "--- visibility sweep: cost-report ---"
+    if kb tools visibility sweep --rule cost-report --apply; then
+        echo "cost-report sweep done"
+    else
+        echo "SWEEP FAILED: cost-report; new cost reports stay in search until a later run"
+    fi
+} >> "$LOG" 2>&1
+
 # 3a. Privacy (docs/guides/privacy.md), when PRIVACY_HOLD_NEW_DOCUMENTS is on:
 # every document this run created is on hold (hidden from the MCP tools)
 # from the moment it was inserted. Scan the documents no prompt version has
