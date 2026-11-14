@@ -113,6 +113,8 @@ These apply to every document, including future imports, without review
 | `passcode-or-password` | the value after passcode / password / pwd / pin / `pw:` | `Passcode: [redacted: credential]` |
 | `purchase-card` | `Card#NAME 1234` | `[redacted: payment card]` |
 | `private-key`, `api-token` | PEM private keys, AWS/GitHub/Slack/OpenAI-style tokens, JWTs | |
+| `network-address` | private IPv4 (10/8, 172.16/12, 192.168/16) and Fermilab's 131.225/16, with any `:port` | `Data [redacted: network address]` |
+| `hardware-address` | MAC addresses (`aa:bb:cc:dd:ee:ff`, or with dashes when it has a hex letter) | `HWaddr [redacted: hardware address]` |
 
 Redaction happens before search excerpts are cut, so an excerpt never shows
 half a secret. `kb_get_image` withholds an image whose description contains

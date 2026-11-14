@@ -134,9 +134,15 @@ def test_paraphrased_personal_data_is_flagged():
 
 
 def test_low_and_security_findings_do_not_act():
+    text = "host mu2e-dcs-01 runs the alarm server"
+    a = actions([f("security", "medium", "mu2e-dcs-01 runs the alarm server"), f("personal_data", "low", "mu2e-dcs-01")], text)
+    assert not a["hide_search"] and not a["redact"] and a["flag"] == ["security: mu2e-dcs-01 runs the alarm server"]
+
+
+def test_a_security_finding_on_an_address_the_pattern_redacts_is_done():
     text = "host mu2e-dcs-01 at 192.168.157.26"
-    a = actions([f("security", "medium", "192.168.157.26"), f("personal_data", "low", "mu2e-dcs-01")], text)
-    assert not a["hide_search"] and not a["redact"] and a["flag"] == ["security: 192.168.157.26"]
+    a = actions([f("security", "medium", "192.168.157.26")], text)
+    assert a == {"hide_search": False, "hide_get": False, "redact": [], "flag": [], "reasons": []}
 
 
 def test_duplicate_spans_are_redacted_once():

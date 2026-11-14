@@ -41,6 +41,13 @@ def rule(span, raw_id="raw-1", label="personal data"):
      "PRN279049 2 MAG SHIELD 5936272675 [redacted: payment card] TranID3122547301"),
     ("token ghp_" + "a" * 36 + " end", "token [redacted: access token] end"),
     ("-----BEGIN RSA PRIVATE KEY-----\nMIIE\n-----END RSA PRIVATE KEY-----", "[redacted: private key]"),
+    ("mu2e-trk-03\tLab\t131.225.38.112\tData\t10.226.8.43\t192.168.157.26",
+     "mu2e-trk-03\tLab\t[redacted: network address]\tData\t[redacted: network address]\t[redacted: network address]"),
+    ("ssh -L 8080:172.16.4.20:8080 then open 192.168.1.5:5064",
+     "ssh -L 8080:[redacted: network address] then open [redacted: network address]"),
+    ("ensure the FEB address field reads 192.168.1.10.", "ensure the FEB address field reads [redacted: network address]."),
+    ("default MAC addresses are 00:60:55:FE:E1:23 (ExtMon), 00-1A-2B-3C-4D-5E (STM)",
+     "default MAC addresses are [redacted: hardware address] (ExtMon), [redacted: hardware address] (STM)"),
 ])
 def test_global_patterns_redact(text, expected):
     assert r.redact(text) == expected
@@ -58,6 +65,14 @@ def test_global_patterns_redact(text, expected):
     "Pin: GND",
     "PIN 12: VCC, Pin=3 is the clock",
     "pin: 1234 on the connector",
+    "art v3_10_02, ROOT 6.30.04.01 and gcc 13.1.0.2",
+    "release 4.12.1.3 and version 10.1.0",
+    "172.15.4.4 and 172.32.0.1 are outside the private range",
+    "192.169.1.1 is not private, 131.226.0.1 is not Fermilab",
+    "10.256.1.1 is not an address, 1.10.2.3.4 is a dotted number",
+    "current path is segments 01-02-03-04-05-06",
+    "measurements at inspection locations 12-34-56-78-90-12",
+    "time 12:34:56 on 2026-11-14",
 ])
 def test_global_patterns_leave_ordinary_text(text):
     assert r.redact(text) == text
