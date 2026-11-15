@@ -12,6 +12,7 @@ from .routes.logs import setup_logs_routes
 from .routes.imports import setup_imports_routes
 from .routes.privacy import setup_privacy_routes
 from .routes.statistics import setup_statistics_routes
+from .routes.usage import setup_usage_routes
 from .routes.admin import setup_admin_routes
 from .routes.api import setup_api_routes
 from .routes.graph import setup_graph_routes
@@ -26,6 +27,7 @@ def setup_web_routes(app, oauth_provider, session_manager: WebSessionManager):
     - Evaluation interface (/web/eval/*)
     - Logs viewing (/web/logs)
     - Statistics (/web/statistics)
+    - MCP usage (/web/usage)
 
     Args:
         app: Starlette application instance
@@ -53,6 +55,9 @@ def setup_web_routes(app, oauth_provider, session_manager: WebSessionManager):
 
     # Setup statistics routes
     setup_statistics_routes(app, session_manager, require_auth_html)
+
+    # MCP usage page (/web/usage, public: counts only)
+    setup_usage_routes(app, session_manager, require_auth_html, require_auth_api)
 
     # Setup admin routes (API key management)
     setup_admin_routes(app, oauth_provider, session_manager)

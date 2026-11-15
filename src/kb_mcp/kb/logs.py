@@ -492,3 +492,86 @@ def get_mcp_usage(days: Optional[float] = 30, session: Optional[Session] = None)
         "sessions": session_rows,
         "totals": {"calls": len(rows), "sessions": len(session_rows), "by_transport": transports},
     }
+
+
+USAGE_TIMEZONE = "America/Chicago"
+
+
+def get_mcp_usage_daily(days: int = 30, tz: str = USAGE_TIMEZONE,
+                        session: Optional[Session] = None) -> Dict[str, Any]:
+    """MCP calls per day and tool, and distinct sessions per day, for a public page.
+
+    Counts only: no session identifiers, queries, users or error details
+    leave this function, so the result can be shown without logging in.
+    Days are calendar days in `tz` (Fermilab time by default), the last
+    `days` of them including today, with days without calls present as
+    zeros so a chart has no gaps. Aggregated in Python like get_mcp_usage()
+    (one small row per call; ~1,600 rows a month in 2026), so it runs on
+    SQLite too.
+
+    Returns {"days", "timezone", "tools": [names, busiest first],
+    "series": [{"date": "YYYY-MM-DD", "calls": {tool: n}, "total", "sessions",
+    "errors"}], "totals": {"calls", "sessions", "errors", "by_tool": {tool: n}},
+    "latency_ms": {tool: {"median", "p95"}}}.
+    """
+    from datetime import timedelta
+    from .db_models import McpCallLog
+
+    try:
+        from zoneinfo import ZoneInfo
+        zone = ZoneInfo(tz)
+    except Exception:  # noqa: BLE001 - no tz database: fall back to UTC
+        zone, tz = timezone.utc, "UTC"
+    days = max(1, min(int(days), 366))
+    today = datetime.now(zone).date()
+    first_day = today - timedelta(days=days - 1)
+    start = datetime(first_day.year, first_day.month, first_day.day, tzinfo=zone)
+
+    with get_db_session(session) as session:
+        rows = (
+            session.query(McpCallLog.tool, McpCallLog.session_id, McpCallLog.status,
+                          McpCallLog.duration_ms, McpCallLog.created_time)
+            .filter(McpCallLog.created_time >= start.astimezone(timezone.utc))
+            .all()
+        )
+
+    per_day: Dict[str, Dict[str, Any]] = {}
+    for i in range(days):
+        d = (first_day + timedelta(days=i)).isoformat()
+        per_day[d] = {"date": d, "calls": {}, "total": 0, "sessions": set(), "errors": 0}
+    all_sessions, by_tool, durations, errors = set(), {}, {}, 0
+    for tool, sid, status, duration, created in rows:
+        if created.tzinfo is None:  # SQLite returns naive UTC
+            created = created.replace(tzinfo=timezone.utc)
+        day = per_day.get(created.astimezone(zone).date().isoformat())
+        if day is None:
+            continue
+        day["calls"][tool] = day["calls"].get(tool, 0) + 1
+        day["total"] += 1
+        if sid:
+            day["sessions"].add(sid)
+            all_sessions.add(sid)
+        if status == "error":
+            day["errors"] += 1
+            errors += 1
+        by_tool[tool] = by_tool.get(tool, 0) + 1
+        if duration is not None:
+            durations.setdefault(tool, []).append(duration)
+
+    def percentile(values, q):
+        values = sorted(values)
+        return round(values[min(len(values) - 1, int(q * len(values)))]) if values else None
+
+    series = []
+    for day in per_day.values():
+        day["sessions"] = len(day["sessions"])
+        series.append(day)
+    return {
+        "days": days,
+        "timezone": tz,
+        "tools": sorted(by_tool, key=lambda t: -by_tool[t]),
+        "series": series,
+        "totals": {"calls": sum(by_tool.values()), "sessions": len(all_sessions), "errors": errors,
+                   "by_tool": by_tool},
+        "latency_ms": {t: {"median": percentile(v, 0.5), "p95": percentile(v, 0.95)} for t, v in durations.items()},
+    }
