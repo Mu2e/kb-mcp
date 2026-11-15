@@ -107,8 +107,16 @@ def test_cost_report_rule_matches_the_monthly_report_file_names(session):
     _raw(session, "c", "56278/Cost Report - 47502.01 Accel PM - Mar26")
     _raw(session, "d", "12345-CostEstimate_TrackerStations")   # not a cost report
     _raw(session, "e", "23456-Mu2e_Monthly_Report_July_2020")  # a monthly report, not a cost report
+    _raw(session, "f", "33356-Mu2e_Earned_Value_202004_xlsx")
+    _raw(session, "g", "58390-Final_Earned_Value_202608_pdf")
+    _raw(session, "h", "54976-Mu2e_November_TAR_202511_-_Completed_-_Sent_to_PCS_-_v1")
+    _raw(session, "i", "56278/Mu2e TAR - Mar26 - Status Complete - Final")
+    _raw(session, "j", "54042-Mu2e_Turnaround_Report__2025-Sep_-_Complete_-_Verified_-_v1")
+    _raw(session, "k", "58983-STM_Collimation_-_Nov_3_-_DocDB_58983_pptx")  # "target", "STAR": not TAR
+    _raw(session, "l", "5197-EXtinctionMonitorGeometry")
+    _raw(session, "m", "40001-StarterKit_tarball_notes")
     got = _rule_cost_report(session)
-    assert sorted(d["raw_document_id"] for d in got) == ["a", "b", "c"]
+    assert sorted(d["raw_document_id"] for d in got) == ["a", "b", "c", "f", "g", "h", "i", "j"]
     assert all(d["visible_search"] is False and d["visible_get"] is True for d in got)
     assert {d["meta"]["rule"] for d in got} == {"cost-report"}
 

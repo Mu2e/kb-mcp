@@ -507,11 +507,13 @@ def get_embedding_config() -> dict:
             * `chunk_overlap` (int|None): Tokens of overlap between adjacent
               token chunks (Env: `CHUNK_OVERLAP`). Unset means 10% of
               `chunk_size`; the chunker clamps it to half of `chunk_size`.
-            * `max_text_chars` (int): A text document longer than this gets
-              no body chunks, only its summary chunk (Env:
-              `EMBED_MAX_TEXT_CHARS`, default: 500000; 0 = no limit). The
-              giant spreadsheets otherwise ran to 10k-43k chunks each: 103
-              of them held 32% of all embeddings (2026-11-15).
+            * `max_text_chars` (int): A spreadsheet (xlsx, xls, csv) whose
+              text is longer than this gets no body chunks, only its summary
+              chunk (Env: `EMBED_MAX_TEXT_CHARS`, default: 500000; 0 = no
+              limit). The giant financial sheets otherwise ran to 10k-43k
+              chunks each: 96 of them held 32% of all embeddings
+              (2026-11-15). Long PDFs, slides and Word documents are always
+              chunked.
 
     `chunk_size` and `chunk_overlap` are None when unset rather than carrying a coded default, so the
     embedding layer can tell "the operator chose this" from "nobody said",

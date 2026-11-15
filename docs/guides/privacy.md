@@ -216,16 +216,18 @@ changed), and a sweep's decision is final for the policy like a person's.
 
 | Rule | Selects | Decision |
 |---|---|---|
-| `cost-report` | the monthly CAM cost reports, by DocDB file name ("Cost_Report", "Cost Report") | hidden from search; `kb_get` still works (`--hide-get` hides that too) |
+| `cost-report` | the monthly project-controls reports, by DocDB file name: CAM cost reports ("Cost_Report"), Earned Value reports, status / turnaround ("TAR") reports sent to PCS | hidden from search; `kb_get` still works (`--hide-get` hides that too) |
 | `oversized-spreadsheet` | spreadsheets over 500,000 characters, which the scan skips | hidden from search (`--hide-get` likewise) |
 
-The DocDB import job runs both sweeps after every import, so new cost reports
-and oversized spreadsheets never reach search; `cost-report` was applied to the
-310 reports up to September 2026 in the review of 2026-11-14. Independently,
-`EMBED_MAX_TEXT_CHARS` (default 500,000) keeps any text that long from being
-chunked at all: such a document is represented by its summary chunk alone,
-and `kb tools db-maintain` warns about any document with more than 2,000
-chunks.
+The DocDB import job runs the `cost-report` sweep after every import, so new
+monthly reports never reach search; it was applied to the reports up to
+September 2026 in the review of 2026-11-14/15. `oversized-spreadsheet` is not
+run automatically: a large technical spreadsheet (channel map, inductance
+matrix) should stay findable. Independently, `EMBED_MAX_TEXT_CHARS` (default
+500,000) keeps a spreadsheet's text that long from being chunked: it is
+represented by its summary chunk alone, so it can be found without its rows
+crowding the search. Long PDFs, slides and Word documents are always chunked.
+`kb tools db-maintain` warns about any document with more than 2,000 chunks.
 
 ## Limits
 

@@ -179,19 +179,19 @@ fi
 # since this runs unattended twice a day and a slower, more polite pace to
 # DocDB matters more here than shaving a few minutes off the run.
 #
-# --max-embed-chars: the corpus's p99 document is ~193K chars, but a long
-# tail of financial spreadsheets runs up to 13M chars (11k+ chunks each) and
-# can dominate a run's time budget on its own. 500K sits comfortably above
-# every normal document while excluding those ~45 outliers, which get
-# chunked/embedded separately (a manual/less-frequent pass), not by this
-# twice-daily job. Affects auto-embed only, not fetching or parsing.
+# No --max-embed-chars: the giant financial spreadsheets (up to 13M chars,
+# 11k-43k chunks each) are kept to their summary chunk by
+# EMBED_MAX_TEXT_CHARS for every path that chunks, so the flag is no longer
+# needed to keep them out of a run; it also left long PDFs and slide decks
+# unchunked, which are worth searching. The first run after upgrading
+# chunks those (~110 documents, ~150k chunks) and takes longer.
 #
 # NOTE: auto-embed and auto-summarize (both on by default) sweep the *whole*
 # mu2e-docdb backlog for anything still missing chunks/a summary, not just
 # the --days 1 window — see chunk_and_embed_all()/summarize_all() in
 # kb/tools.py. That's intentional: it's how the historical backlog (see
-# memory: DocDB coverage is ~1%) gets caught up over repeated runs, bounded
-# by --max-embed-chars above. Fetching/parsing (the --days-scoped part) is
+# memory: DocDB coverage is ~1%) gets caught up over repeated runs.
+# Fetching/parsing (the --days-scoped part) is
 # unaffected. A prior bug made this sweep re-chunk the same giant
 # non-Docling spreadsheets on *every* run forever (chunk_and_embed_all's
 # section-strategy backlog query only recognized `section_*` chunks as
@@ -204,17 +204,17 @@ export PYTHONUNBUFFERED=1
 # run can be traced back to how it was started and to this log file.
 export KB_RUN_TRIGGER="${KB_RUN_TRIGGER:-cron-script}"
 export KB_RUN_LOG="$LOG"
-stdbuf -oL -eL kb-import docdb --days "$DAYS" --skip-existing --delay 1 --max-embed-chars 500000 \
+stdbuf -oL -eL kb-import docdb --days "$DAYS" --skip-existing --delay 1 \
     --no-embed-tables >> "$LOG" 2>&1
 rc=$?
 end=$(date +%s)
 
 # 3a'. Standing visibility rules (docs/guides/privacy.md): the monthly cost
-# reports and the oversized spreadsheets stay out of search. A sweep only
+# and earned value / status reports stay out of search. A sweep only
 # decides documents nobody has decided yet, so it is cheap to run every time;
 # failing does not fail the run.
 {
-    for rule in cost-report oversized-spreadsheet; do
+    for rule in cost-report; do
         echo "--- visibility sweep: $rule ---"
         if kb tools visibility sweep --rule "$rule" --apply; then
             echo "$rule sweep done"
