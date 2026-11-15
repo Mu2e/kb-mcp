@@ -9,6 +9,94 @@ from ..db_models import Document
 
 logger = logging.getLogger(__name__)
 
+_COARSE_FIELDS = ("source_id", "doc_type")
+
+
+def _coarse_constraints(filter: Optional[Dict[str, Any]]) -> Optional[Dict[str, set]]:
+    """The source_id / doc_type values a filter requires, if it is nothing else.
+
+    Understands `term` and `terms` on source_id or doc_type, and `bool` whose
+    only clause is a `must` of those (what the MCP tools and the web UI build
+    for a source or type restriction). Returns {field: allowed values}, empty
+    for no filter, or None for anything else -- should / must_not, a range, a
+    wildcard, any other field -- so the caller falls back to counting live.
+    A field constrained twice is intersected, as the AND it is.
+    """
+    found: Dict[str, set] = {}
+
+    def add(field, values) -> bool:
+        if field not in _COARSE_FIELDS:
+            return False
+        values = set(values)
+        found[field] = found[field] & values if field in found else values
+        return True
+
+    def walk(node) -> bool:
+        if not isinstance(node, dict) or len(node) != 1:
+            return False
+        (kind, body), = node.items()
+        if kind == "term" and isinstance(body, dict) and len(body) == 1:
+            (field, value), = body.items()
+            return not isinstance(value, (dict, list)) and add(field, [value])
+        if kind == "terms" and isinstance(body, dict) and len(body) == 1:
+            (field, values), = body.items()
+            return isinstance(values, list) and add(field, values)
+        if kind == "bool" and isinstance(body, dict) and set(body) == {"must"}:
+            must = body["must"]
+            return all(walk(c) for c in (must if isinstance(must, list) else [must]))
+        return False
+
+    if not filter:
+        return found
+    return found if walk(filter) else None
+
+
+def _coarse_chunk_total(
+    session,
+    source_id: Optional[str],
+    doc_type: Optional[str],
+    chunking_strategy: Optional[str],
+    parser_id: Optional[str],
+    filter: Optional[Dict[str, Any]],
+    extra_filters: bool,
+    enforce_visibility: bool,
+) -> Optional[int]:
+    """Chunks passing a source_id/doc_type-only filter, from kb_chunk_counts.
+
+    Counting what a broad filter passes live reads chunks in no useful order:
+    14 s cold for source_id=mu2e-docdb, over 45 s for doc_type=image
+    (2026-11-12), which is where those searches timed out. The summary view
+    (kb.database.SUMMARY_VIEWS) holds the answer. None means "count live":
+    any other filter (a time range, a metadata field, a chunking strategy,
+    visibility), or the view missing (not created yet, or the role cannot
+    read it). The view is as fresh as the last `db-maintain`, so the caller
+    uses it only when it says some chunks pass (see the caller).
+    """
+    if chunking_strategy or parser_id or extra_filters or enforce_visibility:
+        return None
+    constraints = _coarse_constraints(filter)
+    if constraints is None:
+        return None
+    for field, arg in (("source_id", source_id), ("doc_type", doc_type)):
+        if arg:
+            constraints[field] = constraints[field] & {arg} if field in constraints else {arg}
+    clauses, params = [], {}
+    for field in _COARSE_FIELDS:
+        if field in constraints:
+            if not constraints[field]:
+                return 0
+            clauses.append(f"{field} = ANY(:{field})")
+            params[field] = sorted(str(v) for v in constraints[field])
+    where = " AND ".join(clauses) or "TRUE"
+    try:
+        # A savepoint, so a missing view cannot abort the search's transaction.
+        with session.begin_nested():
+            return session.execute(
+                text(f"SELECT sum(n) FROM kb_chunk_counts WHERE {where}"), params
+            ).scalar()
+    except Exception:
+        return None
+
 
 def _search_pgvector(
     session,
@@ -121,25 +209,42 @@ def _search_pgvector(
     filtered_chunks = None
     if where_clause_sql != "TRUE":
         exact_max = int(search_config['exact_max_chunks'])
-        filtered_chunks = session.execute(
-            text(f"""
-                SELECT count(*) FROM (
-                    SELECT 1
-                    FROM {embedding_table.name} e
-                    JOIN chunks c ON c.id = e.chunk_id
-                    JOIN documents d ON c.document_id = d.id{visibility_join}
-                    WHERE {where_clause_sql}{visibility_condition}
-                    LIMIT :count_cap
-                ) passing
-            """),
-            {"count_cap": exact_max + 1, **filter_params_dict},
-        ).scalar()
-        if filtered_chunks == 0:
-            if timeout_ms > 0:
-                session.execute(text("SET LOCAL statement_timeout = DEFAULT"))
-            return _empty(vector_path="no_match", filtered_chunks=0)
-        if filtered_chunks <= exact_max:
-            vector_path = "exact"
+        # A filter on source_id / doc_type alone is answered by the summary
+        # view instead of a live count: more than the exact limit takes the
+        # index path, between one and the limit ranks exactly. Either way the
+        # result is correct -- a view that lags (a source imported or deleted
+        # since the last `db-maintain`) only changes how long the search
+        # takes, as the exact path ranks every chunk the real filter passes.
+        # A total of zero, an unknown total, or any other filter is counted
+        # live, so a stale "none" can never hide a match.
+        skip = {"session", "explain_analyse", "embedding_name", "max_results"}
+        coarse_total = _coarse_chunk_total(
+            session, source_id, doc_type, chunking_strategy, parser_id, filter,
+            any(k not in skip for k in kwargs), enforce_visibility)
+        if coarse_total:
+            filtered_chunks = int(coarse_total)
+            if filtered_chunks <= exact_max:
+                vector_path = "exact"
+        else:
+            filtered_chunks = session.execute(
+                text(f"""
+                    SELECT count(*) FROM (
+                        SELECT 1
+                        FROM {embedding_table.name} e
+                        JOIN chunks c ON c.id = e.chunk_id
+                        JOIN documents d ON c.document_id = d.id{visibility_join}
+                        WHERE {where_clause_sql}{visibility_condition}
+                        LIMIT :count_cap
+                    ) passing
+                """),
+                {"count_cap": exact_max + 1, **filter_params_dict},
+            ).scalar()
+            if filtered_chunks == 0:
+                if timeout_ms > 0:
+                    session.execute(text("SET LOCAL statement_timeout = DEFAULT"))
+                return _empty(vector_path="no_match", filtered_chunks=0)
+            if filtered_chunks <= exact_max:
+                vector_path = "exact"
 
     # Nearest neighbours first, per-document diversity second. The ORDER BY
     # distance LIMIT in `knn` is what lets the vector index do the work. The
@@ -192,18 +297,17 @@ def _search_pgvector(
             ORDER BY e.embedding <=> CAST(:query_embedding AS vector)
             LIMIT :initial_limit
         )"""
+    # Grouping the candidates by document needs only (chunk id, document id),
+    # which idx_chunks_id_document_id answers without reading chunk rows; the
+    # rest of each chunk's row is read in the final SELECT, for the chunks
+    # returned only. Reading it for every candidate cost ~19 ms per candidate
+    # cold (2026-11-13), most of a cold search at initial_limit = 500-1000.
     vector_query = f"""
         WITH {knn_ctes},
         nearest AS (
             SELECT
-                c.id AS chunk_id,
+                k.chunk_id,
                 c.document_id,
-                c.chunk_index,
-                c.chunk_strategy,
-                c.char_start_index,
-                c.char_end_index,
-                c.token_length,
-                c.section_path,
                 k.distance
             FROM knn k
             JOIN chunks c ON c.id = k.chunk_id
@@ -230,15 +334,16 @@ def _search_pgvector(
         SELECT
             dc.chunk_id,
             dc.document_id,
-            dc.chunk_index,
-            dc.chunk_strategy,
-            dc.char_start_index,
-            dc.char_end_index,
-            dc.token_length,
-            dc.section_path,
+            c.chunk_index,
+            c.chunk_strategy,
+            c.char_start_index,
+            c.char_end_index,
+            c.token_length,
+            c.section_path,
             dc.score,
             dc.rank_in_doc
         FROM diverse_chunks dc
+        JOIN chunks c ON c.id = dc.chunk_id
         WHERE dc.document_id IN (SELECT document_id FROM top_documents)
         ORDER BY dc.score DESC
     """
@@ -258,6 +363,13 @@ def _search_pgvector(
     #    0.8; by default, every list). With only broad filters reaching this
     #    path it rarely matters, but it bounds a filter that passes many
     #    chunks none of which are near the query. SEARCH_IVFFLAT_MAX_PROBES.
+    #  - hnsw.ef_search / hnsw.iterative_scan / hnsw.max_scan_tuples: the same
+    #    three for an HNSW index, which the planner prefers when one exists.
+    #    Without iterative scan HNSW returns its ef_search nearest candidates
+    #    and drops those the filter rejects, so a filtered search returns fewer
+    #    rows than asked for (measured 2026-11-13: doc_type=image gave 1 of
+    #    20). SEARCH_HNSW_EF_SEARCH, SEARCH_HNSW_MAX_SCAN_TUPLES. Settings for
+    #    the index type that is not there are harmless.
     #  - work_mem: room for the sorts, which otherwise spill to disk.
     # The exact path computes every distance on purpose, so it takes only
     # work_mem: the index settings, and enable_seqscan = off, are for the
@@ -269,6 +381,9 @@ def _search_pgvector(
             f"SET LOCAL ivfflat.probes = {int(search_config['ivfflat_probes'])}",
             "SET LOCAL ivfflat.iterative_scan = relaxed_order",
             f"SET LOCAL ivfflat.max_probes = {int(search_config['ivfflat_max_probes'])}",
+            f"SET LOCAL hnsw.ef_search = {int(search_config['hnsw_ef_search'])}",
+            "SET LOCAL hnsw.iterative_scan = relaxed_order",
+            f"SET LOCAL hnsw.max_scan_tuples = {int(search_config['hnsw_max_scan_tuples'])}",
             "SET LOCAL work_mem = '64MB'",
             "SET LOCAL enable_seqscan = off",
         )

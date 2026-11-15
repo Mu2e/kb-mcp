@@ -822,6 +822,106 @@ def optimize_embedding_index(embedding_name: str, session=None) -> Dict[str, Any
             _session_cm.__exit__(None, None, None)
 
 
+# HNSW next to (or instead of) the IVFFlat index. Opt-in: nothing builds it
+# unless `kb embedding hnsw-index` is run, because once a valid HNSW index
+# exists the planner uses it for every index-path search. The search sends
+# the hnsw.* settings that keep filtered results complete (search_pgvector);
+# a server whose code predates them returns too few results for filtered
+# searches (2026-11-13: doc_type=image gave 1 of 20). Measured on a copy of
+# the 2.2M-vector table, 2026-11-13: built in ~4-5 min with 6 GB
+# maintenance_work_mem and 4 workers, 4.3 GB, warm searches 0.06-0.15 s
+# against 0.3-0.5 s on IVFFlat.
+def hnsw_index_name(table_name: str) -> str:
+    return f"{table_name}_hnsw_idx"
+
+
+def _index_valid(conn, name: str):
+    """True/False for a valid/invalid index, None if there is none."""
+    from sqlalchemy import text
+
+    return conn.execute(
+        text("SELECT indisvalid FROM pg_index WHERE indexrelid = to_regclass(:n)"), {"n": f'"{name}"'}
+    ).scalar()
+
+
+def _build_hnsw_index(bind, table_name: str, index_name: str, m: int = 16, ef_construction: int = 64,
+                      maintenance_work_mem: str = "6GB", parallel_workers: Optional[int] = None) -> bool:
+    """Build an HNSW index CONCURRENTLY; False if a valid one already exists.
+
+    The build is fast only while the graph fits in maintenance_work_mem
+    (~4-5 GB for 2.2M 384-d vectors); with Postgres's 64 MB default it falls
+    back to a much slower on-disk build. An invalid index left by an
+    interrupted earlier build is dropped first. Raises RuntimeError if the new
+    build is invalid (and drops it).
+    """
+    from sqlalchemy import text
+
+    with bind.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+        valid = _index_valid(conn, index_name)
+        if valid:
+            return False
+        conn.execute(text(f"SET maintenance_work_mem = '{maintenance_work_mem}'"))
+        conn.execute(text("SET statement_timeout = 0"))
+        if parallel_workers is not None:
+            conn.execute(text(f"SET max_parallel_maintenance_workers = {int(parallel_workers)}"))
+        if valid is False:
+            conn.execute(text(f'DROP INDEX CONCURRENTLY IF EXISTS "{index_name}"'))
+        conn.execute(text(f"""
+            CREATE INDEX CONCURRENTLY "{index_name}"
+            ON "{table_name}"
+            USING hnsw (embedding vector_cosine_ops)
+            WITH (m = {int(m)}, ef_construction = {int(ef_construction)})
+        """))
+        if not _index_valid(conn, index_name):
+            conn.execute(text(f'DROP INDEX CONCURRENTLY IF EXISTS "{index_name}"'))
+            raise RuntimeError("concurrent HNSW build left an invalid index; it was dropped")
+        conn.execute(text(f'ANALYZE "{table_name}"'))
+    return True
+
+
+def _drop_vector_index(bind, table_name: str, which: str) -> str:
+    """Drop the HNSW or the IVFFlat index CONCURRENTLY; returns what was done.
+
+    The IVFFlat index is only dropped while a valid HNSW index exists, so the
+    table never ends up without a vector index.
+    """
+    from sqlalchemy import text
+
+    names = {"hnsw": hnsw_index_name(table_name), "ivfflat": f"{table_name}_vector_idx"}
+    name = names[which]
+    with bind.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+        if _index_valid(conn, name) is None:
+            return f"No {which} index {name} on {table_name}"
+        if which == "ivfflat" and not _index_valid(conn, names["hnsw"]):
+            raise RuntimeError(f"refusing to drop {name}: {table_name} has no valid HNSW index")
+        conn.execute(text(f'DROP INDEX CONCURRENTLY IF EXISTS "{name}"'))
+    return f"Dropped {which} index {name}"
+
+
+def hnsw_index(embedding_name: Optional[str] = None, drop: Optional[str] = None, m: int = 16,
+               ef_construction: int = 64, maintenance_work_mem: str = "6GB",
+               parallel_workers: Optional[int] = None) -> str:
+    """Build the HNSW index for an embedding table, or drop one of its vector indexes.
+
+    drop=None builds the HNSW index; drop="hnsw" removes it again (searches go
+    back to IVFFlat at once); drop="ivfflat" removes the IVFFlat index once a
+    valid HNSW index exists. Returns a one-line message.
+    """
+    with get_db_session() as session:
+        if session.bind.dialect.name != "postgresql":
+            return "Vector indexes are only supported on PostgreSQL"
+        _, embedding_table, _ = _get_embedding_table(session, embedding_name)
+        table = embedding_table.name
+        session.commit()  # the index work runs on its own autocommit connection
+        if drop:
+            return _drop_vector_index(session.bind, table, drop)
+        name = hnsw_index_name(table)
+        if not _build_hnsw_index(session.bind, table, name, m=m, ef_construction=ef_construction,
+                                 maintenance_work_mem=maintenance_work_mem, parallel_workers=parallel_workers):
+            return f"HNSW index {name} already exists"
+        return f"Built HNSW index {name} (m={m}, ef_construction={ef_construction})"
+
+
 def vacuum_analyze_embedding_table(embedding_name: str, session=None) -> Dict[str, Any]:
     """
     Run VACUUM ANALYZE on an embedding table to update PostgreSQL statistics.

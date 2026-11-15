@@ -296,6 +296,13 @@ def get_db_session_ephemeral(session=None, auto_commit: bool = True) -> Generato
 # refreshed by `kb tools db-maintain`, which the import job runs after every
 # import, so they are as fresh as the last import. The unique indexes allow
 # REFRESH ... CONCURRENTLY, which does not block readers.
+#
+# kb_chunk_counts is for the vector search, not the web UI: the chunks per
+# source/type, so a search filtered on source_id and/or doc_type alone can
+# see that more chunks pass than SEARCH_EXACT_MAX_CHUNKS without counting
+# them live. Counting 50,001 chunks of mu2e-docdb took 14 s cold, and of
+# doc_type=image more than 45 s (2026-11-12); this view answers in
+# milliseconds. See search_pgvector._coarse_chunk_total.
 SUMMARY_VIEWS = {
     "kb_document_counts": (
         "SELECT source_id, doc_type, count(*)::bigint AS n FROM documents GROUP BY source_id, doc_type",
@@ -306,16 +313,26 @@ SUMMARY_VIEWS = {
         "WHERE meta IS NOT NULL AND meta != '{}'::jsonb",
         "CREATE UNIQUE INDEX IF NOT EXISTS kb_metadata_keys_key ON kb_metadata_keys (key)",
     ),
+    "kb_chunk_counts": (
+        "SELECT d.source_id, d.doc_type, count(*)::bigint AS n "
+        "FROM chunks c JOIN documents d ON d.id = c.document_id GROUP BY d.source_id, d.doc_type",
+        "CREATE UNIQUE INDEX IF NOT EXISTS kb_chunk_counts_key ON kb_chunk_counts (source_id, doc_type)",
+    ),
 }
+
+# The views the web UI reads. summary_views_available() asks only for these,
+# so a database that predates kb_chunk_counts keeps serving the UI from its
+# views instead of falling back to live counts until db-maintain creates it.
+WEB_SUMMARY_VIEWS = ("kb_document_counts", "kb_metadata_keys")
 
 
 def summary_views_available(conn) -> bool:
-    """True if every summary view exists (PostgreSQL only)."""
+    """True if every web-UI summary view exists (PostgreSQL only)."""
     if conn.dialect.name != "postgresql":
         return False
     return all(
         conn.execute(text("SELECT to_regclass(:n)"), {"n": name}).scalar() is not None
-        for name in SUMMARY_VIEWS
+        for name in WEB_SUMMARY_VIEWS
     )
 
 
@@ -340,9 +357,51 @@ def ensure_summary_views(conn) -> list:
 
 
 def refresh_summary_views(conn) -> None:
-    """Recompute the summary views without blocking readers (owner only)."""
+    """Recompute the summary views without blocking readers (owner only).
+
+    A view that does not exist is skipped: ensure_summary_views() may have
+    been unable to create it (no CREATE on the schema).
+    """
     for name in SUMMARY_VIEWS:
+        if conn.execute(text("SELECT to_regclass(:n)"), {"n": name}).scalar() is None:
+            continue
         conn.execute(text(f"REFRESH MATERIALIZED VIEW CONCURRENTLY {name}"))
+
+
+# Indexes the search needs on tables that already exist. The models declare
+# them too, but create_all() never adds an index to an existing table, so
+# `kb tools db-maintain` builds them here: CONCURRENTLY, so ingestion keeps
+# writing while they build (a few minutes for chunks at 2.2M rows).
+#  - idx_chunks_id_document_id: see the Chunk model.
+SEARCH_INDEXES = {
+    "idx_chunks_id_document_id": "ON chunks (id) INCLUDE (document_id)",
+}
+
+
+def ensure_search_indexes(conn) -> list:
+    """Build any missing search index; returns the names built (PostgreSQL only).
+
+    `conn` must be in autocommit mode (CREATE INDEX CONCURRENTLY cannot run in
+    a transaction). An index left invalid by an interrupted concurrent build
+    exists but is never used, so it is dropped and built again. A role that may
+    not create in the schema skips this, like ensure_summary_views().
+    """
+    if conn.dialect.name != "postgresql":
+        return []
+    if not conn.execute(text("SELECT has_schema_privilege(current_user, current_schema(), 'CREATE')")).scalar():
+        return []
+    built = []
+    for name, definition in SEARCH_INDEXES.items():
+        valid = conn.execute(
+            text("SELECT i.indisvalid FROM pg_index i WHERE i.indexrelid = to_regclass(:n)"), {"n": name}
+        ).scalar()
+        if valid:
+            continue
+        if valid is False:
+            conn.execute(text(f"DROP INDEX CONCURRENTLY IF EXISTS {name}"))
+        conn.execute(text(f"CREATE INDEX CONCURRENTLY IF NOT EXISTS {name} {definition}"))
+        built.append(name)
+    return built
 
 
 def _setup_fulltext_search_trigger(engine: Engine) -> None:
