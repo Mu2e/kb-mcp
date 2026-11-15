@@ -219,9 +219,13 @@ changed), and a sweep's decision is final for the policy like a person's.
 | `cost-report` | the monthly CAM cost reports, by DocDB file name ("Cost_Report", "Cost Report") | hidden from search; `kb_get` still works (`--hide-get` hides that too) |
 | `oversized-spreadsheet` | spreadsheets over 500,000 characters, which the scan skips | hidden from search (`--hide-get` likewise) |
 
-The DocDB import job runs the `cost-report` sweep after every import, so new
-reports never reach search; it was applied to the 310 reports up to
-September 2026 in the review of 2026-11-14.
+The DocDB import job runs both sweeps after every import, so new cost reports
+and oversized spreadsheets never reach search; `cost-report` was applied to the
+310 reports up to September 2026 in the review of 2026-11-14. Independently,
+`EMBED_MAX_TEXT_CHARS` (default 500,000) keeps any text that long from being
+chunked at all: such a document is represented by its summary chunk alone,
+and `kb tools db-maintain` warns about any document with more than 2,000
+chunks.
 
 ## Limits
 

@@ -993,6 +993,10 @@ def chunk_and_embed_all(
         )
 
         oversized_skipped = 0
+        if max_text_chars is None:
+            # EMBED_MAX_TEXT_CHARS; chunk_and_embed() enforces it per document
+            # anyway, this keeps the oversized ones out of the backlog count.
+            max_text_chars = get_embedding_config()['max_text_chars'] or None
         if max_text_chars is not None:
             from sqlalchemy import func
             # An approximate count for the caller's benefit: how many

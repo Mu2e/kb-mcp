@@ -210,15 +210,18 @@ rc=$?
 end=$(date +%s)
 
 # 3a'. Standing visibility rules (docs/guides/privacy.md): the monthly cost
-# reports stay out of search. A sweep only decides documents nobody has
-# decided yet, so it is cheap to run every time; failing does not fail the run.
+# reports and the oversized spreadsheets stay out of search. A sweep only
+# decides documents nobody has decided yet, so it is cheap to run every time;
+# failing does not fail the run.
 {
-    echo "--- visibility sweep: cost-report ---"
-    if kb tools visibility sweep --rule cost-report --apply; then
-        echo "cost-report sweep done"
-    else
-        echo "SWEEP FAILED: cost-report; new cost reports stay in search until a later run"
-    fi
+    for rule in cost-report oversized-spreadsheet; do
+        echo "--- visibility sweep: $rule ---"
+        if kb tools visibility sweep --rule "$rule" --apply; then
+            echo "$rule sweep done"
+        else
+            echo "SWEEP FAILED: $rule; those documents stay in search until a later run"
+        fi
+    done
 } >> "$LOG" 2>&1
 
 # 3a. Privacy (docs/guides/privacy.md), when PRIVACY_HOLD_NEW_DOCUMENTS is on:

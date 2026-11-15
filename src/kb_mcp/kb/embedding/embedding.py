@@ -255,6 +255,22 @@ def chunk_and_embed(
     """
     import time
     from .chunking import chunk_document
+    from ...config import get_embedding_config
+
+    # A text document too large to chunk usefully (the financial
+    # spreadsheets run to millions of characters and tens of thousands of
+    # chunks each) is represented by its summary chunk alone; every path
+    # that chunks -- the import, parse-all, a re-parse -- comes through here.
+    max_chars = get_embedding_config()['max_text_chars']
+    strategy = chunk_strategy or get_embedding_config()['chunk_strategy']
+    if (max_chars and getattr(document, "doc_type", "text") == "text"
+            and not str(strategy).startswith("summary")
+            and len(getattr(document, "text", None) or "") > max_chars):
+        logger.info(
+            f"Not chunking document {getattr(document, 'id', '?')}: {len(document.text):,} characters "
+            f"> EMBED_MAX_TEXT_CHARS={max_chars:,}; only its summary chunk represents it"
+        )
+        return []
 
     # Create session if not provided
     should_close = session is None
