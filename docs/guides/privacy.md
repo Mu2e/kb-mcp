@@ -30,7 +30,7 @@ flowchart LR
     B --> C[parse, summarize,<br/>embed]
     C --> D[privacy scan<br/>vllm.fnal.gov]
     D --> E{privacy policy}
-    E -->|restriction notice,<br/>real password| F[hidden<br/>search + get]
+    E -->|restriction notice,<br/>password not redactable| F[hidden<br/>search + get]
     E -->|health, HR action| G[hidden<br/>from search]
     E -->|private detail,<br/>credential| H[visible,<br/>span redacted]
     E -->|clean| I[visible]
@@ -89,7 +89,7 @@ counts — and ignores findings a redaction already covers:
 | Finding | Action |
 |---|---|
 | restriction notice (medium or high) | **hide from search and get** |
-| credential, high (a real password) | **hide from search and get**, and redact it |
+| credential, high (a real password) | redact the exact span and flag for review; no exact span: **hide from search and get** |
 | credential, medium | redact the exact span (no exact span: flag) |
 | personal data / personnel / assessment, high | redact the span if exact, **hide from search** |
 | personal data, medium | redact the exact span |
@@ -113,6 +113,8 @@ These apply to every document, including future imports, without review
 | `passcode-or-password` | the value after passcode / password / pwd / pin / `pw:` | `Passcode: [redacted: credential]` |
 | `purchase-card` | `Card#NAME 1234` | `[redacted: payment card]` |
 | `private-key`, `api-token` | PEM private keys, AWS/GitHub/Slack/OpenAI-style tokens, JWTs | |
+| `network-address` | private IPv4 (10/8, 172.16/12, 192.168/16) and Fermilab's 131.225/16, with any `:port` | `Data [redacted: network address]` |
+| `hardware-address` | MAC addresses (`aa:bb:cc:dd:ee:ff`, or with dashes when it has a hex letter) | `HWaddr [redacted: hardware address]` |
 
 Redaction happens before search excerpts are cut, so an excerpt never shows
 half a secret. `kb_get_image` withholds an image whose description contains
@@ -204,6 +206,28 @@ import job's next `--only-unscanned` scan.
 `document_visibility_decisions` / `document_visibility_current` /
 `document_visibility_runs` (every scan and policy run is a run row with its
 counts).
+
+## Standing rules
+
+Some kinds of document are handled by a rule instead of the scan. `kb tools
+visibility sweep --rule <rule> --apply` applies one to every document nobody
+has decided yet (a decision someone made, or an earlier sweep, is never
+changed), and a sweep's decision is final for the policy like a person's.
+
+| Rule | Selects | Decision |
+|---|---|---|
+| `cost-report` | the monthly project-controls reports, by DocDB file name: CAM cost reports ("Cost_Report"), Earned Value reports, status / turnaround ("TAR") reports sent to PCS | hidden from search; `kb_get` still works (`--hide-get` hides that too) |
+| `oversized-spreadsheet` | spreadsheets over 500,000 characters, which the scan skips | hidden from search (`--hide-get` likewise) |
+
+The DocDB import job runs the `cost-report` sweep after every import, so new
+monthly reports never reach search; it was applied to the reports up to
+September 2026 in the review of 2026-11-14/15. `oversized-spreadsheet` is not
+run automatically: a large technical spreadsheet (channel map, inductance
+matrix) should stay findable. Independently, `EMBED_MAX_TEXT_CHARS` (default
+500,000) keeps a spreadsheet's text that long from being chunked: it is
+represented by its summary chunk alone, so it can be found without its rows
+crowding the search. Long PDFs, slides and Word documents are always chunked.
+`kb tools db-maintain` warns about any document with more than 2,000 chunks.
 
 ## Limits
 

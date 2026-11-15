@@ -1827,8 +1827,53 @@ def _rule_oversized_spreadsheet(
     ]
 
 
+# The project's monthly project-controls reports: the CAM cost reports
+# ("47502 Accelerator Systems CAM docs": per-control-account cost sheets,
+# "BED Analysis" summaries and totals, listing purchases with purchase-card
+# holders), the Earned Value reports, and the monthly status / turnaround
+# ("TAR") reports sent to PCS. Financial project data of no use to an agent;
+# the Mu2e review of 2026-11-14/15 took them out of search (kb_get still
+# fetches them). Matched on the DocDB file name, which every report in these
+# series carries (checked 2026-11-15: 310 cost reports, 321 Earned Value
+# files, ~35 TAR/status files, no other documents).
+COST_REPORT_NAME_PATTERNS = (
+    "%cost_report%", "%cost report%",
+    "%earned_value%", "%earned value%",
+    "%sent_to_pcs%", "%sent to pcs%", "%send_to_pcs%", "%submit_to_pcs%",
+    "%\\_tar\\_%", "% tar %", "%turnaround%", "%turn_around%",
+)
+
+
+def _rule_cost_report(
+    session,
+    *,
+    source_id: Optional[str] = None,
+    hide_get: bool = False,
+) -> List[Dict[str, Any]]:
+    """Raw documents whose DocDB file name marks a monthly project-controls report."""
+    from sqlalchemy import or_
+    from .db_models import RawDocument
+
+    query = session.query(RawDocument.id, RawDocument.doc_id).filter(
+        or_(*[RawDocument.doc_id.ilike(p, escape="\\") for p in COST_REPORT_NAME_PATTERNS])
+    )
+    if source_id:
+        query = query.filter(RawDocument.source_id == source_id)
+    return [
+        {
+            "raw_document_id": raw_id,
+            "visible_search": False,
+            "visible_get": not hide_get,
+            "reason": "monthly project-controls report (cost, earned value or status); kept out of search",
+            "meta": {"rule": "cost-report", "doc_id": doc_id},
+        }
+        for raw_id, doc_id in query.order_by(RawDocument.doc_id).all()
+    ]
+
+
 VISIBILITY_RULES = {
     "oversized-spreadsheet": _rule_oversized_spreadsheet,
+    "cost-report": _rule_cost_report,
 }
 
 
@@ -2033,7 +2078,8 @@ def _scan_one_document(client, model: str, candidate: Dict[str, Any], run_id: st
 
     with get_db_session() as session:
         doc = session.get(Document, candidate["document_id"])
-        text = _scanned_text(doc.title or doc.title_gen, doc.summary, doc.text)
+        title = doc.title or doc.title_gen
+        text = _scanned_text(title, doc.summary, doc.text)
         label = f"{doc.source_id}/{doc.doc_id}"
         source_type = doc.source_type
 
@@ -2436,8 +2482,9 @@ def privacy_policy_actions(findings: List[Dict[str, Any]], text: str, replacemen
 
     - restriction notice (proprietary, confidential, internal, export
       control, ...): hide from search and get
-    - credential, high (a real password): hide from search and get, and
-      redact it
+    - credential, high (a real password): redact the exact span and flag
+      for review (the scan may not quote every password a document holds);
+      without an exact span, hide from search and get
     - credential, medium: redact the exact span; without one, flag
     - personal data / personnel / assessment, high (health, HR action):
       redact the span if exact, and hide from search
@@ -2470,9 +2517,17 @@ def privacy_policy_actions(findings: List[Dict[str, Any]], text: str, replacemen
             })
 
     for f in findings:
-        if covered_by_redaction(f, text, replacements):
-            continue
         category, severity = f.get("category"), f.get("severity")
+        # A finding a redaction already covers is handled -- but only if its
+        # rule is to redact. A rule that hides must keep hiding: the policy
+        # redacts the span of a hidden document too, so treating that as
+        # covered lifted the hide again on the next run (MB-409: a resignation
+        # letter hidden on 2026-10-09, lifted by the next run because its
+        # 12-character span was redacted by then).
+        hides = category == "restricted" or (
+            severity == "high" and category in ("personal_data", "personnel", "individual_assessment"))
+        if not hides and covered_by_redaction(f, text, replacements):
+            continue
         span = " ".join((f.get("span") or "").split())
         quote = (span or f.get("evidence") or "")[:80]
         if severity not in ("medium", "high"):
@@ -2484,10 +2539,15 @@ def privacy_policy_actions(findings: List[Dict[str, Any]], text: str, replacemen
             else:
                 out["flag"].append(f"restricted? {quote}")
         elif category == "credentials" and severity == "high":
-            out["hide_search"] = out["hide_get"] = True
-            out["reasons"].append(f"password or secret: {quote}")
+            # Redact the password and keep the document (a UPS manual's
+            # default password, a review's access code); hide it only when
+            # the password cannot be redacted because the span is not exact.
             if exact(span):
                 redact(f, span)
+                out["flag"].append(f"password redacted, check for others: {quote}")
+            else:
+                out["hide_search"] = out["hide_get"] = True
+                out["reasons"].append(f"password or secret without an exact span: {quote}")
         elif category == "credentials":
             if exact(span):
                 redact(f, span)

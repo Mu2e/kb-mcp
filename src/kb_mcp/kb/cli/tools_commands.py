@@ -1139,6 +1139,21 @@ def cmd_db_maintain(args):
             refresh_summary_views(conn)
             print("  done.")
 
+    # Guard rail: a document with thousands of chunks crowds every search
+    # (the bulk parse once let 103 spreadsheets take 32% of all embeddings,
+    # 2026-11-15). EMBED_MAX_TEXT_CHARS prevents it; this shows a slip.
+    with engine.connect() as conn:
+        big = conn.execute(text(
+            "SELECT d.id, d.source_id, d.doc_id, count(*) AS n FROM chunks c "
+            "JOIN documents d ON d.id = c.document_id "
+            "GROUP BY d.id, d.source_id, d.doc_id HAVING count(*) > :n ORDER BY n DESC LIMIT 20"
+        ), {"n": getattr(args, "chunk_warn", 2000)}).fetchall()
+    if big:
+        print(f"WARNING: {len(big)}{'+' if len(big) == 20 else ''} document(s) with more than "
+              f"{getattr(args, 'chunk_warn', 2000):,} chunks (check EMBED_MAX_TEXT_CHARS):")
+        for _id, source_id, doc_id, n in big:
+            print(f"  {n:7,}  {source_id}/{doc_id}")
+
     if do_analyze:
         print(f"Running ANALYZE on {len(all_tables)} table(s)...")
         with engine.connect() as conn:
@@ -1578,6 +1593,8 @@ def cmd_visibility_sweep(args):
     rule_options = {}
     if args.rule == "oversized-spreadsheet":
         rule_options = {"max_chars": args.max_chars, "hide_get": args.hide_get}
+    elif args.rule == "cost-report":
+        rule_options = {"hide_get": args.hide_get}
 
     try:
         result = visibility_sweep(
@@ -2787,8 +2804,9 @@ def setup_commands(subparsers):
         ),
     )
     vis_sweep_parser.add_argument(
-        "--rule", required=True, choices=["oversized-spreadsheet"],
-        help="oversized-spreadsheet: spreadsheets over --max-chars, hidden from search",
+        "--rule", required=True, choices=["oversized-spreadsheet", "cost-report"],
+        help="oversized-spreadsheet: spreadsheets over --max-chars, hidden from search; "
+             "cost-report: the monthly CAM cost reports (by DocDB file name), hidden from search",
     )
     vis_sweep_parser.add_argument("--apply", action="store_true", help="Write the decisions (default: dry run)")
     vis_sweep_parser.add_argument("--source-id", help="Restrict to a single source")
@@ -2800,7 +2818,7 @@ def setup_commands(subparsers):
     )
     vis_sweep_parser.add_argument(
         "--hide-get", action="store_true",
-        help="oversized-spreadsheet: also hide from kb_get (default: search only)",
+        help="Also hide from kb_get (default: search only)",
     )
     vis_sweep_parser.add_argument("--json", action="store_true", help="Output as JSON")
     vis_sweep_parser.set_defaults(func=cmd_visibility_sweep)
@@ -3075,6 +3093,10 @@ def setup_commands(subparsers):
         "--maintenance-work-mem", default="512MB",
         help="Session-level maintenance_work_mem for index builds (default: 512MB; a properly-sized IVFFlat index "
              "routinely needs more than Postgres's own 64MB default)",
+    )
+    db_maintain_parser.add_argument(
+        "--chunk-warn", type=int, default=2000,
+        help="Warn about documents with more chunks than this (default: 2000)",
     )
     db_maintain_parser.set_defaults(func=cmd_db_maintain)
 

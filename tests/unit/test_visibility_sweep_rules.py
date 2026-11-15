@@ -15,6 +15,7 @@ from kb_mcp.kb.tools import (
     SPREADSHEET_SOURCE_TYPES,
     VISIBILITY_RULES,
     _already_decided,
+    _rule_cost_report,
     _rule_oversized_spreadsheet,
 )
 
@@ -89,3 +90,38 @@ def test_already_decided_with_no_decisions(session):
     are in test_document_visibility_postgres.py."""
     assert _already_decided(session, set(), "*") == set()
     assert _already_decided(session, {"nothing-decided"}, "*") == set()
+
+
+def _raw(session, raw_id, doc_id, source_id="mu2e-docdb"):
+    session.add(RawDocument(id=raw_id, source_id=source_id, doc_id=doc_id, source_type=PDF, content_hash=raw_id))
+    session.flush()
+
+
+def test_cost_report_rule_is_registered():
+    assert VISIBILITY_RULES["cost-report"] is _rule_cost_report
+
+
+def test_cost_report_rule_matches_the_monthly_report_file_names(session):
+    _raw(session, "a", "52501-Cost_Report_-_Apr25_-_47502.09_Target_Station")
+    _raw(session, "b", "55795/Mu2e MONTHLY CAM Cost Report (Feb26) - BED Analysis")
+    _raw(session, "c", "56278/Cost Report - 47502.01 Accel PM - Mar26")
+    _raw(session, "d", "12345-CostEstimate_TrackerStations")   # not a cost report
+    _raw(session, "e", "23456-Mu2e_Monthly_Report_July_2020")  # a monthly report, not a cost report
+    _raw(session, "f", "33356-Mu2e_Earned_Value_202004_xlsx")
+    _raw(session, "g", "58390-Final_Earned_Value_202608_pdf")
+    _raw(session, "h", "54976-Mu2e_November_TAR_202511_-_Completed_-_Sent_to_PCS_-_v1")
+    _raw(session, "i", "56278/Mu2e TAR - Mar26 - Status Complete - Final")
+    _raw(session, "j", "54042-Mu2e_Turnaround_Report__2025-Sep_-_Complete_-_Verified_-_v1")
+    _raw(session, "k", "58983-STM_Collimation_-_Nov_3_-_DocDB_58983_pptx")  # "target", "STAR": not TAR
+    _raw(session, "l", "5197-EXtinctionMonitorGeometry")
+    _raw(session, "m", "40001-StarterKit_tarball_notes")
+    got = _rule_cost_report(session)
+    assert sorted(d["raw_document_id"] for d in got) == ["a", "b", "c", "f", "g", "h", "i", "j"]
+    assert all(d["visible_search"] is False and d["visible_get"] is True for d in got)
+    assert {d["meta"]["rule"] for d in got} == {"cost-report"}
+
+
+def test_cost_report_rule_can_hide_from_get_too(session):
+    _raw(session, "a", "52501-Cost_Report_-_Apr25_-_47502.09_Target_Station")
+    (d,) = _rule_cost_report(session, hide_get=True)
+    assert d["visible_get"] is False

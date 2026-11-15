@@ -40,11 +40,19 @@ def test_marker_findings_always_hide():
     assert a["hide_get"]
 
 
-def test_real_password_hides_and_redacts():
+def test_real_password_is_redacted_and_flagged_not_hidden():
     text = "user tier3 password manager entry: TierIIIUser! (do not share)"
     a = actions([f("credentials", "high", "TierIIIUser!")], text)
-    assert a["hide_search"] and a["hide_get"]
+    assert not a["hide_search"] and not a["hide_get"]
     assert [r["span"] for r in a["redact"]] == ["TierIIIUser!"]
+    assert a["flag"] and "check for others" in a["flag"][0]
+
+
+@pytest.mark.parametrize("span", ["", "zz", "NotInTheText99"])
+def test_real_password_that_cannot_be_redacted_hides(span):
+    text = "user tier3 password manager entry: ???????? (do not share)"
+    a = actions([f("credentials", "high", span)], text)
+    assert a["hide_search"] and a["hide_get"] and not a["redact"]
 
 
 def test_medium_credential_is_redacted_not_hidden():
@@ -64,6 +72,35 @@ def test_findings_covered_by_patterns_are_ignored():
     text = "Zoom passcode: mu2eops"
     assert actions([f("credentials", "medium", "Passcode: mu2eops")], text) == \
         {"hide_search": False, "hide_get": False, "redact": [], "flag": [], "reasons": []}
+
+
+@pytest.mark.parametrize("finding,text", [
+    (f("personnel", "high", "Jane Doe resigns"), "Note: Jane Doe resigns as L2 manager, effective May 1."),
+    (f("personal_data", "high", "knee replacement"), "I am having a knee replacement on June 9th."),
+    (f("restricted", "medium", "General Atomics Proprietary Information"), "Slide 4. General Atomics Proprietary Information"),
+])
+def test_a_hide_survives_the_next_run_after_its_span_is_redacted(finding, text):
+    # The first run hides and redacts the span; the second sees the span
+    # redacted. A hide must not be lifted for that (it was: MB-409).
+    from types import SimpleNamespace
+    from kb_mcp.privacy.redaction import span_regex
+
+    first = actions([finding], text)
+    assert first["hide_search"]
+    rule = SimpleNamespace(span=finding["span"], label="x", regex=span_regex(finding["span"]))
+    second = tools.privacy_policy_actions([finding], text, find_replacements(text, [rule]))
+    assert second["hide_search"] == first["hide_search"] and second["hide_get"] == first["hide_get"]
+
+
+def test_a_redaction_only_finding_is_done_once_its_span_is_redacted():
+    from types import SimpleNamespace
+    from kb_mcp.privacy.redaction import span_regex
+
+    text = "user tier3 password manager entry: TierIIIUser! (do not share)"
+    finding = f("credentials", "high", "TierIIIUser!")
+    rule = SimpleNamespace(span="TierIIIUser!", label="credential", regex=span_regex("TierIIIUser!"))
+    a = tools.privacy_policy_actions([finding], text, find_replacements(text, [rule]))
+    assert not a["hide_search"] and not a["redact"] and not a["flag"]
 
 
 def test_high_personal_data_hides_from_search_and_redacts():
@@ -97,9 +134,15 @@ def test_paraphrased_personal_data_is_flagged():
 
 
 def test_low_and_security_findings_do_not_act():
+    text = "host mu2e-dcs-01 runs the alarm server"
+    a = actions([f("security", "medium", "mu2e-dcs-01 runs the alarm server"), f("personal_data", "low", "mu2e-dcs-01")], text)
+    assert not a["hide_search"] and not a["redact"] and a["flag"] == ["security: mu2e-dcs-01 runs the alarm server"]
+
+
+def test_a_security_finding_on_an_address_the_pattern_redacts_is_done():
     text = "host mu2e-dcs-01 at 192.168.157.26"
-    a = actions([f("security", "medium", "192.168.157.26"), f("personal_data", "low", "mu2e-dcs-01")], text)
-    assert not a["hide_search"] and not a["redact"] and a["flag"] == ["security: 192.168.157.26"]
+    a = actions([f("security", "medium", "192.168.157.26")], text)
+    assert a == {"hide_search": False, "hide_get": False, "redact": [], "flag": [], "reasons": []}
 
 
 def test_duplicate_spans_are_redacted_once():

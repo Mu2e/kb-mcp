@@ -286,3 +286,32 @@ def test_findings_that_are_not_a_list_are_an_error_not_a_clean_scan(answer):
     # Treated as "nothing found", a malformed answer would let the policy lift the hold.
     with pytest.raises(ValueError, match="no 'findings' list"):
         sensitivity.parse_findings(answer)
+
+
+def test_scanning_one_document_records_an_ok_row(session, monkeypatch):
+    # Every document of a scan once failed with "name 'title' is not defined"
+    # before reaching the LLM: _scan_one_document ran with no test.
+    from contextlib import contextmanager
+
+    from kb_mcp.kb import tools
+
+    session.get(Document, "text-small").title = "A title"
+    session.flush()
+
+    @contextmanager
+    def same_session(*_a, **_k):
+        yield session
+
+    seen = {}
+
+    def fake_scan_text(client, model, text, **kwargs):
+        seen.update(kwargs, text=text)
+        return {"windows": 1, "findings": [], "prompt_tokens": 10, "completion_tokens": 2, "seconds": 0.1}
+
+    monkeypatch.setattr(tools, "get_db_session", same_session)
+    monkeypatch.setattr(sensitivity, "scan_text", fake_scan_text)
+    tools._scan_one_document(None, "m", {"document_id": "text-small", "raw_document_id": "r1"}, "run-1", {})
+
+    assert seen["title"] == "A title" and seen["text"].startswith("[Title] A title")
+    rows = session.query(DocumentSensitivityScan).filter_by(document_id="text-small", run_id="run-1").all()
+    assert [r.status for r in rows] == ["ok"]

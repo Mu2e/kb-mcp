@@ -44,6 +44,9 @@ class Pattern:
     group: int = 0
 
 
+# One IPv4 octet, 0-255.
+_OCTET = r"(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)"
+
 # A value that only looks like a secret: placeholders, prompts, empties.
 _NOT_A_SECRET = r"(?!\[redacted|<|\*{3}|x{3}|none\b|n/?a\b|your\b|the\b|is\b|required\b|same\b|see\b|tbd\b)"
 
@@ -78,6 +81,29 @@ GLOBAL_PATTERNS: Sequence[Pattern] = (
     Pattern(
         "private-key", "private key",
         re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?(?:-----END [A-Z ]*PRIVATE KEY-----|\Z)", re.DOTALL),
+    ),
+    # Network topology (the Mu2e review of 2026-11-14): the DAQ, controls
+    # and ops documents stay searchable, but the addresses in their rack and
+    # IPMI tables do not leave through the MCP tools -- the source documents
+    # in DocDB still have them. Measured that day: 1,397 private and 527
+    # Fermilab (131.225/16) addresses in 521 of 2.25M chunks, ~90 documents,
+    # no false positives in the samples; four-part version numbers outside
+    # these ranges are not matched.
+    Pattern(
+        "network-address", "network address",
+        re.compile(
+            r"(?<![\d.])(?:10\." + _OCTET + r"|172\.(?:1[6-9]|2\d|3[01])|192\.168|131\.225)"
+            r"\." + _OCTET + r"\." + _OCTET + r"(?::\d{2,5})?(?![\d.]*\d)"
+        ),
+    ),
+    Pattern(
+        # Colon-separated, or dash-separated only with a hex letter: plain
+        # "12-34-56-78-90-12" is a segment path or a list of positions.
+        "hardware-address", "hardware address",
+        re.compile(
+            r"(?<![0-9A-Fa-f:-])(?:(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}"
+            r"|(?=[0-9-]*[A-Fa-f])(?:[0-9A-Fa-f]{2}-){5}[0-9A-Fa-f]{2})(?![0-9A-Fa-f:-])"
+        ),
     ),
     Pattern(
         "api-token", "access token",
