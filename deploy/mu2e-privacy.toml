@@ -1,0 +1,97 @@
+# Mu2e's privacy settings: what is specific to this site (kb_mcp.privacy.config;
+# docs/guides/privacy.md). The privacy code is generic; without this file it
+# uses neutral wording, redacts only the private address ranges and lets the
+# scan send text to no endpoint unless it is allowed explicitly.
+#
+# Shipped with each release as <venv>/share/kb-mcp/privacy.toml;
+# PRIVACY_CONFIG_FILE points a deployment at another file. A mistake (an
+# unknown key, a wrong type) is an error, not a silent fallback.
+#
+# The scan prompt is built from [scan]: changing organization or
+# systems_owner changes the prompt, so bump PROMPT_VERSION in
+# privacy/sensitivity.py with it (scans are keyed on the prompt version).
+
+[scan]
+# Who the knowledge base belongs to, and whose systems an attacker would
+# target, as the scan prompt names them.
+organization = "Mu2e, a particle physics experiment at Fermilab"
+systems_owner = "Mu2e or Fermilab"
+# The LLM endpoints the scan may send document text to: the lab's own vLLM
+# and ALCF. The scan exists to keep this text away from external LLMs, so
+# anything else needs an explicit --allow-endpoint.
+allowed_hosts = ["vllm.fnal.gov", "inference-api.alcf.anl.gov"]
+# Names in restriction notices: "Mu2e internal only", "internal to the Mu2e
+# collaboration" (besides the generic "collaboration internal only").
+internal_names = ["mu2e"]
+
+[redaction]
+# Fermilab's own range (131.225/16), redacted with the private ranges: the
+# DAQ, controls and ops rack tables list both (2026-11-14 review).
+network_prefixes = ["131.225"]
+
+
+# The standing visibility rules. The DocDB import job runs
+# `kb tools visibility sweep --rule cost-report --apply` after every import,
+# so a pattern added here applies to new documents from the next run on, and
+# to the existing ones after one sweep by hand.
+#
+# Patterns are SQL LIKE patterns, case-insensitive: % is any text, _ any one
+# character, \_ a literal underscore. Single-quoted (literal) strings keep the
+# backslash as written.
+
+[visibility.rules.cost-report]
+description = "project-controls reports that carry money, rates or named people"
+reason = "project-controls report (cost, earned value, rates, purchases or status); kept out of search"
+
+# The line drawn in the Mu2e review of 2026-11-14/15: money and people leave
+# search, schedules stay. Selected wherever they are, by DocDB file name.
+name_patterns = [
+    # Monthly CAM cost reports ("Cost_Report", "BED Analysis" sheets with
+    # purchase-card holders), checked 2026-11-15: 310 files.
+    '%cost_report%', '%cost report%',
+    # Earned Value reports: 321 files.
+    '%earned_value%', '%earned value%',
+    # Monthly status / turnaround ("TAR") reports sent to PCS: ~35 files.
+    # "_tar_" and " tar " rather than "tar", which is in "target" and "STAR".
+    '%sent_to_pcs%', '%sent to pcs%', '%send_to_pcs%', '%submit_to_pcs%',
+    '%\_tar\_%', '% tar %', '%turnaround%', '%turn_around%',
+    # Hour rates, SPI/CPI performance-index trends, cost impacts of change
+    # requests. Not "spi" alone: "T-ROC SPI Slow Controls" is the bus.
+    '%hour\_rate%', '%hour rate%',
+    '%spi\_cpi%', '%spi cpi%', '%cpi\_trend%', '%spi\_and\_cpi%',
+    '%cost\_impact%', '%cost impact%',
+]
+
+# Entries taken out as a whole, by DocDB title: the 2014 work authorization
+# documents (budget and planned material cost per control account).
+entry_titles = ['Work Authorization Document for Control Account%']
+
+# Change requests stay findable: they are the technical history of a scope
+# change, even when their name says "Labor" or "Procurement" (BCR123 AC
+# dipole labor, Mu2e_0034 extinction monitor procurement).
+exclude_patterns = ['%bcr%', '%baseline%change%', '%change%request%', '%mu2e\_0___\_%']
+
+# The monthly project-controls packages mix money and people with schedules.
+# Only these files leave search; the P6 Gantt charts, float analyses,
+# schedule performance, status and planning pages stay. Generic words like
+# "budget" or "purchase" are only safe here: elsewhere they name technical
+# documents (a timing budget, the CRV aluminum purchase status). The file
+# names have typos ("Pruchase", "Purcahse", "Deailed", "Buget").
+[[visibility.rules.cost-report.packages]]
+titles = [
+    '47502 Accelerator Systems CAM docs%',
+    'Monthly Performance Reports%',
+    'Variance Reports from CAM eToolbox%',
+]
+file_patterns = [
+    '%hour%rate%',
+    '%purchase%', '%pruchase%', '%purcahse%', '%procurement%',
+    '%labor%',
+    '%budget%', '%buget%', '%forecast%',
+    '%variance%',
+    '%detailed\_ev%', '%deailed\_ev%', '%detailed ev%',
+    '%spi%cpi%', '%cpi%spi%', '%spi\_spi%', '%cpi\_trend%',
+    '%cpr%',            # cost performance reports
+    '%ctc%',            # charge task codes, signature authority by CTC
+    '%resources%',      # P6 resource lists with actuals
+]

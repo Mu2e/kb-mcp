@@ -1,5 +1,12 @@
 import importlib.util
 import os
+from pathlib import Path
+
+# The privacy code reads its site-specific settings when imported. Tests
+# expect Mu2e's (the shipped deploy/mu2e-privacy.toml), whatever the
+# environment says; test_privacy_config.py checks the generic defaults in a
+# subprocess.
+os.environ["PRIVACY_CONFIG_FILE"] = str(Path(__file__).resolve().parents[1] / "deploy" / "mu2e-privacy.toml")
 
 import pytest
 from sqlalchemy import create_engine

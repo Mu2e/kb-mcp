@@ -216,12 +216,44 @@ changed), and a sweep's decision is final for the policy like a person's.
 
 | Rule | Selects | Decision |
 |---|---|---|
-| `cost-report` | the monthly project-controls reports, by DocDB file name: CAM cost reports ("Cost_Report"), Earned Value reports, status / turnaround ("TAR") reports sent to PCS | hidden from search; `kb_get` still works (`--hide-get` hides that too) |
-| `oversized-spreadsheet` | spreadsheets over 500,000 characters, which the scan skips | hidden from search (`--hide-get` likewise) |
+| `cost-report` (Mu2e, configured) | project-controls reports that carry money, rates or named people: the CAM cost reports, Earned Value and TAR / status reports, hour rates, SPI/CPI trends and cost impacts by file name; in the monthly project-controls packages (by DocDB title, e.g. "47502 Accelerator Systems CAM docs") the purchases, labor charges, budgets and forecasts, variance reports, detailed EV, CPR, charge codes and resource lists; the work authorization documents by title. Change requests (BCRs) are excluded | hidden from search; `kb_get` still works (`--hide-get` hides that too) |
+| `oversized-spreadsheet` (built in) | spreadsheets over 500,000 characters, which the scan skips | hidden from search (`--hide-get` likewise) |
+
+Name-based rules like `cost-report` are not code: each deployment lists them
+in its privacy configuration (next section). A rule combines file-name patterns,
+whole entries by DocDB title, "packages" (inside an entry with a matching
+title, only the files whose name matches, so generic words like "budget" are
+safe there), and exclusions; the file's comments say why each pattern is
+there. A typo in the file fails the sweep with the key it did not expect.
+
+## Site configuration
+
+Everything that is specific to one deployment comes from a TOML file, not
+the code: `deploy/mu2e-privacy.toml` for Mu2e, shipped with each release as
+`<venv>/share/kb-mcp/privacy.toml`. `PRIVACY_CONFIG_FILE` points elsewhere
+(empty: none). Changing it needs no release, only the file and, for a rule,
+one sweep by hand.
+
+| Section | Holds | Mu2e |
+|---|---|---|
+| `[scan]` | `organization` and `systems_owner` as the scan prompt names them; `allowed_hosts`, the LLM endpoints the scan may send text to; `internal_names` for "<name> internal only" notices | Mu2e at Fermilab; `vllm.fnal.gov`, `inference-api.alcf.anl.gov`; `mu2e` |
+| `[redaction]` | `network_prefixes`: IPv4 ranges redacted with the private ones | `131.225` (Fermilab) |
+| `[visibility.rules.<name>]` | the sweep rules above | `cost-report` |
+
+Without a file the defaults are generic and stricter: neutral wording in the
+prompt, only the private address ranges, and no endpoint the scan may use
+without `--allow-endpoint`. The scan prompt is built from `[scan]`, so
+changing `organization` or `systems_owner` changes the prompt: bump
+`PROMPT_VERSION` with it. A file that cannot be read, or has a key the code
+does not know, is an error rather than a silent fallback.
 
 The DocDB import job runs the `cost-report` sweep after every import, so new
 monthly reports never reach search; it was applied to the reports up to
-September 2026 in the review of 2026-11-14/15. `oversized-spreadsheet` is not
+September 2026 in the review of 2026-11-14/15. The line drawn there: money
+and people leave search, schedules stay. The P6 Gantt charts, float analyses,
+schedule performance and status pages in the same packages, and the change
+requests, stay findable. After adding a pattern, one sweep by hand applies it
+to the documents already imported. `oversized-spreadsheet` is not
 run automatically: a large technical spreadsheet (channel map, inductance
 matrix) should stay findable. Independently, `EMBED_MAX_TEXT_CHARS` (default
 500,000) keeps a spreadsheet's text that long from being chunked: it is

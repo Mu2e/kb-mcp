@@ -29,6 +29,8 @@ import time
 from dataclasses import dataclass
 from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
+from .config import section as _config_section
+
 logger = logging.getLogger(__name__)
 
 PLACEHOLDER = "[redacted: {label}]"
@@ -49,6 +51,20 @@ _OCTET = r"(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)"
 
 # A value that only looks like a secret: placeholders, prompts, empties.
 _NOT_A_SECRET = r"(?!\[redacted|<|\*{3}|x{3}|none\b|n/?a\b|your\b|the\b|is\b|required\b|same\b|see\b|tbd\b)"
+
+# Site-specific settings (kb_mcp.privacy.config, [redaction]).
+_REDACTION = _config_section("redaction")
+
+
+def _network_address_regex(site_prefixes: Sequence[str] = ()) -> str:
+    """IPv4 addresses (with an optional port) in the private ranges and the given two-octet prefixes."""
+    for prefix in site_prefixes:
+        if not re.fullmatch(r"\d{1,3}\.\d{1,3}", prefix):
+            raise ValueError(f"network prefix {prefix!r}: expected the first two octets, like 131.225")
+    site = "".join("|" + re.escape(p) for p in site_prefixes)
+    return (r"(?<![\d.])(?:10\." + _OCTET + r"|172\.(?:1[6-9]|2\d|3[01])|192\.168" + site + ")"
+            r"\." + _OCTET + r"\." + _OCTET + r"(?::\d{2,5})?(?![\d.]*\d)")
+
 
 GLOBAL_PATTERNS: Sequence[Pattern] = (
     Pattern(
@@ -85,16 +101,15 @@ GLOBAL_PATTERNS: Sequence[Pattern] = (
     # Network topology (the Mu2e review of 2026-11-14): the DAQ, controls
     # and ops documents stay searchable, but the addresses in their rack and
     # IPMI tables do not leave through the MCP tools -- the source documents
-    # in DocDB still have them. Measured that day: 1,397 private and 527
-    # Fermilab (131.225/16) addresses in 521 of 2.25M chunks, ~90 documents,
-    # no false positives in the samples; four-part version numbers outside
-    # these ranges are not matched.
+    # in DocDB still have them. The private ranges always; the site's own
+    # ranges from the privacy configuration ([redaction] network_prefixes,
+    # Fermilab's 131.225 for Mu2e). Measured that day: 1,397 private and 527
+    # Fermilab addresses in 521 of 2.25M chunks, ~90 documents, no false
+    # positives in the samples; four-part version numbers outside these
+    # ranges are not matched.
     Pattern(
         "network-address", "network address",
-        re.compile(
-            r"(?<![\d.])(?:10\." + _OCTET + r"|172\.(?:1[6-9]|2\d|3[01])|192\.168|131\.225)"
-            r"\." + _OCTET + r"\." + _OCTET + r"(?::\d{2,5})?(?![\d.]*\d)"
-        ),
+        re.compile(_network_address_regex(_REDACTION.get("network_prefixes", ()))),
     ),
     Pattern(
         # Colon-separated, or dash-separated only with a hex letter: plain

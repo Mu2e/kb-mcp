@@ -34,6 +34,7 @@ license = {text = "MIT"}
 # kb_mcp.imports, and [ingest] is what needs the libmagic system library.
 dependencies = [
     "python-dotenv>=1.0.0",
+    "tomli>=2.0.0; python_version < '3.11'",  # TOML reader for the visibility rules file (tomllib from 3.11)
     "anyio>=4.0.0",          # kb_mcp.config imports anyio.Path at module level
 
     # Server dependencies
@@ -167,6 +168,8 @@ path = "src/kb_mcp/__init__.py"
 # versioned with the release rather than from a working checkout.
 [tool.hatch.build.targets.wheel.shared-data]
 "deploy/mu2e.env" = "share/kb-mcp/mu2e.env"
+# The site-specific privacy settings and visibility rules (kb_mcp.privacy.config).
+"deploy/mu2e-privacy.toml" = "share/kb-mcp/privacy.toml"
 
 [tool.hatch.build.targets.wheel.shared-scripts]
 "scripts/kb-mcp.sh" = "kb-mcp.sh"
