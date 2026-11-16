@@ -446,6 +446,7 @@ def get_parser_config() -> dict:
             * `image_description_num_workers` (int): Parallel worker count (Env: `PARSE_IMAGE_DESCRIPTION_NUMWORKERS`, default: 6).
             * `image_description_max_dim` (int): Longest side in pixels before an image is downscaled for the vision call (Env: `PARSE_IMAGE_DESCRIPTION_MAX_DIM`, default: 1280, 0 disables).
             * `image_description_max_bytes` (int): Encoded size above which an image is shrunk for the vision call (Env: `PARSE_IMAGE_DESCRIPTION_MAX_BYTES`, default: 800000, 0 disables).
+            * `image_store_original` (bool): Store extracted images as they are (Env: `PARSE_IMAGE_STORE_ORIGINAL`, default: False). By default an image record keeps the same scaled copy the vision call gets (the two settings above): the originals averaged 540 KB in large slide decks, up to 20 MB, and images were 65 of the 92 GB database (2026-11-16). The registry hash (`meta.image_hash`) is taken from the original either way.
             * `marker_output_base` (str): Base directory for pre-existing Marker output (Env: `MARKER_OUTPUT_BASE`, default: 'data/sources/sld-scanned/extracted_output').
             * `ocr` (bool): Run OCR during Docling PDF parsing (Env: `PARSE_OCR`, default: True). Required for scanned documents (e.g. SLD scans); born-digital-only sweeps can disable it for speed.
             * `table_llm_summary` (bool): Generate LLM summaries for table records (Env: `PARSE_TABLE_LLM_SUMMARY`, default: False).
@@ -460,6 +461,7 @@ def get_parser_config() -> dict:
         'image_description_num_workers': _get_int("PARSE_IMAGE_DESCRIPTION_NUMWORKERS", 6),
         'image_description_max_dim': _get_int("PARSE_IMAGE_DESCRIPTION_MAX_DIM", 1280),
         'image_description_max_bytes': _get_int("PARSE_IMAGE_DESCRIPTION_MAX_BYTES", 800000),
+        'image_store_original': _get_bool("PARSE_IMAGE_STORE_ORIGINAL", False),
         'marker_output_base': _get_str("MARKER_OUTPUT_BASE", "data/sources/sld-scanned/extracted_output"),
         # OCR on by default: scanned-document pipelines depend on it.
         # Born-digital-only sweeps can disable it per-deployment for speed.

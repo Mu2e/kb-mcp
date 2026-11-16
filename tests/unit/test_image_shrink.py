@@ -89,3 +89,39 @@ def test_config_defaults_and_env_override(monkeypatch):
     cfg = get_parser_config()
     assert cfg["image_description_max_dim"] == 1024
     assert cfg["image_description_max_bytes"] == 500000
+
+
+def _noise_png(w, h):
+    import io
+    from PIL import Image
+    import random
+    random.seed(0)
+    img = Image.new("RGB", (w, h))
+    img.putdata([(random.randrange(256), random.randrange(256), random.randrange(256)) for _ in range(w * h)])
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def test_storage_keeps_the_scaled_copy_the_vision_call_gets(monkeypatch):
+    from PIL import Image
+    import io
+    from kb_mcp.parser.image_utils import scale_for_storage
+    monkeypatch.delenv("PARSE_IMAGE_STORE_ORIGINAL", raising=False)
+    monkeypatch.setenv("PARSE_IMAGE_DESCRIPTION_MAX_DIM", "400")
+    monkeypatch.setenv("PARSE_IMAGE_DESCRIPTION_MAX_BYTES", "800000")
+    big = _noise_png(1200, 600)
+    out, fmt = scale_for_storage(big)
+    assert fmt == "jpeg" and len(out) < len(big)
+    assert max(Image.open(io.BytesIO(out)).size) == 400
+
+
+def test_storage_leaves_small_images_and_honours_store_original(monkeypatch):
+    from kb_mcp.parser.image_utils import scale_for_storage
+    monkeypatch.setenv("PARSE_IMAGE_DESCRIPTION_MAX_DIM", "400")
+    small = _noise_png(100, 50)
+    assert scale_for_storage(small) == (small, None)
+    big = _noise_png(1200, 600)
+    monkeypatch.setenv("PARSE_IMAGE_STORE_ORIGINAL", "true")
+    out, fmt = scale_for_storage(big)
+    assert out is big and fmt is None
