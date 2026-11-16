@@ -133,7 +133,7 @@ $U --surface mcp --data-dir "$D" --port 8008 \
    --env-file "$E" --hf-home "$D/cache/huggingface" \
    --mikey-keys "$K" --krb5-ccname "$KRB5CCNAME"
 
-$U --surface web --data-dir "$D" --web-host :: --web-port 8108 \
+$U --surface web --data-dir "$D" --web-port 8108 \
    --env-file "$E" --hf-home "$D/cache/huggingface" \
    --import-log-dirs /exp/mu2e/data/users/<ingest-user>/kb-mcp-logs \
    --krb5-ccname "$KRB5CCNAME"
@@ -143,12 +143,14 @@ loginctl enable-linger      # once per account, or the services die at logout
 
 `--dry-run` prints the unit without writing anything.
 
-- **`--web-host ::` belongs in the web command.** The script defaults to
-  `127.0.0.1`, and the bind address is written into the unit, so leaving it
-  out (as the 0.2.11 deploy did) puts the UI on loopback and locks out the
-  hosts in `WEB_ALLOWED_IPS`, without an error. `::` is one dual-stack socket;
-  the allow list, enforced in the server, keeps everyone else out. After
-  installing, `ss -ltnp | grep 8108` should show `[::]:8108`.
+- **Bind addresses come from the settings.** Without `--host` / `--web-host`
+  the unit takes `MCP_HOST` and `WEB_HOST` from `mu2e.env` (`0.0.0.0` and
+  `::`); a flag overrides them. Until 0.2.12 the script wrote
+  `--web-host=127.0.0.1` into the unit whenever the flag was missing, which put
+  the 0.2.11 web UI on loopback and locked out the hosts in `WEB_ALLOWED_IPS`
+  without an error. `::` is one dual-stack socket; the allow list, enforced in
+  the server, keeps everyone else out. After installing, `ss -ltnp | grep 8108`
+  should show `[::]:8108`.
 
 - **`--data-dir` is required and absolute**, under `/exp/mu2e/data`. It holds
   API keys, session stores and copies of every ingested document. `DATA_DIR`

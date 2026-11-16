@@ -54,12 +54,14 @@ Options:
   --defaults <path>   Non-secret settings file, as systemd EnvironmentFile.
                       Defaults to this release's own
                       share/kb-mcp/mu2e.env (shipped with the package).
-  --host <addr>       MCP bind address (default: 0.0.0.0).
+  --host <addr>       MCP bind address. Default: MCP_HOST from the settings
+                      (deploy/mu2e.env: 0.0.0.0); given, it overrides them.
   --web-port <port>   Web UI port (default: 8108 -- 8008 + 100, deliberately
                       outside the 8000-8009 MCP range).
-  --web-host <addr>   Web UI bind address (default: 127.0.0.1). Keep it on
-                      loopback and reach it over an ssh tunnel; that is what
-                      makes running the UI without per-user login safe.
+  --web-host <addr>   Web UI bind address. Default: WEB_HOST from the settings
+                      (deploy/mu2e.env: ::, filtered by WEB_ALLOWED_IPS in the
+                      private env file); given, it overrides them. Without
+                      settings the server binds loopback.
   --deploy-root <p>   Deploy root holding releases/ and the `current` symlink.
                       Auto-detected from this script's location; override only
                       for a non-standard layout. ExecStart is written against
@@ -134,9 +136,12 @@ surface="mcp"
 mikey_keys=""
 import_log_dirs=""
 defaults_file=""
-host="0.0.0.0"
+# Bind addresses come from the settings (MCP_HOST / WEB_HOST in the defaults
+# file the unit loads) unless given here: a flag in ExecStart would silently
+# override them, which is how the 0.2.11 deploy put the web UI back on loopback.
+host=""
 web_port="8108"
-web_host="127.0.0.1"
+web_host=""
 deploy_root=""
 description=""
 do_enable=1
@@ -347,14 +352,14 @@ fi
 if [[ "$surface" == "mcp" ]]; then
   unit_name="kb-mcp"
   surface_flag="--only-mcp"
-  bind_args="--host=$host --port=$port"
-  bind_desc="$host:$port"
+  bind_args="${host:+--host=$host }--port=$port"
+  bind_desc="${host:-MCP_HOST from the settings}:$port"
   : "${description:=kb-mcp (Mu2e knowledge base MCP endpoint, Postgres-backed)}"
 else
   unit_name="kb-web"
   surface_flag="--only-web"
-  bind_args="--web-host=$web_host --web-port=$web_port"
-  bind_desc="$web_host:$web_port"
+  bind_args="${web_host:+--web-host=$web_host }--web-port=$web_port"
+  bind_desc="${web_host:-WEB_HOST from the settings}:$web_port"
   : "${description:=kb-web (Mu2e knowledge base web UI, Postgres-backed)}"
 fi
 
@@ -456,7 +461,7 @@ if [[ "$do_enable" == "1" ]]; then
     # registered on the web app. Use the smoke test, which ships in the venv.
     echo "  $venv_dir/bin/kb-mcp-smoke-test http://localhost:$port --token <mikey token>"
   else
-    echo "  curl -s -o /dev/null -w '%{http_code}\n' http://$web_host:$web_port/web   # want 200"
+    echo "  curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:$web_port/web   # want 200"
   fi
 else
   echo "Not enabled (--no-enable). To start:"
