@@ -283,6 +283,13 @@ class TokensStrategy(ChunkStrategy):
         start_idx = 0
         chunk_index = 0
 
+        # Character offset of every token, in one pass. Decoding the whole
+        # prefix again for each chunk was quadratic: a slide deck with
+        # millions of tokens of embedded tables spent hours here.
+        offsets = None
+        if hasattr(encoding, "decode_with_offsets"):
+            _, offsets = encoding.decode_with_offsets(tokens)
+
         while start_idx < len(tokens):
             end_idx = min(start_idx + chunk_size, len(tokens))
             chunk_tokens = tokens[start_idx:end_idx]
@@ -291,11 +298,11 @@ class TokensStrategy(ChunkStrategy):
             # Calculate character positions
             if start_idx == 0:
                 char_start = 0
+            elif offsets is not None:
+                char_start = offsets[start_idx]
             else:
-                # Decode tokens up to start_idx to find char position
-                prefix_tokens = tokens[:start_idx]
-                prefix_text = encoding.decode(prefix_tokens)
-                char_start = len(prefix_text)
+                # An encoding without offsets: decode the prefix (slow for long texts)
+                char_start = len(encoding.decode(tokens[:start_idx]))
 
             char_end = char_start + len(chunk_text)
             token_length = len(chunk_tokens)
