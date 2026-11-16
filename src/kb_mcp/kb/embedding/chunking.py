@@ -9,6 +9,62 @@ from .section_chunker import chunk_from_docling_json
 
 logger = logging.getLogger(__name__)
 
+_PROSE_WORD = None
+
+
+def prose_words_per_kchar(text: str) -> float:
+    """Words of four letters or more per 1,000 characters of `text`."""
+    import re
+
+    global _PROSE_WORD
+    if _PROSE_WORD is None:
+        _PROSE_WORD = re.compile(r"[^\W\d_]{4,}")
+    if not text:
+        return 0.0
+    return 1000.0 * len(_PROSE_WORD.findall(text)) / len(text)
+
+
+def drop_number_chunks(document, chunk_dicts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Leave out the body chunks of a long document that are mostly not prose.
+
+    A document longer than EMBED_MAX_TEXT_CHARS that is not a spreadsheet
+    (those are summary-only, see chunk_and_embed) is chunked, but its chunks
+    with fewer than EMBED_MIN_PROSE_WORDS_PER_KCHAR words per 1,000
+    characters are not stored: tables of numbers pasted into slides and Word
+    files, field maps, simulation output, table separators. Measured
+    2026-11-16 on the 109 such documents: 77% of their 147k body chunks were
+    number blocks (the Mech Integration decks: 13.8k of 13.9k), while the
+    MECO TDR lost 35 of 2,494, all table rules. The summary chunk is never
+    affected, and neither is a document of normal length.
+    """
+    from ...config import get_embedding_config
+
+    cfg = get_embedding_config()
+    max_chars, min_words = cfg["max_text_chars"], cfg["min_prose_words_per_kchar"]
+    if (not chunk_dicts or not max_chars or not min_words
+            or getattr(document, "doc_type", "text") not in ("text", "table")
+            or len(getattr(document, "text", None) or "") <= max_chars
+            or all(str(cd.get("chunk_strategy", "")).startswith("summary") for cd in chunk_dicts)):
+        return chunk_dicts
+    def is_summary(cd):
+        return str(cd.get("chunk_strategy", "")).startswith("summary")
+
+    density = {id(cd): prose_words_per_kchar(cd.get("text") or "") for cd in chunk_dicts if not is_summary(cd)}
+    kept = [cd for cd in chunk_dicts if is_summary(cd) or density[id(cd)] >= min_words]
+    if density and not any(not is_summary(cd) for cd in kept):
+        # Keep the wordiest body chunk: a document left with no body chunk
+        # at all looks unchunked to chunk_and_embed_all, which would chunk
+        # it again on every run.
+        best = max((cd for cd in chunk_dicts if not is_summary(cd)), key=lambda cd: density[id(cd)])
+        kept = [cd for cd in chunk_dicts if is_summary(cd) or cd is best]
+    if len(kept) < len(chunk_dicts):
+        logger.info(
+            f"Document {getattr(document, 'id', '?')[:8]}: left out {len(chunk_dicts) - len(kept):,} of "
+            f"{len(chunk_dicts):,} chunks with < {min_words} words per 1,000 characters "
+            f"(EMBED_MIN_PROSE_WORDS_PER_KCHAR; document is {len(document.text):,} characters)"
+        )
+    return kept
+
 __all__ = ["chunk_from_docling_json"]  # re-exported for existing callers/tests
 
 
@@ -733,6 +789,7 @@ def chunk_document(
             for cd in chunk_dicts:
                 cd["chunk_strategy"] = windowed_name
 
+    chunk_dicts = drop_number_chunks(document, chunk_dicts)
 
     # Determine if we need to create a session
     should_close = session is None
