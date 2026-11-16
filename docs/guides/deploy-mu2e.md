@@ -16,7 +16,7 @@ upgrade and debug is here.
 | data dir | `/exp/mu2e/data/users/mu2eai/kb` |
 | private config | `<deploy-root>/config/kb-mcp.env` (mode 600) |
 | MCP endpoint | `0.0.0.0:8008`, bearer token required |
-| web UI | `127.0.0.1:8108`, loopback only |
+| web UI | `[::]:8108`, loopback plus the hosts in `WEB_ALLOWED_IPS` (private config) |
 
 Run everything as the service account.
 
@@ -133,7 +133,7 @@ $U --surface mcp --data-dir "$D" --port 8008 \
    --env-file "$E" --hf-home "$D/cache/huggingface" \
    --mikey-keys "$K" --krb5-ccname "$KRB5CCNAME"
 
-$U --surface web --data-dir "$D" --web-port 8108 \
+$U --surface web --data-dir "$D" --web-host :: --web-port 8108 \
    --env-file "$E" --hf-home "$D/cache/huggingface" \
    --import-log-dirs /exp/mu2e/data/users/<ingest-user>/kb-mcp-logs \
    --krb5-ccname "$KRB5CCNAME"
@@ -142,6 +142,13 @@ loginctl enable-linger      # once per account, or the services die at logout
 ```
 
 `--dry-run` prints the unit without writing anything.
+
+- **`--web-host ::` belongs in the web command.** The script defaults to
+  `127.0.0.1`, and the bind address is written into the unit, so leaving it
+  out (as the 0.2.11 deploy did) puts the UI on loopback and locks out the
+  hosts in `WEB_ALLOWED_IPS`, without an error. `::` is one dual-stack socket;
+  the allow list, enforced in the server, keeps everyone else out. After
+  installing, `ss -ltnp | grep 8108` should show `[::]:8108`.
 
 - **`--data-dir` is required and absolute**, under `/exp/mu2e/data`. It holds
   API keys, session stores and copies of every ingested document. `DATA_DIR`
