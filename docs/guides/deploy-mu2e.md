@@ -16,7 +16,7 @@ upgrade and debug is here.
 | data dir | `/exp/mu2e/data/users/mu2eai/kb` |
 | private config | `<deploy-root>/config/kb-mcp.env` (mode 600) |
 | MCP endpoint | `0.0.0.0:8008`, bearer token required |
-| web UI | `127.0.0.1:8108`, loopback only |
+| web UI | `[::]:8108`, loopback plus the hosts in `WEB_ALLOWED_IPS` (private config) |
 
 Run everything as the service account.
 
@@ -142,6 +142,15 @@ loginctl enable-linger      # once per account, or the services die at logout
 ```
 
 `--dry-run` prints the unit without writing anything.
+
+- **Bind addresses come from the settings.** Without `--host` / `--web-host`
+  the unit takes `MCP_HOST` and `WEB_HOST` from `mu2e.env` (`0.0.0.0` and
+  `::`); a flag overrides them. Until 0.2.12 the script wrote
+  `--web-host=127.0.0.1` into the unit whenever the flag was missing, which put
+  the 0.2.11 web UI on loopback and locked out the hosts in `WEB_ALLOWED_IPS`
+  without an error. `::` is one dual-stack socket; the allow list, enforced in
+  the server, keeps everyone else out. After installing, `ss -ltnp | grep 8108`
+  should show `[::]:8108`.
 
 - **`--data-dir` is required and absolute**, under `/exp/mu2e/data`. It holds
   API keys, session stores and copies of every ingested document. `DATA_DIR`
