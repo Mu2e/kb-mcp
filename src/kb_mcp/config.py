@@ -513,7 +513,16 @@ def get_embedding_config() -> dict:
               limit). The giant financial sheets otherwise ran to 10k-43k
               chunks each: 96 of them held 32% of all embeddings
               (2026-11-15). Long PDFs, slides and Word documents are always
-              chunked.
+              chunked, but see `min_prose_words_per_kchar`.
+            * `min_prose_words_per_kchar` (int): In a document longer than
+              `max_text_chars` (not a spreadsheet), chunks with fewer words
+              (four letters or more) per 1,000 characters than this are not
+              stored: tables of numbers pasted into slides or Word files,
+              field maps, simulation output (Env:
+              `EMBED_MIN_PROSE_WORDS_PER_KCHAR`, default: 3; 0 = keep all).
+              Measured 2026-11-16: 77% of the 147k body chunks of the 109
+              such documents were number blocks; the MECO TDR lost 35 of
+              2,494, all table rules.
 
     `chunk_size` and `chunk_overlap` are None when unset rather than carrying a coded default, so the
     embedding layer can tell "the operator chose this" from "nobody said",
@@ -530,6 +539,7 @@ def get_embedding_config() -> dict:
         'chunk_size': int(chunk_size) if chunk_size else None,
         'chunk_overlap': int(chunk_overlap) if chunk_overlap else None,
         'max_text_chars': _get_int("EMBED_MAX_TEXT_CHARS", 500000),
+        'min_prose_words_per_kchar': _get_int("EMBED_MIN_PROSE_WORDS_PER_KCHAR", 3),
     }
 
 def get_eval_config() -> dict:
