@@ -246,8 +246,8 @@ def setup_chat_routes(app, session_manager: WebSessionManager, require_auth_html
             <span style="font-size: 13px; color: #666;">
                 <label for="agent-mode-select">Mode:</label>
                 <select id="agent-mode-select" style="margin-left: 4px; font-size: 13px; padding: 2px 6px;">
-                    <option value="notebook" {"" if doc_id else "selected"}>Notebook agent (multi-step scratchpad)</option>
-                    <option value="plain" {"selected" if doc_id else ""}>Plain agent (tools, single-pass)</option>
+                    <option value="plain" selected>Plain agent (tools, single-pass)</option>
+                    <option value="notebook">Notebook agent (multi-step scratchpad)</option>
                     <option value="direct">Direct (no tools)</option>
                 </select>
             </span>
@@ -610,7 +610,7 @@ def setup_chat_routes(app, session_manager: WebSessionManager, require_auth_html
 
         session_id = request.query_params.get('session_id')
         message = request.query_params.get('message')
-        mode = request.query_params.get('mode', 'notebook')  # notebook | plain | direct
+        mode = request.query_params.get('mode', 'plain')  # plain (default) | notebook | direct
         # print("DEBUG Received message for session:", session_id, message, "mode:", mode)
 
         if not session_id or not message:
