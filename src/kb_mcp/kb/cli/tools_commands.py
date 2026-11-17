@@ -1622,7 +1622,7 @@ def cmd_visibility_sweep(args):
     rule_options = {}
     if args.rule == "oversized-spreadsheet":
         rule_options = {"max_chars": args.max_chars, "hide_get": args.hide_get}
-    elif args.rule == "cost-report":
+    else:
         rule_options = {"hide_get": args.hide_get}
 
     try:
@@ -2833,9 +2833,10 @@ def setup_commands(subparsers):
         ),
     )
     vis_sweep_parser.add_argument(
-        "--rule", required=True, choices=["oversized-spreadsheet", "cost-report"],
-        help="oversized-spreadsheet: spreadsheets over --max-chars, hidden from search; "
-             "cost-report: the monthly CAM cost reports (by DocDB file name), hidden from search",
+        "--rule", required=True,
+        help="oversized-spreadsheet (built in): spreadsheets over --max-chars, hidden from search; "
+             "or a rule from the deployment's privacy configuration (PRIVACY_CONFIG_FILE, default "
+             "<venv>/share/kb-mcp/privacy.toml; Mu2e's is cost-report). An unknown name lists them.",
     )
     vis_sweep_parser.add_argument("--apply", action="store_true", help="Write the decisions (default: dry run)")
     vis_sweep_parser.add_argument("--source-id", help="Restrict to a single source")

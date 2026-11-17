@@ -509,11 +509,12 @@ Once per host and account. Not part of a routine deploy.
 
 ### Private configuration file
 
-Configuration lives in three places, deliberately:
+Configuration lives in four places, deliberately:
 
 | where | holds | changed by |
 |---|---|---|
 | `deploy/mu2e.env` (in git, ships to `<release>/.venv/share/kb-mcp/mu2e.env`) | policy: ports, bind addresses, auth mode, embedding model, `HIDE_GRAPH`, log levels | commit + new release |
+| `deploy/mu2e-privacy.toml` (in git, ships to `<release>/.venv/share/kb-mcp/privacy.toml`) | privacy: the site names in the scan prompt, the scan's allowed LLM endpoints, Fermilab's address range for redaction, the visibility rules (`cost-report`) | commit + new release, or `PRIVACY_CONFIG_FILE` |
 | the systemd unit | paths: `DATA_DIR`, `HF_HOME`, `MIKEY_KEYS_FILE`, `KRB5CCNAME`, `KB_IMPORT_LOG_DIRS` | re-running `kb-mcp-install-unit.sh` |
 | `KB_ENV_FILE` (mode 600, outside git) | secrets **and site topology**: database coordinates, LLM endpoint | editing that file |
 

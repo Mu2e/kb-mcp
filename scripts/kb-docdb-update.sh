@@ -209,9 +209,10 @@ stdbuf -oL -eL kb-import docdb --days "$DAYS" --skip-existing --delay 1 \
 rc=$?
 end=$(date +%s)
 
-# 3a'. Standing visibility rules (docs/guides/privacy.md): the monthly cost
-# and earned value / status reports stay out of search. A sweep only
-# decides documents nobody has decided yet, so it is cheap to run every time;
+# 3a'. Standing visibility rules (docs/guides/privacy.md): the project-controls
+# reports with money or people stay out of search. The rules are configured in
+# the release's share/kb-mcp/privacy.toml (from deploy/mu2e-privacy.toml).
+# A sweep only decides documents nobody has decided yet, so it is cheap to run every time;
 # failing does not fail the run.
 {
     for rule in cost-report; do

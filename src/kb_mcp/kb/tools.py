@@ -1827,54 +1827,28 @@ def _rule_oversized_spreadsheet(
     ]
 
 
-# The project's monthly project-controls reports: the CAM cost reports
-# ("47502 Accelerator Systems CAM docs": per-control-account cost sheets,
-# "BED Analysis" summaries and totals, listing purchases with purchase-card
-# holders), the Earned Value reports, and the monthly status / turnaround
-# ("TAR") reports sent to PCS. Financial project data of no use to an agent;
-# the Mu2e review of 2026-11-14/15 took them out of search (kb_get still
-# fetches them). Matched on the DocDB file name, which every report in these
-# series carries (checked 2026-11-15: 310 cost reports, 321 Earned Value
-# files, ~35 TAR/status files, no other documents).
-COST_REPORT_NAME_PATTERNS = (
-    "%cost_report%", "%cost report%",
-    "%earned_value%", "%earned value%",
-    "%sent_to_pcs%", "%sent to pcs%", "%send_to_pcs%", "%submit_to_pcs%",
-    "%\\_tar\\_%", "% tar %", "%turnaround%", "%turn_around%",
-)
-
-
-def _rule_cost_report(
-    session,
-    *,
-    source_id: Optional[str] = None,
-    hide_get: bool = False,
-) -> List[Dict[str, Any]]:
-    """Raw documents whose DocDB file name marks a monthly project-controls report."""
-    from sqlalchemy import or_
-    from .db_models import RawDocument
-
-    query = session.query(RawDocument.id, RawDocument.doc_id).filter(
-        or_(*[RawDocument.doc_id.ilike(p, escape="\\") for p in COST_REPORT_NAME_PATTERNS])
-    )
-    if source_id:
-        query = query.filter(RawDocument.source_id == source_id)
-    return [
-        {
-            "raw_document_id": raw_id,
-            "visible_search": False,
-            "visible_get": not hide_get,
-            "reason": "monthly project-controls report (cost, earned value or status); kept out of search",
-            "meta": {"rule": "cost-report", "doc_id": doc_id},
-        }
-        for raw_id, doc_id in query.order_by(RawDocument.doc_id).all()
-    ]
-
-
+# Built-in rules. The name-based ones (e.g. Mu2e's `cost-report`) are
+# configured per deployment in a TOML file: see kb.visibility_rules.
 VISIBILITY_RULES = {
     "oversized-spreadsheet": _rule_oversized_spreadsheet,
-    "cost-report": _rule_cost_report,
 }
+
+
+def available_visibility_rules() -> Dict[str, Any]:
+    """Every rule a sweep can run: the built-in ones plus the configured ones.
+
+    A configured rule must not shadow a built-in one; the built-in wins and a
+    warning is logged.
+    """
+    from .visibility_rules import load_rules
+
+    rules: Dict[str, Any] = dict(VISIBILITY_RULES)
+    for name, rule in load_rules().items():
+        if name in rules:
+            logger.warning(f"visibility rule {name!r} is built in; the configured one is ignored")
+            continue
+        rules[name] = rule.select
+    return rules
 
 
 def _already_decided(session, raw_document_ids, group_name: str) -> set:
@@ -1922,12 +1896,13 @@ def visibility_sweep(
     import socket
     from .db_models import DocumentVisibilityRun
 
-    if rule not in VISIBILITY_RULES:
-        raise ValueError(f"unknown rule {rule!r}; available: {', '.join(sorted(VISIBILITY_RULES))}")
+    rules = available_visibility_rules()
+    if rule not in rules:
+        raise ValueError(f"unknown rule {rule!r}; available: {', '.join(sorted(rules))}")
     rule_options = rule_options or {}
 
     with get_db_session() as session:
-        matched = VISIBILITY_RULES[rule](session, source_id=source_id, **rule_options)
+        matched = rules[rule](session, source_id=source_id, **rule_options)
         decided = _already_decided(session, {m["raw_document_id"] for m in matched}, group_name)
     pending = [m for m in matched if m["raw_document_id"] not in decided]
     if limit is not None:

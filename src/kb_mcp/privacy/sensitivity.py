@@ -24,8 +24,17 @@ from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
 from ..llm import STAGE_SENSITIVITY_SCAN, call_with_backoff, record_llm_usage
+from .config import section as _config_section
 
 logger = logging.getLogger(__name__)
+
+# Site-specific wording and endpoints (kb_mcp.privacy.config, [scan]). The
+# defaults are generic; Mu2e's file restores the Mu2e text exactly, so its
+# prompt (and PROMPT_VERSION) are unchanged by moving them there.
+_SCAN = _config_section("scan")
+ORGANIZATION = _SCAN.get("organization", "an organization")
+SYSTEMS_OWNER = _SCAN.get("systems_owner", "the organization's")
+INTERNAL_NAMES = tuple(_SCAN.get("internal_names", ()))
 
 # Bump whenever the prompt or the output contract changes: scans are keyed on
 # (document, prompt version), so a new version re-scans everything once.
@@ -36,7 +45,7 @@ CATEGORIES = {
     "individual_assessment": "evaluations, criticism or rankings of identifiable people",
     "personal_data": "private contact, identity, health or family information",
     "credentials": "passwords, passcodes, keys, tokens, payment card details and other secrets",
-    "security": "details that would help someone attack Mu2e or Fermilab systems",
+    "security": f"details that would help someone attack {SYSTEMS_OWNER} systems",
     "restricted": "proprietary, confidential, embargoed, export-controlled or CUI material",
     "other": "sensitive in a way none of the above covers",
 }
@@ -46,11 +55,10 @@ SEVERITY_RANK = {s: i for i, s in enumerate(SEVERITIES)}
 # Endpoints the scan may send document text to. The point of the scan is to
 # keep this content away from external LLMs, so the scan itself must not be
 # the leak: anything else needs an explicit --allow-endpoint.
-DEFAULT_ALLOWED_HOSTS = ("vllm.fnal.gov", "inference-api.alcf.anl.gov")
+DEFAULT_ALLOWED_HOSTS = tuple(_SCAN.get("allowed_hosts", ()))
 
-_SYSTEM_PROMPT = """\
-You review documents from the internal knowledge base of Mu2e, a particle physics \
-experiment at Fermilab. Collaboration members can read all of these documents. The \
+_SYSTEM_PROMPT = f"""\
+You review documents from the internal knowledge base of {ORGANIZATION}. Collaboration members can read all of these documents. The \
 knowledge base is also searched by AI assistants that run on external, commercial \
 LLMs. Your job is to find the rare passages that such an assistant should never \
 surface or quote to anyone: content that would hurt a person, a partner company, \
@@ -104,7 +112,7 @@ institutions, work e-mail and office phone numbers, even with direct lines; \
 company and vendor contact details. In a long list of people report at most \
 one finding per kind of private data, quoting one example.
 
-security: information that would help someone attack Mu2e or Fermilab \
+security: information that would help someone attack {systems_owner} \
 computing or control systems: unpatched vulnerabilities, how to bypass access \
 controls, firewall rules, internal IP addresses or network layouts of control \
 or DAQ systems. Not security: hostnames, software versions, power or cooling \
@@ -171,6 +179,7 @@ def build_messages(
         windows=windows,
         text=text,
         categories=", ".join(CATEGORIES),
+        systems_owner=SYSTEMS_OWNER,
     )
     return [
         {"role": "system", "content": _SYSTEM_PROMPT},
@@ -247,6 +256,15 @@ def evidence_in_text(evidence: str, text: str) -> bool:
 # LLM missed "General Atomics Proprietary Information" in two slide decks), so
 # they are reported alongside the model's findings, not left to it.
 # (name, severity, pattern)
+def _internal_notices(names) -> str:
+    """ "<name> internal only", "internal to the <name> collaboration" for the site's names."""
+    names = [re.escape(n.lower()) for n in names]
+    alternatives = "|".join(names + ["collaboration"])
+    optional = f"(?:{'|'.join(names)}\\s+)?" if names else ""
+    return (rf"|\b(?:{alternatives})[- ]internal\s+only\b"
+            rf"|\binternal\s+to\s+the\s+{optional}collaboration\b")
+
+
 MARKERS = [
     ("proprietary notice", "medium", re.compile(
         r"proprietary\s+(?:information|data|notice|(?:and|&)\s+confidential)\b"
@@ -265,8 +283,7 @@ MARKERS = [
         r"|\bdo\s+not\s+(?:distribute|forward|copy)\b"
         r"|\bnot\s+for\s+(?:public\s+)?(?:distribution|release)\b"
         r"|\binternal\s+use\s+only\b"
-        r"|\b(?:mu2e|collaboration)[- ]internal\s+only\b"
-        r"|\binternal\s+to\s+the\s+(?:mu2e\s+)?collaboration\b",
+        + _internal_notices(INTERNAL_NAMES),
         re.IGNORECASE)),
 ]
 
