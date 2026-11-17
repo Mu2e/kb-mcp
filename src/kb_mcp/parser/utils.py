@@ -136,6 +136,12 @@ def detect_mime_type(file_path: str | Path) -> str:
         MIME type string
     """
     file_path = Path(file_path) if not isinstance(file_path, Path) else file_path
+    # Describe the file a symlink points to, not the link: libmagic does not
+    # follow links by default and reports "inode/symlink", which picks the
+    # fallback parser instead of Docling. A broken link resolves to its
+    # missing target, which libmagic cannot open: the extension decides then,
+    # and the parser reports the missing file when it opens it.
+    file_path = file_path.resolve()
 
     # Try python-magic first (more accurate)
     magic_mime_type = None
