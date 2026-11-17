@@ -71,6 +71,7 @@ MCP_HOST = _server_config['mcp_host']
 WEB_HOST = _server_config['web_host']
 WEB_PORT = _server_config['web_port']
 WEB_ALLOWED_IPS = _server_config['web_allowed_ips']
+WEB_BASE_PATH = _server_config['web_base_path']
 USE_HTTPS = _server_config['use_https']
 
 auth_config = get_auth_config()
@@ -396,6 +397,14 @@ def main():
             return {}
         return {"ssl_keyfile": "certs/key.pem", "ssl_certfile": "certs/cert.pem"}
 
+    def _prefixed(web_app):
+        # Behind a reverse proxy under a path (https://host/kb/doc/...): the
+        # pages' absolute paths get the prefix (kb_mcp.server.path_prefix).
+        from .path_prefix import PathPrefixMiddleware
+
+        roots = ("web", "api", "static", "admin", "login", "logout", "files", "status", "oauth")
+        return PathPrefixMiddleware(web_app, WEB_BASE_PATH, roots)
+
     def _restrict_web(web_app):
         # Off loopback, only the allowlisted peers (plus loopback) get in.
         if not web_off_loopback:
@@ -434,7 +443,7 @@ def main():
             servers.append(
                 uvicorn.Server(
                     uvicorn.Config(
-                        _restrict_web(create_web_app()), host=web_host, port=web_port, **_ssl_kwargs()
+                        _restrict_web(_prefixed(create_web_app())), host=web_host, port=web_port, **_ssl_kwargs()
                     )
                 ).serve(sockets=_web_sockets())
             )
