@@ -555,6 +555,13 @@ OPENAI_API_KEY=
 # mu2e.env: the repository is public.
 WEB_ALLOWED_IPS=
 
+# Path the web UI is served under behind the reverse proxy
+# (https://mu2e-exp.fnal.gov/kb/doc/ -> http://mu2eaigpvm01:8108/). The pages'
+# links, scripts and API calls get it; requests without it (the ssh tunnel)
+# keep working. An X-Forwarded-Prefix header from the proxy takes precedence;
+# the server logs once what the proxy sends.
+WEB_BASE_PATH=/kb/doc
+
 # Guards the web UI's write pages (upload, delete, re-chunk, API keys).
 # Browsing stays open in public mode, so this is what protects writes.
 ADMIN_PASSWORD=
