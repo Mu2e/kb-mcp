@@ -442,6 +442,14 @@ class DoclingParser(BaseParser):
                     img_format = pil_image.format or "PNG"
                     pil_image.save(img_byte_arr, format=img_format)
                     img_bytes = img_byte_arr.getvalue()
+                    # Registry key from the original, then store the scaled
+                    # copy the vision call gets (PARSE_IMAGE_STORE_ORIGINAL
+                    # keeps the original).
+                    from . import boilerplate
+                    from .image_utils import scale_for_storage
+                    original_hash = boilerplate.image_hash(img_bytes)
+                    original_size = len(img_bytes)
+                    img_bytes, scaled_format = scale_for_storage(img_bytes)
 
                     page_no = None
                     bbox = None
@@ -482,6 +490,9 @@ class DoclingParser(BaseParser):
                             "nearby_text": nearby_text or None,
                             "self_ref": self_ref,
                             "parser": "docling",
+                            "image_hash": original_hash,
+                            "format": scaled_format or img_format.lower(),
+                            **({"original_bytes": original_size} if scaled_format else {}),
                             # See section_dict — `add_many()` resolves
                             # this to a real parent_id during ingest.
                             "parent_doc_id": parent_data.get("doc_id"),

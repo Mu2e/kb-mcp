@@ -379,3 +379,14 @@ def test_record_sweep_skips_decorative_images(db, monkeypatch):
     monkeypatch.setattr(Document, "chunk_and_embed", lambda self, **k: embedded.append(self.doc_id) or [1])
     result = tools.record_chunk_and_embed_all("mu2e-docdb", "image", session=db)
     assert result["chunked"] == 1 and embedded == ["101-talk.pdf-_page_2_Figure_2.png"]
+
+
+def test_a_stored_scaled_copy_is_recognised_by_the_original_hash(vision):
+    """The Docling parser stores a scaled copy and puts the original's hash in
+    meta.image_hash; the registry must still know the picture."""
+    scaled = image(b"scaled-copy-of-the-known-plot", 1, text="caption")
+    scaled["meta"]["image_hash"] = boilerplate.image_hash(KNOWN_PLOT)
+    image_descriptions.generate_image_descriptions("doc", [scaled])
+    assert vision.calls == []
+    assert scaled["meta"]["description"] == "Known plot."
+    assert scaled["meta"]["image_hash"] == boilerplate.image_hash(KNOWN_PLOT)

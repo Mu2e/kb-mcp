@@ -214,8 +214,11 @@ def generate_image_descriptions(
     # and not at all when the registry already knows it (see boilerplate.py).
     copies_by_hash: Dict[str, List[Dict[str, Any]]] = {}
     for _, img_dict in images_with_binary:
-        h = boilerplate.image_hash(img_dict["binary"])
-        img_dict.setdefault("meta", {})["image_hash"] = h
+        # The parser may have stored a scaled copy; its hash of the original
+        # is the registry key, so the same picture is recognised either way.
+        meta = img_dict.setdefault("meta", {})
+        h = meta.get("image_hash") or boilerplate.image_hash(img_dict["binary"])
+        meta["image_hash"] = h
         copies_by_hash.setdefault(h, []).append(img_dict)
     known = boilerplate.lookup(copies_by_hash)
     for h, entry in known.items():
@@ -303,9 +306,10 @@ def generate_image_descriptions(
         # Note: img_dict references point to the same dict objects in image_dicts (not copies)
         images_for_llm = []
         for idx, img_dict in images_with_binary:
-            # Get binary data. The stored bytes (and the registry hash) stay as
-            # extracted; only the copy sent to the endpoint is shrunk, because
-            # multi-megabyte figures make the vision endpoint fail.
+            # Get binary data. The Docling parser stores the scaled copy
+            # already (see image_utils.scale_for_storage), which this leaves
+            # as it is; other parsers' images are shrunk here for the call
+            # only, because multi-megabyte figures make the endpoint fail.
             image_bytes = shrink_for_vision(
                 img_dict["binary"],
                 max_dim=parser_config.get('image_description_max_dim', 1280),

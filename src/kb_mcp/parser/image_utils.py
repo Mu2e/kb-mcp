@@ -3,7 +3,7 @@
 import base64
 import io
 import logging
-from typing import Optional, Union
+from typing import Optional, Union, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -101,6 +101,25 @@ def shrink_for_vision(image_bytes: bytes, max_dim: int = 1280, max_bytes: int = 
     except Exception as e:  # undecodable, truncated, unsupported mode ...
         logger.warning("Could not shrink image for vision (%s); sending original", e)
         return image_bytes
+
+
+def scale_for_storage(image_bytes: bytes) -> Tuple[bytes, Optional[str]]:
+    """The bytes to store for an extracted image, and their format if they changed.
+
+    The same scaled copy the vision call gets (PARSE_IMAGE_DESCRIPTION_MAX_DIM
+    and _MAX_BYTES): what is stored is what the model described, and a
+    multi-megabyte original is no more useful to an agent. Returns the input
+    unchanged, and None, when the image is small already, cannot be decoded,
+    or PARSE_IMAGE_STORE_ORIGINAL is set. A scaled image is JPEG.
+    """
+    from ..config import get_parser_config
+
+    cfg = get_parser_config()
+    if cfg.get("image_store_original"):
+        return image_bytes, None
+    out = shrink_for_vision(image_bytes, max_dim=cfg.get("image_description_max_dim", 1280),
+                            max_bytes=cfg.get("image_description_max_bytes", 800000))
+    return out, (None if out is image_bytes else "jpeg")
 
 
 def image_to_base64(img, format: Optional[str] = None) -> str:
