@@ -210,7 +210,6 @@ def test_a_missing_view_falls_back_to_the_live_count():
     {"filter": {"bool": {"must_not": [{"term": {"doc_type": "image"}}]}}},
     {"filter": {"term": {"docdb_id": "58830"}}},
     {"filter": {"wildcard": {"doc_id": "58716*"}}},
-    {"filter": {"term": {"source_id": "x"}}, "enforce_visibility": True},
     {"filter": {"term": {"source_id": "x"}}, "author": "Simon"},
 ])
 def test_any_other_filter_never_reads_the_view(filters):
@@ -218,6 +217,16 @@ def test_any_other_filter_never_reads_the_view(filters):
     run(s, **filters)
     assert s.view_queries() == []
     assert len(s.live_counts()) == 1
+
+
+def test_visibility_still_reads_the_view_and_filters_the_vector_query():
+    """Every MCP search enforces visibility; it must not lose the shortcut."""
+    s = ViewSession(count=5, view_total=535_000)
+    out = run(s, filter={"term": {"doc_type": "image"}}, enforce_visibility=True)
+    assert s.live_counts() == []
+    assert out["metadata"]["vector_path"] == "index"
+    (query,) = s.vector_queries()
+    assert "visible_search" in query
 
 
 def test_source_and_type_arguments_count_like_a_filter():

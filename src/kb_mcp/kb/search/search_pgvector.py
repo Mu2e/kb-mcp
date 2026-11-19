@@ -67,12 +67,21 @@ def _coarse_chunk_total(
     14 s cold for source_id=mu2e-docdb, over 45 s for doc_type=image
     (2026-11-12), which is where those searches timed out. The summary view
     (kb.database.SUMMARY_VIEWS) holds the answer. None means "count live":
-    any other filter (a time range, a metadata field, a chunking strategy,
-    visibility), or the view missing (not created yet, or the role cannot
-    read it). The view is as fresh as the last `db-maintain`, so the caller
-    uses it only when it says some chunks pass (see the caller).
+    any other filter (a time range, a metadata field, a chunking strategy),
+    or the view missing (not created yet, or the role cannot read it). The
+    view is as fresh as the last `db-maintain`, so the caller uses it only
+    when it says some chunks pass (see the caller).
+
+    Visibility does not stop the shortcut. The view counts hidden chunks
+    too, but the total only picks the path; the vector query still applies
+    the visibility condition, so a hidden chunk is never returned. Every MCP
+    search enforces visibility, so excluding it here meant the shortcut never
+    ran for them: kb_search with {"term": {"doc_type": "image"}} counted live
+    and hit the statement timeout (2026-11-18). A source that is almost all
+    hidden would take the index path where the exact one would be quicker --
+    bounded by the probe limit and the vector timeout.
     """
-    if chunking_strategy or parser_id or extra_filters or enforce_visibility:
+    if chunking_strategy or parser_id or extra_filters:
         return None
     constraints = _coarse_constraints(filter)
     if constraints is None:
