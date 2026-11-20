@@ -149,3 +149,17 @@ def test_confirm_keeps_the_policy_visibility_as_a_review(recorded, monkeypatch):
     [(raw, kwargs)] = recorded["decisions"]
     assert (kwargs["visible_search"], kwargs["visible_get"]) == (False, True)
     assert kwargs["meta"]["origin"] == tools.PRIVACY_REVIEW_ORIGIN
+
+
+# -- the coverage cache behind privacy_review_queue ----------------------------
+
+def test_coverage_key_changes_with_the_rules_and_the_findings():
+    finding = {"document_id": "d1", "span": "secret", "category": "credentials", "severity": "high"}
+    r1, r2 = SimpleNamespace(id="rule-1"), SimpleNamespace(id="rule-2")
+    key = tools._review_findings_key([finding], [r1])
+    assert tools._review_findings_key([finding], [r1]) == key                  # same state, same key
+    assert tools._review_findings_key([finding], [r1, r2]) != key              # a new redaction
+    assert tools._review_findings_key([finding], []) != key                    # an unredact
+    assert tools._review_findings_key([{**finding, "document_id": "d2"}], [r1]) != key   # a reparse
+    assert tools._review_findings_key([finding, {**finding, "span": "other"}], [r1]) != key  # a new scan
+    assert tools._review_findings_key([finding], [r2, r1]) == tools._review_findings_key([finding], [r1, r2])
