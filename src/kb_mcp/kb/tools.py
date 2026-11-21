@@ -1,6 +1,7 @@
 """Tools for batch operations on the knowledge base."""
 
 import json
+import threading
 import logging
 import shutil
 from datetime import datetime
@@ -2827,6 +2828,23 @@ def _latest_policy_findings(session, raw_document_ids) -> Dict[str, List[Dict[st
     return out
 
 
+# Which findings of a raw document its redactions cover, by raw document:
+# raw_document_id -> (key, [covered, ...] in finding order). The key is the
+# document's medium/high findings and the ids of the redaction rules that apply
+# to it, so a new scan, a reparse (new document_id in the findings) or a new or
+# removed redaction recomputes just that document. Telling coverage needs the
+# document text and a pass of every rule over it -- 512 of the 541 documents
+# the queue looked at on 2026-11-19 were fully covered and never shown, and
+# they cost 13 s per load of /web/privacy. In-process: the web server keeps it,
+# a CLI run starts empty.
+_REVIEW_COVERED: Dict[str, Any] = {}
+_REVIEW_COVERED_LOCK = threading.Lock()
+
+
+def _review_findings_key(findings, rules) -> tuple:
+    return (json.dumps(findings, sort_keys=True, default=str), tuple(sorted(r.id for r in rules)))
+
+
 def privacy_review_queue(group_name: str = DOCUMENT_VISIBILITY_DEFAULT_GROUP) -> Dict[str, Any]:
     """What a person still has to look at, for `kb tools visibility review` and /web/privacy.
 
@@ -2885,18 +2903,36 @@ def privacy_review_queue(group_name: str = DOCUMENT_VISIBILITY_DEFAULT_GROUP) ->
             if any(SEVERITY_RANK.get(f.get("severity"), 0) >= 1 for f in findings):
                 candidates.add(raw)
 
+        def relevant(raw):
+            return [f for f in all_findings.get(raw, []) if SEVERITY_RANK.get(f.get("severity"), 0) >= 1]
+
+        keys = {raw: _review_findings_key(relevant(raw), rules_for(raw))
+                for raw in set(held) | set(provisional) | candidates}
+        with _REVIEW_COVERED_LOCK:
+            known = {raw: hit[1] for raw, hit in ((r, _REVIEW_COVERED.get(r)) for r in keys)
+                     if hit and hit[0] == keys[raw]}
+        # A candidate whose findings are all known to be covered is not
+        # flagged: no text, title or count needed for it.
+        candidates = {r for r in candidates if not (r in known and all(known[r]))}
+
         wanted = set(held) | set(provisional) | candidates
         texts = {}
         doc_of_raw = {}
         if wanted:
-            lengths = session.query(Document.id, Document.raw_document_id, func.length(Document.text)).filter(
+            for did, raw in session.query(Document.id, Document.raw_document_id).filter(
                 Document.raw_document_id.in_(list(wanted)), Document.doc_type == "text"
-            ).all()
-            for did, raw, _ in lengths:
+            ).all():
                 doc_of_raw.setdefault(raw, did)
             # Text is only needed to tell which findings a redaction covers;
-            # the giant spreadsheets are never scanned, so never needed.
-            readable = [did for did, _, n in lengths if n and n <= 2_000_000]
+            # the giant spreadsheets are never scanned, so never needed, and
+            # neither are documents whose coverage is already known. Their
+            # length is not asked for either: length() unpacks the whole text
+            # (4.5 s for 29 documents, the spreadsheets among them).
+            unknown = [r for r in wanted if r not in known]
+            lengths = session.query(Document.id, func.length(Document.text)).filter(
+                Document.raw_document_id.in_(unknown), Document.doc_type == "text"
+            ).all() if unknown else []
+            readable = [did for did, n in lengths if n and n <= 2_000_000]
             texts = dict(session.query(Document.id, Document.text).filter(Document.id.in_(readable)).all()) if readable else {}
         info = {
             r.id: (f"{r.source_id}/{r.doc_id}", (r.meta or {}).get("title") or "")
@@ -2914,13 +2950,23 @@ def privacy_review_queue(group_name: str = DOCUMENT_VISIBILITY_DEFAULT_GROUP) ->
         ) if wanted else {}
 
     def entry(raw):
-        rules = rules_for(raw)
-        findings = []
-        for f in all_findings.get(raw, []):
-            if SEVERITY_RANK.get(f.get("severity"), 0) < 1:
-                continue
-            text = texts.get(f["document_id"], "")
-            findings.append({**f, "covered": covered_by_redaction(f, text, find_replacements(text, rules)) if text else False})
+        found = relevant(raw)
+        covered = known.get(raw)
+        if covered is None or len(covered) != len(found):
+            rules = rules_for(raw)
+            replacements = {}   # per text document: one pass of the rules, not one per finding
+            covered = []
+            for f in found:
+                text = texts.get(f["document_id"], "")
+                if text and f["document_id"] not in replacements:
+                    replacements[f["document_id"]] = find_replacements(text, rules)
+                covered.append(covered_by_redaction(f, text, replacements[f["document_id"]]) if text else False)
+            # Only a result computed from the text is worth keeping: without
+            # it (too long to load, no text document) "not covered" is a guess.
+            if all(texts.get(f["document_id"]) for f in found):
+                with _REVIEW_COVERED_LOCK:
+                    _REVIEW_COVERED[raw] = (keys[raw], covered)
+        findings = [{**f, "covered": c} for f, c in zip(found, covered)]
         label, title = info.get(raw, (raw, ""))
         return {
             "raw_document_id": raw, "label": label, "title": titles.get(raw) or title,
