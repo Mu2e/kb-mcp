@@ -95,6 +95,14 @@ kb eval grid --prefix my-eval \
 ```
 
 Runs are named `<prefix>-<mode>-<answer model>-q<question set>-judge-<judge>[-v<N>]`.
+
+**Search scope.** `--search-source-id mu2e-docdb` (repeatable) holds every run to those
+sources, in every mode: the retrieval modes filter on it, `rag` searches with it, and in
+`agentic` each `kb_search` the model makes is combined with it (the model can narrow the
+search, not leave it; `kb_get` is not scoped). A run measured before a new source is
+added (the wikis, say) stays comparable after it. `--search-filter '<JSON>'` adds a
+further kb_search filter. The scope is part of the run name (`-agentic-in-docdb-...`), so
+a scoped run is never taken for the unscoped one.
 The grid is **resumable**: complete runs are skipped, and an interrupted run is
 continued in place (its answers are kept, only missing questions are answered). With
 several judges, answers are produced once and **re-judged** by the others. A newer judge

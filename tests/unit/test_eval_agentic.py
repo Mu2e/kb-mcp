@@ -195,3 +195,75 @@ def test_empty_forced_answer_is_requested_again(run_agent):
     user_texts = [m["content"] for m in client.requests[1]["messages"] if isinstance(m, dict) and m.get("role") == "user"]
     assert sum("used all available tool calls" in t for t in user_texts) == 2  # first ask, then the retry
     assert trace[-1]["hit_turn_limit"] is True and trace[-1]["nudges"] == 1
+
+
+# -- search scope: a run held to one source (e.g. DocDB only) --------------------
+
+DOCDB = {"term": {"source_id": "mu2e-docdb"}}
+
+
+class _RecordingServer(_FakeServer):
+    def __init__(self, results):
+        super().__init__(results)
+        self.calls = []
+
+    async def call_tool(self, name, args):
+        self.calls.append((name, args))
+        return await super().call_tool(name, args)
+
+
+@pytest.mark.parametrize("filters, expected", [
+    (None, None),
+    ({}, None),
+    ({"source_id": "mu2e-docdb"}, DOCDB),
+    ({"source_id": ["mu2e-docdb", "mu2e-wiki"]}, {"terms": {"source_id": ["mu2e-docdb", "mu2e-wiki"]}}),
+    ({"source_id": "mu2e-docdb", "term": {"doc_type": "text"}},
+     {"bool": {"must": [DOCDB, {"term": {"doc_type": "text"}}]}}),
+])
+def test_search_scope_from_run_filters(filters, expected):
+    assert runner.search_scope(filters) == expected
+
+
+def test_parser_id_cannot_scope_kb_search():
+    with pytest.raises(ValueError, match="parser_id"):
+        runner.search_scope({"parser_id": "docling"})
+
+
+def test_scope_is_added_to_the_models_own_filter():
+    assert runner.scoped_search_args({"query": "q"}, None) == {"query": "q"}
+    assert runner.scoped_search_args({"query": "q"}, DOCDB) == {"query": "q", "search_filter": DOCDB}
+    own = {"term": {"doc_type": "image"}}
+    both = {"bool": {"must": [DOCDB, own]}}
+    assert runner.scoped_search_args({"query": "q", "search_filter": own}, DOCDB)["search_filter"] == both
+    assert runner.scoped_search_args({"query": "q", "search_filter": json.dumps(own)}, DOCDB)["search_filter"] == both
+    bad = {"query": "q", "search_filter": "{not json"}
+    assert runner.scoped_search_args(bad, DOCDB) == bad      # kb_search reports it, as for any client
+
+
+def test_agentic_searches_stay_inside_the_scope(monkeypatch):
+    monkeypatch.setattr("kb_mcp.llm.record_llm_usage", lambda *a, **k: None)
+    server = _RecordingServer({"kb_search": "results", "kb_get": "doc"})
+    client = _FakeClient([_tool_call_reply("kb_search", {"query": "q", "search_filter": {"term": {"doc_type": "table"}}}),
+                          _tool_call_reply("kb_get", {"identifier": "x"}),
+                          _text_reply("done")])
+    monkeypatch.setattr(runner, "_agentic_server", server)
+    monkeypatch.setattr("kb_mcp.llm.get_openai_client", lambda model=None: client)
+
+    _, _, trace, _ = runner._agentic_answer("q?", model="m", source_document_id=SOURCE, scope=DOCDB)
+
+    (search_name, search_args), (get_name, get_args) = server.calls
+    assert search_args["search_filter"] == {"bool": {"must": [DOCDB, {"term": {"doc_type": "table"}}]}}
+    assert get_name == "kb_get" and get_args == {"identifier": "x"}     # only searches are scoped
+    assert trace[0]["args"]["search_filter"]["bool"]["must"][0] == DOCDB  # the trace shows what was sent
+
+
+def test_rag_search_is_scoped(monkeypatch):
+    monkeypatch.setattr("kb_mcp.llm.record_llm_usage", lambda *a, **k: None)
+    server = _RecordingServer({"kb_search": "results"})
+    monkeypatch.setattr(runner, "_agentic_server", server)
+    monkeypatch.setattr("kb_mcp.llm.get_openai_client", lambda model=None: _FakeClient([_text_reply("a")]))
+
+    _, _, trace = runner._rag_answer("q?", model="m", source_document_id=SOURCE, scope=DOCDB)
+
+    assert server.calls == [("kb_search", {"query": "q?", "search_filter": DOCDB})]
+    assert trace[0]["args"]["search_filter"] == DOCDB

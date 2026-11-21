@@ -471,6 +471,23 @@ def _print_compare_table(rows, strip_prefix=None):
     print("For agentic and llm_only runs, Exact/Entry come from a separate search the agent never sees.")
 
 
+def _grid_search_filters(args):
+    """--search-source-id / --search-filter as the runs' search_filters (None: unscoped)."""
+    import json
+
+    filters = {}
+    sources = getattr(args, "search_source_id", None) or []
+    if sources:
+        filters["source_id"] = sources[0] if len(sources) == 1 else sources
+    raw = getattr(args, "search_filter", None)
+    if raw:
+        extra = json.loads(raw)
+        if not isinstance(extra, dict) or not extra:
+            raise SystemExit("--search-filter must be a JSON object, e.g. '{\"term\": {\"doc_type\": \"text\"}}'")
+        filters.update(extra)
+    return filters or None
+
+
 def cmd_eval_grid(args):
     """Run every combination of question set, search type, answering model and judge."""
     from ..eval.grid import run_grid
@@ -493,6 +510,7 @@ def cmd_eval_grid(args):
         run_meta=agentic_meta,
         audit_filters=None if args.include_invalid else {"strict": True},
         dry_run=args.dry_run,
+        search_filters=_grid_search_filters(args),
     )
     for o in outcomes:
         how = f"  ({o['how']})" if o.get("how", "run") != "run" else ""
@@ -663,6 +681,14 @@ def setup_commands(subparsers):
         "grid", help="Run every combination of question set, search type, answer model and judge; skips runs that already have results")
     eval_grid_parser.add_argument("--prefix", required=True, help="Run name prefix, e.g. pilot-20260927; each run is named <prefix>-<type>[-<model>]-q<set>[-judge-<judge>]")
     eval_grid_parser.add_argument("--generation-id", action="append", required=True, help="Question set (generation) to evaluate; repeatable")
+    eval_grid_parser.add_argument(
+        "--search-source-id", action="append",
+        help="Search only this source (repeatable), in every mode: rag and agentic hold each kb_search "
+             "inside it. Keeps a run comparable when other sources are added, e.g. mu2e-docdb. "
+             "Named into the runs as -in-<source>")
+    eval_grid_parser.add_argument(
+        "--search-filter",
+        help="Further scope as a kb_search filter (JSON), combined with --search-source-id")
     eval_grid_parser.add_argument("--search-type", action="append", required=True, choices=["semantic", "fulltext", "hybrid", "rag", "agentic", "llm_only"], help="Repeatable")
     eval_grid_parser.add_argument("--answer-model", action="append", help="Answering model for rag/agentic/llm_only; repeatable (default: EVAL_ANSWER_MODEL)")
     eval_grid_parser.add_argument("--judge-model", action="append", help="Judge model; repeatable, one run per judge (default: no judge)")
