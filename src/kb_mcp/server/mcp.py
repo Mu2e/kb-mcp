@@ -342,7 +342,9 @@ def kb_search(
     large docs as excerpts with <match> tags highlighting matches.
 
     Args:
-        query: Search query
+        query: Search query. Empty ("") lists the documents the search_filter
+                passes instead -- not ranked, most recently added first -- e.g.
+                every figure of one DocDB entry. Needs a search_filter.
         max_results: Max documents to return. Omit to let the server choose
                 (5, or a count the query router picks for this kind of query).
         search_type: "hybrid" (default, use this). "fulltext" only to match an exact
@@ -415,6 +417,33 @@ def kb_search(
                 )
             except ValueError as e:
                 return json.dumps({"error": f"Invalid search_filter: {e}"}, indent=2)
+
+        # No query: list what the filter passes. Hybrid search has nothing to
+        # rank -- full-text matches nothing, the embedding of "" ranks noise --
+        # and its filtered vector count is the slowest part for broad filters.
+        if not (query or "").strip():
+            if not filter_dict:
+                return json.dumps({"error": "Empty query and no search_filter: give a query, "
+                                            "or a search_filter to list the documents it passes."},
+                                  indent=2)
+            from ..kb.search.search_filter_only import search_filter_only
+
+            if not _filter_names_field(filter_dict, "doc_type"):
+                filter_dict = {"bool": {"must": [filter_dict],
+                                        "must_not": [{"term": {"doc_type": "image"}}]}}
+            response = search_filter_only(
+                filter=filter_dict,
+                max_results=DEFAULT_MAX_RESULTS if max_results is None else max_results,
+                enforce_visibility=True,
+            )
+            results = response.get("results", [])
+            if not results:
+                return json.dumps({"message": "No documents pass this search_filter", "results": []},
+                                  indent=2)
+            formatted_results = _format_search_results(results)
+            return json.dumps({"count": len(formatted_results),
+                               "order": response["metadata"]["order"],
+                               "results": formatted_results}, indent=2)
 
         # Select search function based on type
         if search_type == "semantic":
