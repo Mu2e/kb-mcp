@@ -58,6 +58,35 @@ def parse_metadata_query_params(metadata_params):
     return clauses
 
 
+_IMAGE_TYPES = {"png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg",
+                "gif": "image/gif", "webp": "image/webp"}
+
+
+def image_media_type(doc) -> str:
+    """The media type of a stored image: meta.format, else its first bytes.
+
+    An image record's source_type is its parent's file type (application/pdf,
+    the pptx type, ...), never image/*, so it cannot say what the bytes are;
+    taking it meant every image was served as image/png, the scaled JPEGs
+    included. meta.format is what kb_get_image uses as well.
+    """
+    fmt = str((doc.meta or {}).get("format") or "").lower()
+    if fmt in _IMAGE_TYPES:
+        return _IMAGE_TYPES[fmt]
+    head = bytes(doc.binary[:12]) if doc.binary else b""
+    if head.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if head.startswith(b"\x89PNG"):
+        return "image/png"
+    if head[:4] == b"GIF8":
+        return "image/gif"
+    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+        return "image/webp"
+    if (doc.source_type or "").startswith("image/"):
+        return doc.source_type
+    return "image/png" if doc.doc_type == "image" else "application/octet-stream"
+
+
 def setup_api_routes(app, session_manager: WebSessionManager):
     """Setup API routes for knowledge base operations."""
     from ....config import get_data_dir
@@ -448,14 +477,7 @@ def setup_api_routes(app, session_manager: WebSessionManager):
                     media_type="text/plain"
                 )
 
-            # Determine content type from source_type or default to image
-            content_type = doc.source_type
-            if not content_type or not content_type.startswith("image/"):
-                # Try to infer from common image types
-                if doc.doc_type == "image":
-                    content_type = "image/png"  # Default fallback
-                else:
-                    content_type = "application/octet-stream"
+            content_type = image_media_type(doc)
 
             return Response(
                 content=doc.binary,
