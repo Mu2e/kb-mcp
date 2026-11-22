@@ -178,6 +178,27 @@ def cmd_local_pdf(args):
         print(f"    kb tools parse-all {args.source_id} --extract-images --describe-images --parser-name marker")
 
 
+def _print_wiki_sync(result, source_id):
+    plan = result["plan"]
+    verb = "" if result["applied"] else "would be "
+    print(f"{source_id}: {plan['remote_count'] if plan['remote_count'] is not None else '?'} page(s) in the wiki")
+    print(f"  new:       {len(plan['new']):5}  {verb}added")
+    print(f"  changed:   {len(plan['changed']):5}  {verb}re-imported (same raw document)")
+    print(f"  unchanged: {len(plan['unchanged']):5}")
+    print(f"  deleted:   {len(plan['deleted']):5}  {verb}removed")
+    if plan["deletions_blocked"]:
+        print(f"  NO deletions: {plan['deletions_blocked']}")
+    for gone in plan["deleted"][:20]:
+        print(f"    - {gone['doc_id']} (page {gone['page_id']})")
+    if result["applied"]:
+        print(f"Done: {result['added']} added, {result['updated']} updated, {result['removed']} removed, "
+              f"{len(result['failed'])} failed")
+        for title, error in result["failed"][:20]:
+            print(f"    ! {title}: {error}")
+    else:
+        print("Dry run: re-run with --apply to change the knowledge base.")
+
+
 def cmd_wiki(args):
     """Handle wiki source command."""
     from .mediawiki import MediaWikiSource
@@ -190,7 +211,16 @@ def cmd_wiki(args):
         delay=args.delay,
         skip_existing=args.skip_existing,
         use_kerberos=not args.no_kerberos,
+        auth=getattr(args, "auth", None),
+        namespaces=tuple(int(n) for n in str(getattr(args, "namespaces", "0")).split(",") if n.strip()),
     ) as source:
+        if getattr(args, "sync", False):
+            _print_wiki_sync(source.sync(
+                apply=args.apply, full=args.full, limit=args.limit,
+                max_delete_fraction=args.max_delete_fraction,
+                auto_embed=not args.no_auto_embed, auto_summarize=not args.no_auto_summarize,
+            ), args.source_id)
+            return
         documents = source.process_all(
             query=args.query,
             max_results=args.max_results,
@@ -349,6 +379,27 @@ def main():
         "--no-kerberos",
         action="store_true",
         help="Disable Kerberos/SPNEGO authentication (for public wikis)",
+    )
+    wiki_parser.add_argument(
+        "--auth", choices=["kerberos", "sso", "none"],
+        help="How to log in: kerberos (curl --negotiate, the default), sso (Fermilab SSO with "
+             "MU2E_DOCDB_USERNAME/PASSWORD: the internal wiki) or none (the public wiki)",
+    )
+    wiki_parser.add_argument(
+        "--sync", action="store_true",
+        help="Bring the source in line with the wiki: add new pages, re-import changed ones into "
+             "their existing raw documents, remove deleted ones. Dry run unless --apply. Ignores --query",
+    )
+    wiki_parser.add_argument("--apply", action="store_true", help="With --sync: change the knowledge base")
+    wiki_parser.add_argument("--full", action="store_true",
+                             help="With --sync: re-import every page, changed or not (template edits)")
+    wiki_parser.add_argument("--namespaces", default="0",
+                             help="With --sync: comma-separated namespace ids to list (default 0, main)")
+    wiki_parser.add_argument("--limit", type=int, help="With --sync: at most this many pages added or updated")
+    wiki_parser.add_argument(
+        "--max-delete-fraction", type=float, default=0.1,
+        help="With --sync: delete nothing if more than this fraction of the known pages would go "
+             "(default 0.1): the page list is then more likely broken than the wiki emptied",
     )
     wiki_parser.set_defaults(func=cmd_wiki)
 

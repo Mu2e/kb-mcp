@@ -35,6 +35,7 @@ The system ingests Mu2e content from four sources:
 - [Web Interface](guides/web-interface.md) — Using the web UI
 - [CLI Usage](guides/cli.md) — Command-line tools
 - [Evaluation Workflows](guides/evaluation.md) — Measuring retrieval quality
+- [Wikis](guides/wiki.md) — Syncing the public and internal Mu2e wikis
 - [Database Schema](guides/database.md) — Understanding the data models
 - [Deployment](guides/deployment.md) — Docker, NERSC and Cloud Run deployment
 - [Mu2e Deployment](guides/deploy-mu2e.md) — systemd services on a Mu2e node

@@ -209,6 +209,41 @@ stdbuf -oL -eL kb-import docdb --days "$DAYS" --skip-existing --delay 1 \
 rc=$?
 end=$(date +%s)
 
+# 3w. Wiki sync (docs/guides/wiki.md): bring each wiki source in line with
+# its wiki -- new pages added, changed ones re-imported into their existing
+# raw document (decisions and redactions stay), deleted ones removed, never
+# on a page list that looks broken. Before the privacy step on purpose: new
+# and changed pages are held, so 3a scans them this run and releases the
+# clean ones like new DocDB documents. Each entry is "source_id|url|auth";
+# WIKI_SYNCS="" turns the step off. A Sunday morning run re-imports every
+# page (--full): a template edit changes pages without a new revision of
+# their own. A failed sync is logged and fails the run; DocDB is unaffected.
+WIKI_SYNCS="${WIKI_SYNCS-mu2e-wiki|https://mu2ewiki.fnal.gov|none mu2e-internal-wiki|https://mu2einternalwiki.fnal.gov|sso}"
+WIKI_FULL_DAY="${WIKI_FULL_DAY:-7}"        # ISO weekday of the weekly --full run (7: Sunday)
+{
+    for entry in $WIKI_SYNCS; do
+        IFS='|' read -r w_source w_url w_auth <<< "$entry"
+        w_full=()
+        if [ "$(date +%u)" = "$WIKI_FULL_DAY" ] && [ "$(date +%H)" -lt 12 ]; then
+            w_full=(--full)
+        fi
+        echo "--- wiki sync: $w_source ($w_url, auth $w_auth${w_full:+, full}) ---"
+        w_out="$(mktemp)"
+        stdbuf -oL -eL kb-import wiki --sync --apply "${w_full[@]}" --auth "$w_auth" \
+            --wiki-url "$w_url" --source-id "$w_source" --namespaces 0 > "$w_out" 2>&1
+        w_rc=$?
+        cat "$w_out"
+        # Exit 0 is not enough: a sync whose pages failed one by one still
+        # finishes, and says so on its "Done:" line.
+        if [ "$w_rc" -eq 0 ] && grep -qE "^Done: .*, 0 failed$" "$w_out"; then
+            echo "wiki sync done: $w_source"
+        else
+            echo "WIKI FAILED: $w_source (exit $w_rc); see above. Nothing is deleted on a broken page list."
+        fi
+        rm -f "$w_out"
+    done
+} >> "$LOG" 2>&1
+
 # 3a'. Standing visibility rules (docs/guides/privacy.md): the project-controls
 # reports with money or people stay out of search. The rules are configured in
 # the release's share/kb-mcp/privacy.toml (from deploy/mu2e-privacy.toml).
@@ -296,6 +331,9 @@ elif grep -qaE "^[[:space:]]*FAIL[[:space:]]+database" "$LOG"; then
 elif grep -qaE "^PRIVACY FAILED" "$LOG"; then
     # The import itself worked; its new documents are just still held.
     failure_reason="$(grep -aE "^PRIVACY FAILED" "$LOG" | head -1)"
+elif grep -qaE "^WIKI FAILED" "$LOG"; then
+    # DocDB is fine; a wiki source was not brought up to date this run.
+    failure_reason="$(grep -aE "^WIKI FAILED" "$LOG" | head -1)"
 fi
 
 if [ -n "$failure_reason" ] && [ "$rc" -eq 0 ]; then
