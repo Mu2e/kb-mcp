@@ -39,17 +39,19 @@ conversion). Use these tools for any question about Mu2e hardware, subsystems, a
 operations, collaboration decisions, or the surrounding literature.
 
 ### PRIMARY SOURCES
-Most questions should be answered from these two:
-- **`mu2e-docdb`** (~24,000 docs) - the collaboration's document database: technical notes,
+Most questions should be answered from these:
+- **`mu2e-docdb`** (~34,000 entries) - the collaboration's document database: technical notes,
   talks, design reviews, run plans, meeting slides. The authoritative record for anything
   Mu2e-specific.
-- **`mu2e-wiki`** (~500 docs) - the collaboration wiki: operating procedures, how-tos,
-  naming conventions, current subsystem status. Best for "how do we do X" and for
-  orientation before diving into DocDB.
+- **`mu2e-wiki`** (public, ~180 pages) and **`mu2e-internal-wiki`** (~90 pages) - the
+  collaboration wikis: operating procedures, how-tos, naming conventions. Best for "how do
+  we do X" and for orientation before diving into DocDB. Each page is its current version,
+  but many were last edited years ago: check LAST_EDITED, and prefer a newer DocDB
+  document where they disagree.
 
 Supporting sources: `inspire-hep` (~5,000 published papers, for external and theory
 context), `MeetingTranscripts`, `upload`, `test-flow`.
 
-Start with `kb_search`, and filter to `mu2e-docdb` or `mu2e-wiki` when the question is
+Start with `kb_search`, and filter to `mu2e-docdb` and the wikis when the question is
 clearly Mu2e-internal and `inspire-hep` papers would be noise.
 {graph_section}"""

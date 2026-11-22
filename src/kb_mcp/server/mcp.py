@@ -133,6 +133,38 @@ def _format_node_output(node_data: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+# Characters MediaWiki leaves as they are in its own section links.
+_ANCHOR_SAFE = "_-.:(),'!*;$@~+"
+
+
+def _section_links(doc, chunks, limit: int = 3) -> Optional[str]:
+    """Links to the sections the matched chunks came from: "Name: uri#anchor | ...".
+
+    Only for documents whose metadata maps headings to anchors
+    (meta.section_anchors, set by the wiki importer) and that have a web
+    address; the last part of a chunk's section_path is the heading.
+    """
+    from urllib.parse import quote
+
+    anchors = (doc.meta or {}).get("section_anchors") if isinstance(doc.meta, dict) else None
+    uri = getattr(doc, "uri", None) or ""
+    if not anchors or not uri.startswith("http"):
+        return None
+    links = []
+    for chunk in chunks or []:
+        path = chunk.get("section_path")
+        if isinstance(path, (list, tuple)):
+            path = " > ".join(str(p) for p in path)
+        name = (path or "").split(" > ")[-1].strip()
+        anchor = anchors.get(name)
+        link = f"{name}: {uri.split('#')[0]}#{quote(anchor, safe=_ANCHOR_SAFE)}" if anchor else None
+        if link and link not in links:
+            links.append(link)
+        if len(links) >= limit:
+            break
+    return " | ".join(links) or None
+
+
 def _format_search_results(results: List[Dict[str, Any]], context_chars: int = 500) -> List[Dict[str, Any]]:
     """Format search results using a strict block-delimiter strategy.
 
@@ -273,6 +305,13 @@ def _format_search_results(results: List[Dict[str, Any]], context_chars: int = 5
             "TYPE": doc.doc_type,
             "STATUS": f"{status} (Total len: {doc_text_len:,} chars)",
         }
+        # When the source last changed the document (a DocDB version, a wiki
+        # edit), so the model can weigh how current it is.
+        if getattr(doc, "update_time", None):
+            header_kv["LAST_EDITED"] = doc.update_time.date().isoformat()
+        section_links = _section_links(doc, chunks)
+        if section_links:
+            header_kv["SECTION_LINKS"] = section_links
 
         # Add document metadata if available
         if doc.meta:
@@ -334,9 +373,12 @@ def kb_search(
 ) -> str:
     """Search the Mu2e experiment knowledge base (Fermilab muon-to-electron conversion).
 
-    Mu2e DocDB and the Mu2e collaboration wiki are the authoritative sources and
-    answer most questions; published papers, meeting transcripts and uploads are
-    also indexed. The server instructions describe each source in detail.
+    Mu2e DocDB and the Mu2e collaboration wikis (public mu2e-wiki, internal
+    mu2e-internal-wiki) are the authoritative sources and answer most questions;
+    published papers, meeting transcripts and uploads are also indexed. The
+    server instructions describe each source in detail. Wiki pages are kept at
+    their current version, but much of the wiki is old: weigh LAST_EDITED, and
+    where a wiki page and a newer DocDB document disagree, prefer DocDB.
 
     Returns formatted results with metadata blocks. Small docs (<2000 chars) in full,
     large docs as excerpts with <match> tags highlighting matches.
@@ -357,8 +399,8 @@ def kb_search(
                   {"terms": {"source_id": ["mu2e-docdb", "mu2e-wiki"]}}
                   {"bool": {"must": [{"term": {"source_id": "mu2e-docdb"}},
                                      {"term": {"doc_type": "table"}}]}}
-                Fields: source_id (mu2e-docdb, mu2e-wiki, inspire-hep,
-                MeetingTranscripts, upload, test-flow), doc_type (text, section,
+                Fields: source_id (mu2e-docdb, mu2e-wiki, mu2e-internal-wiki,
+                inspire-hep, MeetingTranscripts, upload, test-flow), doc_type (text, section,
                 table, image, meeting_comment), doc_id, title, title_gen, the
                 insert_time/creating_time/update_time timestamps, and any
                 document metadata key.
@@ -379,7 +421,7 @@ def kb_search(
 
     Returns:
         JSON. Each result carries source_id, doc_id, title and a `text` field
-        holding a [[DOCUMENT_METADATA]] header (ID, TITLE, URI, TYPE, STATUS)
+        holding a [[DOCUMENT_METADATA]] header (ID, TITLE, URI, TYPE, STATUS, LAST_EDITED)
         followed by the content. Pass the header's ID to kb_get for the full
         document (paged, if long) whenever STATUS shows EXCERPTS, SUMMARY or PREVIEW.
         No matches returns {"message": "No results found", "results": []} - a valid
