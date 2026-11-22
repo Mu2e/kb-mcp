@@ -442,3 +442,122 @@ def apply_image_decisions(apply: bool = False, hashes: Optional[Iterable[str]] =
                 result["rechunk_errors"] += 1
                 logger.error(f"Re-chunking {parent_id} failed (the next embedding sweep retries): {e}")
     return result
+
+
+# -- shrinking stored images ---------------------------------------------------
+#
+# Since 0.2.12 new images are stored as the scaled copy the vision model saw
+# (parser.image_utils.scale_for_storage). Images stored before that keep their
+# originals, up to tens of MB each; `kb tools images shrink` brings them in
+# line. 2026-11-18: 10,872 images over 800 KB, 32.0 GB -> 1.6 GB, in 2 h.
+
+SHRINK_MIN_GAIN = 0.9   # replace only when the scaled copy is under 90% of the original
+
+
+def shrunk_image(data: bytes, meta: Optional[Dict[str, Any]]) -> Optional[tuple]:
+    """(new bytes, new meta) for one stored image, or None to leave it alone.
+
+    Keeps the original's hash in meta.image_hash (the registry key, computed
+    from the original when it is missing), and records meta.format and
+    meta.original_bytes as the parser does for new images.
+    """
+    from ..parser.image_utils import scale_for_storage
+
+    out, fmt = scale_for_storage(data)
+    if fmt is None or len(out) >= SHRINK_MIN_GAIN * len(data):
+        return None
+    new_meta = dict(meta or {})
+    new_meta.setdefault("image_hash", boilerplate.image_hash(data))
+    new_meta["format"] = fmt
+    new_meta["original_bytes"] = len(data)
+    return out, new_meta
+
+
+def shrink_stored_images(min_bytes: int = 800_000, apply: bool = False, limit: Optional[int] = None,
+                         max_minutes: Optional[float] = None, batch_size: int = 50, pause: float = 0.5,
+                         progress=None) -> Dict[str, Any]:
+    """Replace stored originals over `min_bytes` by their scaled copy (dry run unless apply).
+
+    The candidates are selected once (one scan of the image records; 17 min
+    for the whole table on 2026-11-18), then processed by id in batches, one
+    transaction each, with a pause between batches so searches keep running.
+    Stopping at any point loses nothing: a shrunk image carries
+    meta.original_bytes, and an image that does not shrink is marked
+    meta.storage_checked, so the next run skips both. Below 800 KB few images
+    shrink (about 1 in 8 between 200 and 800 KB), which is why that mark
+    matters for a second, smaller-threshold run.
+
+    With --apply, each batch's rows are locked while they are rewritten
+    (FOR UPDATE SKIP LOCKED: a row another writer holds -- an image demotion,
+    a reparse -- is left for the next run), and only this command's keys are
+    merged into meta, so a concurrent change is never overwritten.
+    PostgreSQL only (JSONB operators, row locks). Refused while
+    PARSE_IMAGE_STORE_ORIGINAL is set: nothing would shrink, and marking every
+    image checked would keep it out of later runs.
+    """
+    import time
+    from sqlalchemy import text
+
+    from ..config import get_parser_config
+
+    if get_parser_config().get("image_store_original"):
+        raise RuntimeError("PARSE_IMAGE_STORE_ORIGINAL is set: stored images are kept as they are, "
+                           "so there is nothing to shrink (unset it to run this command)")
+    started = time.monotonic()
+    deadline = started + max_minutes * 60 if max_minutes else None
+    with get_db_session() as session:
+        if session.bind is None or session.bind.dialect.name != "postgresql":
+            raise RuntimeError("kb tools images shrink needs PostgreSQL (JSONB operators, row locks)")
+        session.execute(text("SET LOCAL statement_timeout = 0"))
+        # coalesce: meta may be SQL NULL, and NOT (NULL ? key) would leave the image out.
+        ids = session.execute(text(
+            """SELECT id FROM documents WHERE doc_type = 'image' AND "binary" IS NOT NULL
+               AND length("binary") > :m AND NOT (coalesce(meta, '{}'::jsonb) ? 'original_bytes')
+               AND NOT (coalesce(meta, '{}'::jsonb) ? 'storage_checked')
+               ORDER BY id LIMIT :lim"""), {"m": min_bytes, "lim": limit}).scalars().all()
+    result = {"candidates": len(ids), "checked": 0, "shrunk": 0, "left": 0,
+              "bytes_before": 0, "bytes_after": 0, "stopped": None, "applied": apply}
+
+    for start in range(0, len(ids), batch_size):
+        if deadline and time.monotonic() > deadline:
+            result["stopped"] = f"--max-minutes {max_minutes:g} reached"
+            break
+        chunk = ids[start:start + batch_size]
+        with get_db_session() as session:
+            session.execute(text("SET LOCAL statement_timeout = 0"))
+            rows = session.execute(text(
+                'SELECT id, "binary", meta FROM documents WHERE id = ANY(:i) '
+                "AND NOT (coalesce(meta, '{}'::jsonb) ? 'original_bytes') ORDER BY id"
+                + (" FOR UPDATE SKIP LOCKED" if apply else "")), {"i": chunk}).fetchall()
+            for doc_id, binary, meta in rows:
+                if binary is None:
+                    continue
+                data = bytes(binary)
+                result["checked"] += 1
+                new = shrunk_image(data, meta)
+                if new is None:
+                    result["left"] += 1
+                    if apply:
+                        session.execute(text(
+                            "UPDATE documents SET meta = coalesce(meta, '{}'::jsonb) || '{\"storage_checked\": true}'::jsonb "
+                            "WHERE id = :i"), {"i": doc_id})
+                    continue
+                out, new_meta = new
+                result["shrunk"] += 1
+                result["bytes_before"] += len(data)
+                result["bytes_after"] += len(out)
+                if apply:
+                    # Merge only this command's keys: the row is locked, so
+                    # meta is what was read, and other keys stay as they are.
+                    ours = {k: new_meta[k] for k in ("format", "original_bytes")}
+                    if not (meta or {}).get("image_hash"):
+                        ours["image_hash"] = new_meta["image_hash"]
+                    session.execute(text('UPDATE documents SET "binary" = :b, '
+                                         "meta = coalesce(meta, '{}'::jsonb) || cast(:m AS jsonb) WHERE id = :i"),
+                                    {"b": out, "m": json.dumps(ours), "i": doc_id})
+        if progress:
+            progress(dict(result, elapsed=time.monotonic() - started, done=start + len(chunk)))
+        if pause:
+            time.sleep(pause)
+    result["elapsed"] = time.monotonic() - started
+    return result

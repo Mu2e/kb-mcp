@@ -2310,6 +2310,39 @@ def cmd_images_refresh(args):
           f"({result['added']} new in the registry, {result['updated']} updated).")
 
 
+def cmd_images_shrink(args):
+    """Replace stored image originals by their scaled copy."""
+    from ..images import shrink_stored_images
+
+    gb = 2 ** 30
+
+    def progress(r):
+        if r["done"] % 500 < 50 or r["done"] == r["candidates"]:
+            rate = r["done"] / max(r["elapsed"], 1)
+            print(f"  {r['done']}/{r['candidates']}: {r['shrunk']} {'shrunk' if r['applied'] else 'would shrink'}, "
+                  f"{r['bytes_before'] / gb:.2f} -> {r['bytes_after'] / gb:.2f} GB, "
+                  f"~{(r['candidates'] - r['done']) / rate / 60:.0f} min to go", flush=True)
+
+    print(f"{'Shrinking' if args.apply else 'Dry run (nothing written)'}: images over {args.min_bytes} bytes "
+          f"not scaled yet. Selecting candidates (one scan of the image records)...", flush=True)
+    try:
+        r = shrink_stored_images(min_bytes=args.min_bytes, apply=args.apply, limit=args.limit,
+                                 max_minutes=args.max_minutes, pause=args.pause, progress=progress)
+    except RuntimeError as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+    verb = "shrunk" if args.apply else "would shrink"
+    print(f"{r['checked']} of {r['candidates']} checked: {r['shrunk']} {verb}, "
+          f"{r['bytes_before'] / gb:.2f} -> {r['bytes_after'] / gb:.2f} GB "
+          f"(saves {(r['bytes_before'] - r['bytes_after']) / gb:.2f} GB), {r['left']} left as they are"
+          f"{' (marked, skipped next time)' if args.apply else ''}; {r['elapsed'] / 60:.0f} min.")
+    if r["stopped"]:
+        print(f"Stopped: {r['stopped']}. Run again to continue.")
+    if args.apply and r["shrunk"]:
+        print("The space is free inside the database; the files shrink only after VACUUM FULL "
+              "(or pg_repack) on documents.")
+
+
 def cmd_images_classify(args):
     """Ask an LLM which repeated images are decorative (registry only; documents untouched)."""
     from ..images import classify_candidates, classify_images
@@ -3186,6 +3219,17 @@ def setup_commands(subparsers):
     images_apply.add_argument("--no-rechunk", action="store_true",
                               help="Leave changed parents for the next embedding sweep instead of re-chunking now")
     images_apply.set_defaults(func=cmd_images_apply)
+
+    images_shrink = images_subparsers.add_parser(
+        "shrink", help="Replace stored image originals by the scaled copy new images get (dry run by default)")
+    images_shrink.add_argument("--apply", action="store_true", help="Change the documents")
+    images_shrink.add_argument("--min-bytes", type=int, default=800_000,
+                               help="Only images stored larger than this (default 800000: ~93%% of the savings)")
+    images_shrink.add_argument("--limit", type=int, help="At most this many images")
+    images_shrink.add_argument("--max-minutes", type=float,
+                               help="Stop after this long (between batches); the next run continues")
+    images_shrink.add_argument("--pause", type=float, default=0.5, help="Seconds between batches of 50 (default 0.5)")
+    images_shrink.set_defaults(func=cmd_images_shrink)
 
     # Extract-all command (for graph relations)
     extract_all_parser = tools_subparsers.add_parser(
