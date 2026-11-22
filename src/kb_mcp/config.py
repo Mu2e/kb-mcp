@@ -624,7 +624,7 @@ def get_search_config() -> dict:
             * `vector_index` (str): Vector index the embedding tables should have, "hnsw" or "ivfflat" (Env: `SEARCH_VECTOR_INDEX`, default: "hnsw"). `kb tools db-maintain` builds it where missing and never drops the other kind; a new embedding table is created with it.
             * `hnsw_ef_search` (int): Candidate list size of an HNSW index scan (Env: `SEARCH_HNSW_EF_SEARCH`, default: 200).
             * `hnsw_max_scan_tuples` (int): Most rows a filtered semantic query's iterative HNSW scan may visit (Env: `SEARCH_HNSW_MAX_SCAN_TUPLES`, default: 20000).
-            * `exact_max_chunks` (int): A filtered semantic query that at most this many embedded chunks pass ranks them exactly instead of through the index (Env: `SEARCH_EXACT_MAX_CHUNKS`, default: 300000).
+            * `exact_max_chunks` (int): A filtered semantic query that at most this many embedded chunks pass ranks them exactly instead of through the index (Env: `SEARCH_EXACT_MAX_CHUNKS`, default: 500000).
             * `vector_timeout_ms` (int): Statement timeout for a semantic query, in ms; 0 means none (Env: `SEARCH_VECTOR_TIMEOUT_MS`, default: 30000).
     """
     return {
@@ -636,7 +636,7 @@ def get_search_config() -> dict:
         'vector_index': _vector_index(),
         'hnsw_ef_search': _get_int("SEARCH_HNSW_EF_SEARCH", 200),
         'hnsw_max_scan_tuples': _get_int("SEARCH_HNSW_MAX_SCAN_TUPLES", 20000),
-        'exact_max_chunks': _get_int("SEARCH_EXACT_MAX_CHUNKS", 300000),
+        'exact_max_chunks': _get_int("SEARCH_EXACT_MAX_CHUNKS", 500000),
         'vector_timeout_ms': _get_int("SEARCH_VECTOR_TIMEOUT_MS", 30000),
         'router_enabled': _get_bool("ROUTER_ENABLED", False),
     }

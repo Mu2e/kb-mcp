@@ -100,10 +100,12 @@ def _cases(corpus):
 # The kinds of filter that must never need a live count again: the
 # kb_chunk_counts view decides the path, so a missing view (run `kb tools
 # db-maintain`) fails here. The expected path follows the sizes in the
-# knowledge base on 2026-11-12: most chunks are text (1.7M) or image (358k),
-# above SEARCH_EXACT_MAX_CHUNKS; tables (163k) are below it.
+# knowledge base against SEARCH_EXACT_MAX_CHUNKS (500000): text (1.0M on
+# 2026-11-21) is above it and takes the index; images (427k) and tables
+# (169k) are below it and are ranked exactly -- through the index every
+# image-filtered query timed out (2026-11-21).
 COARSE = {
-    "source_id": "index", "doc_type=text": "index", "doc_type=image": "index",
+    "source_id": "index", "doc_type=text": "index", "doc_type=image": "exact",
     "source_id and doc_type": "index", "doc_type=table": "exact",
 }
 
