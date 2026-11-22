@@ -69,6 +69,8 @@ def create_eval_run(
         if embedding_name is None:
             embedding_name = get_embedding_name(session=session)
 
+        if search_type in ("rag", "agentic"):
+            search_scope(search_filters)   # refuse an unusable scope now, not once per question
         run_meta = meta or {}
         # Record the answering model even when it came from the default, so a
         # run can always be attributed to the model that produced its answers.
@@ -94,6 +96,54 @@ def create_eval_run(
 
         logger.info(f"Created eval run: {run.id} (name={name})")
         return run
+
+
+def search_scope(search_filters: Optional[Dict]) -> Optional[Dict]:
+    """The run's search_filters as one kb_search filter, for the answer modes.
+
+    search_filters holds first-class keys (source_id, a string or a list) and,
+    under any other key, Elasticsearch-style clauses -- the shape the
+    retrieval modes read. rag and agentic search through kb_search, so they
+    need it as one filter: {"term": {"source_id": "mu2e-docdb"}}, or a bool
+    "must" of several. parser_id has no kb_search equivalent and is refused.
+    None when the run sets no filter.
+    """
+    if not search_filters:
+        return None
+    if "parser_id" in search_filters:
+        raise ValueError("search_filters.parser_id cannot scope kb_search (rag/agentic runs); use source_id")
+    clauses = []
+    source = search_filters.get("source_id")
+    if source:
+        clauses.append({"terms": {"source_id": list(source)}} if isinstance(source, (list, tuple))
+                       else {"term": {"source_id": source}})
+    for key, clause in search_filters.items():
+        if key != "source_id":   # an operator, as the retrieval modes read it: {"term": {...}}
+            clauses.append({key: clause})
+    if not clauses:
+        return None
+    return clauses[0] if len(clauses) == 1 else {"bool": {"must": clauses}}
+
+
+def scoped_search_args(args: Dict, scope: Optional[Dict]) -> Dict:
+    """kb_search arguments with the run's scope added to the model's own filter.
+
+    The model can narrow the search further but not leave the scope: its
+    filter (a dict, or the JSON string some models send) and the scope are
+    both required.
+    """
+    if not scope:
+        return args
+    import json as _json
+
+    own = args.get("search_filter")
+    if isinstance(own, str):
+        try:
+            own = _json.loads(own) if own.strip() else None
+        except ValueError:
+            return args   # leave a malformed filter to kb_search, which reports it
+    combined = {"bool": {"must": [scope, own]}} if own else scope
+    return {**args, "search_filter": combined}
 
 
 def _llm_only_answer(question: str, model: Optional[str] = None):
@@ -128,6 +178,7 @@ def _rag_answer(
     source_document_id: Optional[str] = None,
     source_entry_key: Optional[str] = None,
     tool_result_max_chars: Optional[int] = None,
+    scope: Optional[Dict] = None,
 ):
     """Single-shot RAG: one real kb_search with the question, then one answer.
 
@@ -151,7 +202,8 @@ def _rag_answer(
     server = _get_agentic_server()
 
     start = time.time()
-    result = asyncio.run(server.call_tool("kb_search", {"query": question}))
+    search_args = scoped_search_args({"query": question}, scope)
+    result = asyncio.run(server.call_tool("kb_search", search_args))
     context = "\n".join(getattr(c, "text", "") for c in result.content)
     full_len = len(context)
     saw_source = mentions_source(context, source_document_id, source_entry_key)
@@ -182,7 +234,7 @@ def _rag_answer(
     elapsed = time.time() - start
 
     trace = [
-        {"tool": "kb_search", "args": {"query": question}, "result_len": full_len,
+        {"tool": "kb_search", "args": search_args, "result_len": full_len,
          "truncated": full_len > tool_result_max_chars, "is_error": bool(getattr(result, "is_error", False))},
         {"summary": True, "tool_calls": 1, "hit_turn_limit": False, "stopped_by": stopped_by,
          "saw_source": saw_source, "opened_source": False},
@@ -245,6 +297,7 @@ def _agentic_answer(
     source_entry_key: Optional[str] = None,
     max_turns: Optional[int] = None,
     tool_result_max_chars: Optional[int] = None,
+    scope: Optional[Dict] = None,
 ):
     """Answer a question the way an MCP client would, with the real kb-mcp tools.
 
@@ -335,6 +388,8 @@ def _agentic_answer(
             name = tc.function.name
             try:
                 args = _json.loads(tc.function.arguments or "{}")
+                if name == "kb_search":
+                    args = scoped_search_args(args, scope)
                 result = asyncio.run(server.call_tool(name, args))
                 tool_result = "\n".join(getattr(c, "text", "") for c in result.content)
                 is_error = bool(getattr(result, "is_error", False))
@@ -716,6 +771,7 @@ def evaluate_single_question(
                 source_document_id=question.source_document_id,
                 source_entry_key=source_key,
                 tool_result_max_chars=(run.meta or {}).get("tool_result_max_chars"),
+                scope=search_scope(run.search_filters),
             )
             result_meta["llm_answer"] = llm_answer
             result_meta["llm_answer_time"] = llm_answer_time
@@ -737,8 +793,11 @@ def evaluate_single_question(
 
         elif search_type == "agentic":
             # Agentic: LLM answers through the real MCP tools (see _agentic_answer)
-            # The agent searches with its own arguments, as a real client does:
-            # the run's search filters and max_results are not imposed on it.
+            # The agent searches with its own arguments, as a real client does,
+            # and max_results is not imposed on it. The run's search filters
+            # are, when set: they scope the corpus (e.g. DocDB only, so a run
+            # stays comparable when other sources are added), and every
+            # kb_search the model makes is held inside them.
             agentic_opts = {k: v for k, v in (run.meta or {}).items()
                             if k in ("max_turns", "tool_result_max_chars")}
             llm_answer, llm_answer_time, agentic_trace, agentic_conversation = _agentic_answer(
@@ -746,6 +805,7 @@ def evaluate_single_question(
                 model=answer_model,
                 source_document_id=question.source_document_id,
                 source_entry_key=source_key,
+                scope=search_scope(run.search_filters),
                 **agentic_opts,
             )
             result_meta["llm_answer"] = llm_answer

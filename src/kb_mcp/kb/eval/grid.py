@@ -8,6 +8,7 @@ model to a finished grid only runs the new cells.
 """
 
 import logging
+import re
 from typing import Dict, Iterable, List, Optional
 
 from .db_models import EvalGeneration, EvalResult, EvalRun
@@ -32,6 +33,19 @@ def generation_label(generation: EvalGeneration) -> str:
     return model_label(model) if model else generation.id[:8]
 
 
+def scope_label(search_filters: Optional[Dict]) -> Optional[str]:
+    """A short, name-safe label for a search scope: "docdb", "docdb+wiki", or a hash."""
+    if not search_filters:
+        return None
+    source = search_filters.get("source_id")
+    if source and set(search_filters) == {"source_id"}:
+        sources = [source] if isinstance(source, str) else list(source)
+        short = [re.sub(r"^mu2e-", "", s) for s in sources]
+        return "+".join(re.sub(r"[^A-Za-z0-9]+", "", s).lower() for s in short)
+    import hashlib, json as _json
+    return "f" + hashlib.sha1(_json.dumps(search_filters, sort_keys=True).encode()).hexdigest()[:6]
+
+
 def grid_run_name(
     prefix: str,
     search_type: str,
@@ -39,13 +53,18 @@ def grid_run_name(
     answer_model: Optional[str] = None,
     judge_model: Optional[str] = None,
     judge_version: int = 1,
+    scope: Optional[str] = None,
 ) -> str:
-    """`<prefix>-<search type>[-<answer model>]-q<question set>[-judge-<judge>[-v<N>]]`.
+    """`<prefix>-<search type>[-in-<scope>][-<answer model>]-q<question set>[-judge-<judge>[-v<N>]]`.
 
     The judge prompt version is part of the name from version 2 on, so runs
     judged by different prompts are distinct; version 1 names are unchanged.
+    A search scope is part of it too: a run held to DocDB is a different run
+    from an unscoped one, and must not be skipped as already complete.
     """
     parts = [prefix, search_type]
+    if scope:
+        parts += ["in", scope]
     if search_type in ANSWER_SEARCH_TYPES:
         parts.append(model_label(answer_model))
     parts.append(f"q{generation}")
@@ -103,6 +122,7 @@ def run_grid(
     run_meta: Optional[Dict] = None,
     audit_filters: Optional[Dict] = None,
     dry_run: bool = False,
+    search_filters: Optional[Dict] = None,
 ) -> List[Dict]:
     """Run every (generation, search type, answer model, judge) combination.
 
@@ -116,6 +136,10 @@ def run_grid(
         audit_filters: Which questions to use (see get_eval_questions); the CLI
             passes {"strict": True}. None uses every question.
         dry_run: Only report what would run.
+        search_filters: Scope every run's searches, e.g. {"source_id":
+            "mu2e-docdb"}: retrieval modes filter on it, rag and agentic hold
+            every kb_search inside it (see runner.search_scope). Named into
+            the runs as `-in-<scope>`.
 
     Returns:
         One dict per cell: name, status ("ran", "skipped" or "planned"), and
@@ -124,6 +148,10 @@ def run_grid(
     from .runner import eval as run_eval
 
     generation_ids = list(generation_ids)
+    scope = scope_label(search_filters)
+    if search_filters:
+        from .runner import search_scope
+        search_scope(search_filters)   # refuse an unusable scope before anything runs
     answer_models = list(answer_models) or [None]
     judge_models = list(judge_models) or [None]
 
@@ -153,13 +181,13 @@ def run_grid(
             for search_type in search_types:
                 models = answer_models if search_type in ANSWER_SEARCH_TYPES else [None]
                 for answer_model in models:
-                    names = [grid_run_name(prefix, search_type, labels[gid], answer_model, j, judge_version)
+                    names = [grid_run_name(prefix, search_type, labels[gid], answer_model, j, judge_version, scope)
                              for j in judge_models]
                     answers_from = None
                     if search_type in ANSWER_SEARCH_TYPES:
                         # Answers made under an earlier judge prompt are reused too:
                         # a new judge version re-judges them rather than answering again.
-                        earlier = [grid_run_name(prefix, search_type, labels[gid], answer_model, j, v)
+                        earlier = [grid_run_name(prefix, search_type, labels[gid], answer_model, j, v, scope)
                                    for v in range(judge_version - 1, 0, -1) for j in judge_models if j]
                         # A complete run under the current judge version wins; otherwise
                         # an earlier version's run is reused even if incomplete (it is
@@ -229,6 +257,7 @@ def run_grid(
             workers=workers,
             meta=run_meta if search_type == "agentic" else None,
             audit_filters=audit_filters,
+            search_filters=search_filters,
         )
         outcomes.append({"name": name, "status": "ran", "how": how, **stats})
     return outcomes

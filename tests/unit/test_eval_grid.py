@@ -95,3 +95,17 @@ def test_record_judge_fields_verifies_cited_docs(monkeypatch):
     assert meta["judge_source_relation"] == "newer_source"
     assert meta["judge_source_verified"] is True
     assert [d["exists"] for d in meta["judge_differing_docs"]] == [True, False]
+
+
+def test_a_search_scope_is_part_of_the_run_name():
+    from kb_mcp.kb.eval.grid import grid_run_name, scope_label
+
+    assert scope_label(None) is None
+    assert scope_label({"source_id": "mu2e-docdb"}) == "docdb"
+    assert scope_label({"source_id": ["mu2e-docdb", "mu2e-wiki"]}) == "docdb+wiki"
+    other = scope_label({"source_id": "mu2e-docdb", "term": {"doc_type": "text"}})
+    assert other.startswith("f") and len(other) == 7
+    plain = grid_run_name("p", "agentic", "gptoss", "argo:claude-opus-5", "argo:gpt-5.5")
+    scoped = grid_run_name("p", "agentic", "gptoss", "argo:claude-opus-5", "argo:gpt-5.5", scope="docdb")
+    assert scoped != plain and "-agentic-in-docdb-" in scoped
+    assert grid_run_name("p", "rag", "g", "m", None, 1, None) == grid_run_name("p", "rag", "g", "m")
