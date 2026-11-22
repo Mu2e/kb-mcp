@@ -2325,8 +2325,12 @@ def cmd_images_shrink(args):
 
     print(f"{'Shrinking' if args.apply else 'Dry run (nothing written)'}: images over {args.min_bytes} bytes "
           f"not scaled yet. Selecting candidates (one scan of the image records)...", flush=True)
-    r = shrink_stored_images(min_bytes=args.min_bytes, apply=args.apply, limit=args.limit,
-                             max_minutes=args.max_minutes, pause=args.pause, progress=progress)
+    try:
+        r = shrink_stored_images(min_bytes=args.min_bytes, apply=args.apply, limit=args.limit,
+                                 max_minutes=args.max_minutes, pause=args.pause, progress=progress)
+    except RuntimeError as e:
+        print(f"Error: {e}")
+        sys.exit(1)
     verb = "shrunk" if args.apply else "would shrink"
     print(f"{r['checked']} of {r['candidates']} checked: {r['shrunk']} {verb}, "
           f"{r['bytes_before'] / gb:.2f} -> {r['bytes_after'] / gb:.2f} GB "

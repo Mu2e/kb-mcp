@@ -486,17 +486,34 @@ def shrink_stored_images(min_bytes: int = 800_000, apply: bool = False, limit: O
     meta.storage_checked, so the next run skips both. Below 800 KB few images
     shrink (about 1 in 8 between 200 and 800 KB), which is why that mark
     matters for a second, smaller-threshold run.
+
+    With --apply, each batch's rows are locked while they are rewritten
+    (FOR UPDATE SKIP LOCKED: a row another writer holds -- an image demotion,
+    a reparse -- is left for the next run), and only this command's keys are
+    merged into meta, so a concurrent change is never overwritten.
+    PostgreSQL only (JSONB operators, row locks). Refused while
+    PARSE_IMAGE_STORE_ORIGINAL is set: nothing would shrink, and marking every
+    image checked would keep it out of later runs.
     """
     import time
     from sqlalchemy import text
 
+    from ..config import get_parser_config
+
+    if get_parser_config().get("image_store_original"):
+        raise RuntimeError("PARSE_IMAGE_STORE_ORIGINAL is set: stored images are kept as they are, "
+                           "so there is nothing to shrink (unset it to run this command)")
     started = time.monotonic()
     deadline = started + max_minutes * 60 if max_minutes else None
     with get_db_session() as session:
+        if session.bind is None or session.bind.dialect.name != "postgresql":
+            raise RuntimeError("kb tools images shrink needs PostgreSQL (JSONB operators, row locks)")
         session.execute(text("SET LOCAL statement_timeout = 0"))
+        # coalesce: meta may be SQL NULL, and NOT (NULL ? key) would leave the image out.
         ids = session.execute(text(
             """SELECT id FROM documents WHERE doc_type = 'image' AND "binary" IS NOT NULL
-               AND length("binary") > :m AND NOT (meta ? 'original_bytes') AND NOT (meta ? 'storage_checked')
+               AND length("binary") > :m AND NOT (coalesce(meta, '{}'::jsonb) ? 'original_bytes')
+               AND NOT (coalesce(meta, '{}'::jsonb) ? 'storage_checked')
                ORDER BY id LIMIT :lim"""), {"m": min_bytes, "lim": limit}).scalars().all()
     result = {"candidates": len(ids), "checked": 0, "shrunk": 0, "left": 0,
               "bytes_before": 0, "bytes_after": 0, "stopped": None, "applied": apply}
@@ -510,7 +527,8 @@ def shrink_stored_images(min_bytes: int = 800_000, apply: bool = False, limit: O
             session.execute(text("SET LOCAL statement_timeout = 0"))
             rows = session.execute(text(
                 'SELECT id, "binary", meta FROM documents WHERE id = ANY(:i) '
-                "AND NOT (meta ? 'original_bytes') ORDER BY id"), {"i": chunk}).fetchall()
+                "AND NOT (coalesce(meta, '{}'::jsonb) ? 'original_bytes') ORDER BY id"
+                + (" FOR UPDATE SKIP LOCKED" if apply else "")), {"i": chunk}).fetchall()
             for doc_id, binary, meta in rows:
                 if binary is None:
                     continue
@@ -529,8 +547,14 @@ def shrink_stored_images(min_bytes: int = 800_000, apply: bool = False, limit: O
                 result["bytes_before"] += len(data)
                 result["bytes_after"] += len(out)
                 if apply:
-                    session.execute(text('UPDATE documents SET "binary" = :b, meta = cast(:m AS jsonb) WHERE id = :i'),
-                                    {"b": out, "m": json.dumps(new_meta), "i": doc_id})
+                    # Merge only this command's keys: the row is locked, so
+                    # meta is what was read, and other keys stay as they are.
+                    ours = {k: new_meta[k] for k in ("format", "original_bytes")}
+                    if not (meta or {}).get("image_hash"):
+                        ours["image_hash"] = new_meta["image_hash"]
+                    session.execute(text('UPDATE documents SET "binary" = :b, '
+                                         "meta = coalesce(meta, '{}'::jsonb) || cast(:m AS jsonb) WHERE id = :i"),
+                                    {"b": out, "m": json.dumps(ours), "i": doc_id})
         if progress:
             progress(dict(result, elapsed=time.monotonic() - started, done=start + len(chunk)))
         if pause:
