@@ -93,6 +93,47 @@ def _get_single_image_description(
     return content.strip(), getattr(response, "usage", None)
 
 
+def vision_endpoint_problem() -> Optional[str]:
+    """Why image descriptions would fail right now, or None if they work (or are off).
+
+    For a run that must not degrade silently -- a wiki sync re-imports pages
+    only when they change, so a page imported with placeholder descriptions
+    would keep them. Unlike _preflight_model, an unreachable endpoint or a
+    refused credential (an expired ALCF token: HTTP 401) is a problem here,
+    reported before any page is imported. Same client routing and test image
+    as the descriptions themselves.
+    """
+    from openai import OpenAI
+
+    from ..config import get_llm_config, get_parser_config
+    from ..health import RED_PNG_B64, RED_WORDS
+
+    parser_config = get_parser_config()
+    if not parser_config.get("image_llm_description"):
+        return None
+    llm_config = get_llm_config()
+    model = parser_config["image_description_model"]
+    kwargs = {"api_key": llm_config["openai_api_key_models"].get(model, llm_config["openai_api_key"]) or "none"}
+    base_url = llm_config["openai_base_url_models"].get(model, llm_config["openai_base_url"])
+    if base_url:
+        kwargs["base_url"] = base_url
+    try:
+        response = OpenAI(**kwargs).chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": [
+                {"type": "text", "text": "What color is this image? Answer with one word."},
+                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{RED_PNG_B64}"}}]}],
+            max_tokens=64,
+            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+        )
+    except Exception as e:  # noqa: BLE001 - reported, not raised
+        return f"{model} at {base_url}: {type(e).__name__}: {str(e)[:200]}"
+    content = (response.choices[0].message.content or "").strip().lower()
+    if not any(word in content for word in RED_WORDS):
+        return f"{model} answered but could not see the test image ({content[:60]!r}): not vision-capable here"
+    return None
+
+
 def _preflight_model(client, model: str) -> None:
     """Fail loudly, once, if `model` can't actually describe an image.
 

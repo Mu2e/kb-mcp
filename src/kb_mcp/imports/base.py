@@ -24,6 +24,28 @@ class Source(ABC):
     - Error handling and retry logic
     - Database session management
     """
+
+    def _ensure_source(self) -> None:
+        """Create or update this source's row; documents_raw references it."""
+        from ..kb import add_source, get_db_session
+
+        with get_db_session() as session:
+            try:
+                add_source(
+                    source_id=self.source_id,
+                    name=self.name,
+                    description=self.description,
+                    base_uri=self.base_uri,
+                    meta=self.meta,
+                    session=session,
+                )
+            except Exception as e:
+                logger.warning(f"Could not add/update source: {e}")
+
+    #: Chunking strategy for this source's documents (None: CHUNK_STRATEGY,
+    #: i.e. "tokens"). A source with strong section structure (a wiki) sets
+    #: "section": one chunk per section, with its section path.
+    chunk_strategy = None
     
     def __init__(
         self,
@@ -199,21 +221,7 @@ class Source(ABC):
         
         logger.info(f"Found {len(items)} item(s) to process")
         
-        # Ensure source exists in database
-        from ..kb import add_source, get_db_session
-        
-        with get_db_session() as session:
-            try:
-                add_source(
-                    source_id=self.source_id,
-                    name=self.name,
-                    description=self.description,
-                    base_uri=self.base_uri,
-                    meta=self.meta,
-                    session=session,
-                )
-            except Exception as e:
-                logger.warning(f"Could not add/update source: {e}")
+        self._ensure_source()
         
         # Process items sequentially
         # Note: Multi-threading doesn't help much here because:
@@ -254,6 +262,7 @@ class Source(ABC):
                 from ..kb.tools import chunk_and_embed_all
                 embed_result = chunk_and_embed_all(
                     source_id=self.source_id,
+                    chunk_strategy=self.chunk_strategy,
                     max_text_chars=max_embed_text_chars,
                     include_images=embed_images,
                     include_tables=embed_tables,
