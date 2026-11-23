@@ -1,25 +1,17 @@
 """Mu2e electronic logbook (ECL): import the documents attached to entries.
 
-The ECL MCP server answers questions about the entries themselves; what it
-cannot give an agent is the content of their attachments -- spreadsheets,
-PDFs, Word files. This importer makes those searchable: every document-like
-file attached to an entry becomes a raw document of source ``mu2e-ecl``, with
-the entry's date, category, author, subject and the start of its text as
-metadata, and a link back to the entry.
+The ECL MCP server covers the entries themselves; this importer makes their
+document attachments (pdf, xlsx, docx, pptx, text) searchable. Each becomes a
+raw document of source ``mu2e-ecl``, with the entry's date, category, author,
+subject and the start of its text as metadata, and the entry page as its URI.
 
-Access. ECL serves attachments (``/E/file/<fid>/<name>``) only to a logged-in
-web session; signed API requests are refused there. ``/ECL/<exp>/authenticate``
-logs a personal Fermilab Services account in (``X-Username``/``X-Password``,
-checked against LDAP) and starts such a session, so this uses the same
-account as the DocDB importer (MU2E_DOCDB_USERNAME / MU2E_DOCDB_PASSWORD).
-The stable address (dbweb0) redirects to whichever server is up; the live one
-is resolved first and the credentials are sent to it only, without following
-redirects.
-
-Entries are written once and rarely edited, so this works like the DocDB
-import: a window of recent entries (``--days``), each attachment imported
-once (``--skip-existing``). Size, 2026-11-23: 6,186 entries, 289 with files
-(336 files, mostly xlsx and pdf), 816 with images (1,796).
+Attachments are served to a logged-in web session; ``/authenticate`` starts
+one with a Fermilab Services account (MU2E_DOCDB_USERNAME /
+MU2E_DOCDB_PASSWORD, as for DocDB). The stable address redirects to a live
+server, which is resolved first; credentials go to it only. Private entries
+are skipped. Entries rarely change, so this works like the DocDB import: a
+window of recent entries (``--days``), each attachment imported once
+(``--skip-existing``).
 """
 
 import logging

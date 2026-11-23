@@ -243,6 +243,20 @@ WIKI_FULL_DAY="${WIKI_FULL_DAY:-7}"        # ISO weekday of the weekly --full ru
         rm -f "$w_out"
     done
 } >> "$LOG" 2>&1
+# 3e. ECL attachments (docs/guides/ecl.md): documents attached to recent
+# logbook entries, before the privacy step so they are scanned this run.
+# ECL_DAYS=0 turns it off; a failure is logged and fails the run.
+ECL_DAYS="${ECL_DAYS:-2}"
+if [ "$ECL_DAYS" -gt 0 ]; then
+    {
+        echo "--- ECL attachments (last $ECL_DAYS days) ---"
+        if stdbuf -oL -eL kb-import ecl --days "$ECL_DAYS" --skip-existing; then
+            echo "ECL import done"
+        else
+            echo "ECL FAILED: see above"
+        fi
+    } >> "$LOG" 2>&1
+fi
 
 # 3a'. Standing visibility rules (docs/guides/privacy.md): the project-controls
 # reports with money or people stay out of search. The rules are configured in
@@ -334,6 +348,8 @@ elif grep -qaE "^PRIVACY FAILED" "$LOG"; then
 elif grep -qaE "^WIKI FAILED" "$LOG"; then
     # DocDB is fine; a wiki source was not brought up to date this run.
     failure_reason="$(grep -aE "^WIKI FAILED" "$LOG" | head -1)"
+elif grep -qaE "^ECL FAILED" "$LOG"; then
+    failure_reason="$(grep -aE "^ECL FAILED" "$LOG" | head -1)"
 fi
 
 if [ -n "$failure_reason" ] && [ "$rc" -eq 0 ]; then

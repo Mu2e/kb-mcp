@@ -39,6 +39,7 @@ def setup_logging(verbose: bool = False, extra_loggers: list = None):
 
     logging.getLogger("kb_mcp.imports.docdb").setLevel(logging.INFO)
     logging.getLogger("kb_mcp.imports.mediawiki").setLevel(logging.INFO)
+    logging.getLogger("kb_mcp.imports.ecl").setLevel(logging.INFO)
 
     for name in (extra_loggers or []):
         logging.getLogger(name).setLevel(logging.INFO)
