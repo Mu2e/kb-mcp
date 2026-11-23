@@ -73,6 +73,24 @@ def cmd_inspire(args):
             print(f"  ... and {len(documents) - 10} more")
 
 
+def cmd_ecl(args):
+    """Handle ecl source command."""
+    from .ecl import ECLSource
+
+    setup_logging(args.verbose)
+    with ECLSource(url=args.url, source_id=args.source_id, days=args.days, categories=args.category,
+                   include_images=args.include_images, skip_existing=args.skip_existing,
+                   delay=args.delay) as source:
+        documents = source.process_all(
+            query=args.ids,
+            max_results=args.max_results,
+            output_dir=args.output_dir,
+            auto_embed=not args.no_auto_embed,
+            auto_summarize=not args.no_auto_summarize,
+        )
+    print(f"\n  Successfully processed {len(documents)} document(s)")
+
+
 def cmd_docdb(args):
     """Handle docdb source command."""
     from .docdb import DocDBSource
@@ -522,6 +540,34 @@ def main():
         help="Leave table documents unchunked in the auto-embed step (text is still embedded)",
     )
     docdb_parser.set_defaults(func=cmd_docdb)
+
+    # ECL source: documents attached to logbook entries
+    ecl_parser = subparsers.add_parser(
+        "ecl",
+        help="Import documents attached to Mu2e logbook (ECL) entries",
+        description=(
+            "Import the document-like attachments (pdf, xlsx, docx, pptx, text) of Mu2e "
+            "electronic logbook entries. Logs in with MU2E_DOCDB_USERNAME / MU2E_DOCDB_PASSWORD."
+        ),
+    )
+    ecl_parser.add_argument("--days", type=int, default=2,
+                            help="Entries of the last N days (default 2; 7300 for the whole logbook)")
+    ecl_parser.add_argument("--ids", help="Only these entry ids, comma-separated (e.g. 6098,6100)")
+    ecl_parser.add_argument("--category", action="append",
+                            help="Only entries of this category (repeatable), e.g. Planning")
+    ecl_parser.add_argument("--include-images", action="store_true",
+                            help="Also import image attachments (off by default)")
+    ecl_parser.add_argument("--url", default="https://dbweb0.fnal.gov/ECL/mu2e",
+                            help="ECL address for the experiment (default: https://dbweb0.fnal.gov/ECL/mu2e)")
+    ecl_parser.add_argument("--source-id", default="mu2e-ecl", help="Source identifier (default: mu2e-ecl)")
+    ecl_parser.add_argument("--max-results", type=int, help="At most this many entries")
+    ecl_parser.add_argument("--output-dir", type=Path, help="Directory for downloaded files")
+    ecl_parser.add_argument("--delay", type=float, default=0.5, help="Delay between entries in seconds (default 0.5)")
+    ecl_parser.add_argument("--skip-existing", action="store_true", help="Skip attachments already imported")
+    ecl_parser.add_argument("--no-auto-embed", action="store_true", help="Do not chunk and embed afterwards")
+    ecl_parser.add_argument("--no-auto-summarize", action="store_true", help="Do not summarize afterwards")
+    ecl_parser.add_argument("--verbose", "-v", action="store_true", help="Enable verbose logging")
+    ecl_parser.set_defaults(func=cmd_ecl)
 
     # Local PDF source
     local_pdf_parser = subparsers.add_parser(
