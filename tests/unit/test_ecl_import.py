@@ -64,8 +64,12 @@ class _HTTP:
 
 
 class _DB:
-    def __init__(self, existing=()):
+    def __init__(self, existing=(), raws=None):
         self.existing = set(existing)
+        self.raws = raws or {}
+
+    def get(self, model, key):
+        return self.raws.get(key)
 
     def query(self, *a):
         db = self
@@ -143,3 +147,11 @@ def test_private_entries_are_skipped(tmp_path, monkeypatch):
     http.get = lambda url, params=None, timeout=None: SimpleNamespace(status_code=200, text=GET.replace('private="no"', 'private="yes"'))
     res = _source(http).process_item(ITEM, tmp_path, _DB())
     assert res.get("skipped") and res["error"] is None
+
+
+def test_a_file_already_in_the_kb_from_another_source_is_not_counted(tmp_path, monkeypatch):
+    monkeypatch.setattr(ecl, "add_document", lambda path, **kw: {"raw_document_id": "r-docdb", "document_ids": [], "parsed": False})
+    http = _HTTP({"123/Work%20request%20Spreadsheet_20261112.xlsx": b"PK\x03\x04"})
+    db = _DB(raws={"r-docdb": SimpleNamespace(source_id="mu2e-docdb", doc_id="1234-plan_xlsx")})
+    res = _source(http).process_item(ITEM, tmp_path, db)
+    assert res.get("skipped") and res["error"] is None and res["document_ids"] == []

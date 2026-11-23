@@ -113,7 +113,10 @@ def vision_endpoint_problem() -> Optional[str]:
         return None
     llm_config = get_llm_config()
     model = parser_config["image_description_model"]
-    kwargs = {"api_key": llm_config["openai_api_key_models"].get(model, llm_config["openai_api_key"]) or "none"}
+    api_key = llm_config["openai_api_key_models"].get(model) or llm_config["openai_api_key"]
+    if not api_key:
+        return f"no API key for {model} (OPENAI_API_KEY / OPENAI_API_KEY_MODELS)"
+    kwargs = {"api_key": api_key}
     base_url = llm_config["openai_base_url_models"].get(model, llm_config["openai_base_url"])
     if base_url:
         kwargs["base_url"] = base_url
@@ -289,13 +292,15 @@ def generate_image_descriptions(
 
         llm_config = get_llm_config()
         parser_config = get_parser_config()
-        api_key = llm_config['openai_api_key']
-        if not api_key:
-            logger.warning("OPENAI_API_KEY not set, skipping image descriptions")
-            return image_dicts
-
         # Get model name and workers from configuration
         model = parser_config['image_description_model']
+        # The model's own key (OPENAI_API_KEY_MODELS) counts, as it does for
+        # the client below and for vision_endpoint_problem().
+        api_key = llm_config['openai_api_key']
+        if not (llm_config['openai_api_key_models'].get(model) or api_key):
+            logger.warning("No API key for %s (OPENAI_API_KEY / OPENAI_API_KEY_MODELS), skipping image descriptions", model)
+            return image_dicts
+
         max_workers = parser_config['image_description_num_workers']
 
         # Heads-up for models known to be text-only. These accept image_url

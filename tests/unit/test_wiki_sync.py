@@ -304,3 +304,87 @@ def test_a_sync_registers_its_source_before_the_first_page(monkeypatch):
     monkeypatch.setattr(src, "_add_page", lambda page, out: order.append("page"))
     src.sync(apply=True, auto_embed=False, auto_summarize=False)
     assert order == ["source", "page"]
+
+
+
+# -- review fixes: file identity, retry after a failed parse, one key rule --------
+
+def test_stored_files_are_named_by_page_id(monkeypatch, tmp_path):
+    monkeypatch.setattr("kb_mcp.config.get_data_dir", lambda: str(tmp_path))
+    src = mw.MediaWikiSource(auth="none")
+    assert src._stored_path(17) != src._stored_path(18)          # A/B and A-B: different page ids
+    assert src._stored_path(17).name == "mu2e-wiki-page-17.html"
+
+
+def test_page_html_carries_its_identity(monkeypatch, tmp_path):
+    src = mw.MediaWikiSource(auth="none", wiki_url="https://w")
+    monkeypatch.setattr(src, "_get_page_content", lambda t: {"title": t, "page_id": 42, "revision_id": 7, "html": "<p>same</p>",
+                                                             "sections": [], "categories": []})
+    monkeypatch.setattr(src, "_get_revision_times", lambda t: {"created": None, "updated": None})
+    html = src._build_page("A", tmp_path)["html_path"].read_text()
+    assert '<meta name="kb-page" content="https://w 42">' in html
+
+
+@pytest.fixture()
+def raw_db(db, monkeypatch, tmp_path):
+    from contextlib import contextmanager
+    import kb_mcp.kb as kb
+    from kb_mcp.kb.documents import operations as ops
+
+    @contextmanager
+    def same_session(session=None, **kw):
+        yield db.session
+    monkeypatch.setattr(kb, "get_db_session", same_session)
+    monkeypatch.setattr(ops, "get_db_session", same_session)
+    monkeypatch.setattr(ops, "hold_changed_document", lambda raw, session: False)
+    monkeypatch.setattr("kb_mcp.config.get_data_dir", lambda: str(tmp_path))
+    raw = db.session.get(db.RawDocument, "raw-1")
+    raw.meta = {"page_id": 5, "revision_id": 10}
+    db.session.flush()
+    return db
+
+
+def _changed_page_source(monkeypatch, tmp_path):
+    src = mw.MediaWikiSource(auth="none")
+    page_html = tmp_path / "Computing.html"
+    page_html.write_text("<html>new</html>")
+    monkeypatch.setattr(src, "_build_page", lambda title, out: {
+        "html_path": page_html, "doc_id": "Computing", "uri": "https://w/wiki/Computing",
+        "meta": {"page_id": 5, "revision_id": 11}, "created": None, "updated": None})
+    return src
+
+
+def test_a_failed_parse_leaves_the_old_revision_so_the_page_is_retried(raw_db, monkeypatch, tmp_path):
+    src = _changed_page_source(monkeypatch, tmp_path)
+    def boom(*a, **k):
+        raise RuntimeError("parser failed")
+    monkeypatch.setattr(mw, "add_document", boom)
+    with pytest.raises(RuntimeError, match="parser failed"):
+        src._update_page({"title": "Computing", "page_id": 5, "revision_id": 11, "raw_id": "raw-1"}, tmp_path)
+    assert raw_db.session.get(raw_db.RawDocument, "raw-1").meta["revision_id"] == 10      # still the old one
+    plan = mw.plan_sync([remote(5, "Computing", 11)], [local("raw-1", 5, "Computing", 10)])
+    assert [p["raw_id"] for p in plan["changed"]] == ["raw-1"]                             # so: retried
+
+
+def test_a_successful_parse_records_the_new_revision(raw_db, monkeypatch, tmp_path):
+    src = _changed_page_source(monkeypatch, tmp_path)
+    monkeypatch.setattr(mw, "add_document", lambda *a, **k: {"raw_document_id": "raw-1", "document_ids": ["d"]})
+    src._update_page({"title": "Computing", "page_id": 5, "revision_id": 11, "raw_id": "raw-1"}, tmp_path)
+    raw = raw_db.session.get(raw_db.RawDocument, "raw-1")
+    assert raw.meta["revision_id"] == 11 and raw.file_path.endswith("mu2e-wiki-page-5.html")
+
+
+def test_a_new_page_that_lands_in_another_raw_is_an_error(raw_db, monkeypatch, tmp_path):
+    src = _changed_page_source(monkeypatch, tmp_path)
+    monkeypatch.setattr(mw, "add_document", lambda *a, **k: {"raw_document_id": "raw-2"})   # "Other"'s raw
+    with pytest.raises(RuntimeError, match="not its own"):
+        src._add_page({"title": "Computing", "page_id": 5}, tmp_path)
+
+
+def test_vision_check_and_generator_agree_on_the_key(monkeypatch):
+    from kb_mcp.parser import image_descriptions as idesc
+
+    monkeypatch.setenv("PARSE_IMAGE_LLM_DESCRIPTION", "true")
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    monkeypatch.setenv("OPENAI_API_KEY_MODELS", "{}")
+    assert "no API key" in idesc.vision_endpoint_problem()

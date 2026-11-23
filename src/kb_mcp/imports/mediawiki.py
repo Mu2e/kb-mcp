@@ -724,9 +724,12 @@ class MediaWikiSource(Source):
         body_html, images = inline_images(body_html, self.wiki_url, self._fetch_bytes)
         # The title once, as the top heading: it then roots every section
         # path ("TrackerIntro > Straws"); a <title> as well would repeat it.
+        # The page's identity in the file: raw documents are deduplicated by
+        # content hash, and two pages (or the same page in both wikis) can
+        # render identical HTML -- this keeps each page's file its own.
         html = f"""<!DOCTYPE html>
 <html>
-<head><meta charset="utf-8"></head>
+<head><meta charset="utf-8"><meta name="kb-page" content="{self.wiki_url} {content.get('page_id')}"></head>
 <body>
 <h1>{content['title']}</h1>
 {body_html}
@@ -865,13 +868,38 @@ class MediaWikiSource(Source):
             chunk_and_embed_all(source_id=self.source_id, chunk_strategy=self.chunk_strategy)
         return result
 
+    def _stored_path(self, page_id) -> Path:
+        """Where a page's file is kept: by page id, which is unique and survives
+        renames (titles are not injective as file names: A/B and A-B)."""
+        from ..config import get_data_dir
+
+        return Path(get_data_dir()) / "sources" / self.source_id / f"{self.source_id}-page-{page_id}.html"
+
+    def _store(self, built: Dict[str, Any], page_id) -> Path:
+        import shutil
+
+        from ..secure_file import ensure_private_dir
+
+        dest = self._stored_path(page_id)
+        ensure_private_dir(dest.parent)
+        shutil.copyfile(built["html_path"], dest)
+        return dest
+
     def _add_page(self, page: Dict[str, Any], out_dir: Path) -> None:
+        from ..kb import get_db_session
+        from ..kb.db_models import RawDocument
+
         built = self._build_page(page["title"], out_dir)
         if built is None:
             raise RuntimeError("could not fetch the page")
-        add_document(built["html_path"], source_id=self.source_id, doc_id=built["doc_id"], uri=built["uri"],
-                     meta=built["meta"], creating_time=built["created"], update_time=built["updated"],
-                     copy_to_kb=True)
+        path = self._store(built, page["page_id"])
+        result = add_document(path, source_id=self.source_id, doc_id=built["doc_id"], uri=built["uri"],
+                              meta=built["meta"], creating_time=built["created"], update_time=built["updated"])
+        with get_db_session() as session:
+            raw = session.get(RawDocument, result.get("raw_document_id")) if result.get("raw_document_id") else None
+            if raw is None or raw.source_id != self.source_id or raw.doc_id != built["doc_id"]:
+                raise RuntimeError(f"landed in raw document {result.get('raw_document_id')} "
+                                   f"({getattr(raw, 'source_id', None)}/{getattr(raw, 'doc_id', None)}), not its own")
         logger.info(f"Added '{page['title']}' (page {page['page_id']})")
 
     def _update_page(self, page: Dict[str, Any], out_dir: Path) -> None:
@@ -883,6 +911,11 @@ class MediaWikiSource(Source):
         add_document -- which finds the raw document by the new hash --
         parses the new content. An automatic visibility goes back on the
         privacy hold until the new content is scanned (hold_changed_document).
+
+        The new revision id is recorded only once the new content is parsed:
+        if parsing fails, the raw document keeps the old one, so the next sync
+        sees the page as changed and tries again (its old documents are gone
+        by then; the page is missing from search until that retry succeeds).
         """
         import hashlib
 
@@ -894,32 +927,35 @@ class MediaWikiSource(Source):
         built = self._build_page(page["title"], out_dir)
         if built is None:
             raise RuntimeError("could not fetch the page")
-        data = built["html_path"].read_bytes()
-        # Where add_document(copy_to_kb=True) puts it, so the copy lands on the same path.
-        safe = str(built["doc_id"]).replace("/", "-").replace("\\", "-")
-        dest = Path(get_data_dir()) / "sources" / self.source_id / f"{self.source_id}-{safe}.html"
+        dest = self._store(built, page["page_id"])
+        data = dest.read_bytes()
 
         with get_db_session() as session:
             raw = session.get(RawDocument, page["raw_id"])
             if raw is None:
                 raise RuntimeError(f"raw document {page['raw_id']} is gone")
             old_path = raw.file_path
+            old_revision = (raw.meta or {}).get("revision_id")
             raw.doc_id = built["doc_id"]
             raw.uri = built["uri"]
             raw.file_path = str(dest.absolute())
             raw.content_hash = hashlib.sha256(data).hexdigest()
             raw.file_size = len(data)
-            raw.meta = {**(raw.meta or {}), **built["meta"], "filename": dest.name}
+            raw.meta = {**(raw.meta or {}), **built["meta"], "filename": dest.name, "revision_id": old_revision}
             deleted = delete_derived_documents(raw.id, session=session)
             held = hold_changed_document(raw.id, session)
             session.commit()
 
-        result = add_document(built["html_path"], source_id=self.source_id, doc_id=built["doc_id"],
+        result = add_document(dest, source_id=self.source_id, doc_id=built["doc_id"],
                               uri=built["uri"], meta=built["meta"], creating_time=built["created"],
-                              update_time=built["updated"], copy_to_kb=True)
+                              update_time=built["updated"])
         if result.get("raw_document_id") != page["raw_id"]:
             raise RuntimeError(f"parsed into raw document {result.get('raw_document_id')}, "
                                f"not the page's {page['raw_id']} (same content as another raw document?)")
+        with get_db_session() as session:     # parsed: now the revision is current
+            raw = session.get(RawDocument, page["raw_id"])
+            raw.meta = {**(raw.meta or {}), "revision_id": built["meta"].get("revision_id")}
+            session.commit()
         if old_path and old_path != str(dest.absolute()):
             # A renamed page: its old file is ours (data/sources/<source>), and no longer used.
             old = Path(old_path)

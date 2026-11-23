@@ -275,6 +275,14 @@ class ECLSource(Source):
             res = add_document(path, source_id=self.source_id, doc_id=doc_id, uri=self.entry_url(entry_id),
                                meta={k: v for k, v in meta.items() if v not in (None, [], "")},
                                creating_time=ts, update_time=ts, copy_to_kb=True, session=session)
+            # Raw documents are deduplicated by content hash: a file that is
+            # already in the knowledge base (the same spreadsheet in DocDB)
+            # stays there, once.
+            existing = session.get(RawDocument, res.get("raw_document_id")) if res.get("raw_document_id") else None
+            if existing is not None and (existing.source_id, existing.doc_id) != (self.source_id, doc_id):
+                logger.info(f"Entry {entry_id}: {att['filename']} is already in the knowledge base "
+                            f"as {existing.source_id}/{existing.doc_id}")
+                continue
             result["document_ids"].extend(res.get("document_ids") or [])
             result["parsed"] = result["parsed"] or bool(res.get("parsed"))
             added += 1
