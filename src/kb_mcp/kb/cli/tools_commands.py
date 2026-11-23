@@ -1200,6 +1200,10 @@ def cmd_db_maintain(args):
         print("  done.")
 
     if args.reindex_vectors:
+        from ..embedding.embedding import IVFFLAT_NOT_IN_USE
+        if get_search_config()["vector_index"] != "ivfflat":
+            print(f"--reindex-vectors skipped: {IVFFLAT_NOT_IN_USE}")
+            return
         if not embedding_tables:
             print("No embeddings_* tables found, nothing to reindex.")
             return
@@ -3151,7 +3155,7 @@ def setup_commands(subparsers):
     )
     db_maintain_parser.add_argument("--analyze", action="store_true", help="Refresh planner statistics (default if no flags given)")
     db_maintain_parser.add_argument("--vacuum", action="store_true", help="Reclaim dead tuple space")
-    db_maintain_parser.add_argument("--reindex-vectors", action="store_true", help="Rebuild IVFFlat indexes with lists sized to each table's row count")
+    db_maintain_parser.add_argument("--reindex-vectors", action="store_true", help="Rebuild IVFFlat indexes with lists sized to each table's row count (only with SEARCH_VECTOR_INDEX=ivfflat)")
     db_maintain_parser.add_argument(
         "--maintenance-work-mem", default="512MB",
         help="Session-level maintenance_work_mem for index builds (default: 512MB; a properly-sized IVFFlat index "

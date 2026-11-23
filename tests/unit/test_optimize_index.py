@@ -48,3 +48,17 @@ def test_invalid_index_keeps_old_index():
     sql = " | ".join(_sql(conn))
     assert "RENAME TO" not in sql
     assert 'DROP INDEX IF EXISTS "t_idx"' not in sql  # old index never dropped
+
+
+def test_under_hnsw_the_ivfflat_index_is_not_rebuilt(monkeypatch):
+    """SEARCH_VECTOR_INDEX=hnsw (the default): optimize-index refuses instead of building 4 GB nobody reads."""
+    from types import SimpleNamespace
+    from kb_mcp.kb.embedding import embedding as emb
+
+    monkeypatch.delenv("SEARCH_VECTOR_INDEX", raising=False)
+    session = SimpleNamespace(bind=SimpleNamespace(dialect=SimpleNamespace(name="postgresql")),
+                              execute=lambda *a, **k: pytest.fail("must not touch the table"))
+    monkeypatch.setattr(emb, "_get_embedding_table", lambda s, n: ({}, SimpleNamespace(name="embeddings_x"), "x"))
+    monkeypatch.setattr(emb, "_build_ivfflat_index", lambda *a, **k: pytest.fail("must not build IVFFlat"))
+    out = emb.optimize_embedding_index("x", session=session)
+    assert out["index_rebuilt"] is False and "SEARCH_VECTOR_INDEX is hnsw" in out["message"]

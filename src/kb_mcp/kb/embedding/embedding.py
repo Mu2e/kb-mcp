@@ -700,6 +700,9 @@ def _build_ivfflat_index(session, table_name: str, index_name: str, lists: int,
         conn.execute(text(f'ANALYZE "{table_name}"'))
 
 
+IVFFLAT_NOT_IN_USE = ("SEARCH_VECTOR_INDEX is hnsw: searches use the HNSW index and IVFFlat is not maintained (dropped 2026-11-23; see `kb embedding hnsw-index`). Set SEARCH_VECTOR_INDEX=ivfflat to go back to it.")
+
+
 def optimize_embedding_index(embedding_name: str, session=None) -> Dict[str, Any]:
     """
     Optimize IVFFlat index for an embedding table by recalculating optimal 'lists' parameter.
@@ -756,6 +759,18 @@ def optimize_embedding_index(embedding_name: str, session=None) -> Dict[str, Any
                 "optimal_lists": None,
                 "index_rebuilt": False,
                 "message": f"Index optimization only supported for PostgreSQL (current: {dialect_name})"
+            }
+
+        # Under HNSW the IVFFlat index is not used, and rebuilding it would put
+        # a 4 GB index back that only slows inserts down (dropped 2026-11-23).
+        from ...config import get_search_config
+        if get_search_config()["vector_index"] != "ivfflat":
+            return {
+                "embedding_name": embedding_name,
+                "embedding_count": 0,
+                "optimal_lists": None,
+                "index_rebuilt": False,
+                "message": IVFFLAT_NOT_IN_USE,
             }
         
         inspector = sqlalchemy_inspect(session.bind)
