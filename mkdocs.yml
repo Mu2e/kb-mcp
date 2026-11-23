@@ -41,6 +41,8 @@ nav:
     - CLI Usage: guides/cli.md
     - Evaluation: guides/evaluation.md
     - Privacy: guides/privacy.md
+    - Wikis: guides/wiki.md
+    - ECL attachments: guides/ecl.md
     - Database Schema: guides/database.md
     - Deployment:
       - Deployment: guides/deployment.md

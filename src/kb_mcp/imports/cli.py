@@ -39,6 +39,7 @@ def setup_logging(verbose: bool = False, extra_loggers: list = None):
 
     logging.getLogger("kb_mcp.imports.docdb").setLevel(logging.INFO)
     logging.getLogger("kb_mcp.imports.mediawiki").setLevel(logging.INFO)
+    logging.getLogger("kb_mcp.imports.ecl").setLevel(logging.INFO)
 
     for name in (extra_loggers or []):
         logging.getLogger(name).setLevel(logging.INFO)
@@ -71,6 +72,24 @@ def cmd_inspire(args):
             print(f"  - {doc_id}")
         if len(documents) > 10:
             print(f"  ... and {len(documents) - 10} more")
+
+
+def cmd_ecl(args):
+    """Handle ecl source command."""
+    from .ecl import ECLSource
+
+    setup_logging(args.verbose)
+    with ECLSource(url=args.url, source_id=args.source_id, days=args.days, categories=args.category,
+                   include_images=args.include_images, skip_existing=args.skip_existing,
+                   delay=args.delay) as source:
+        documents = source.process_all(
+            query=args.ids,
+            max_results=args.max_results,
+            output_dir=args.output_dir,
+            auto_embed=not args.no_auto_embed,
+            auto_summarize=not args.no_auto_summarize,
+        )
+    print(f"\n  Successfully processed {len(documents)} document(s)")
 
 
 def cmd_docdb(args):
@@ -178,6 +197,27 @@ def cmd_local_pdf(args):
         print(f"    kb tools parse-all {args.source_id} --extract-images --describe-images --parser-name marker")
 
 
+def _print_wiki_sync(result, source_id):
+    plan = result["plan"]
+    verb = "" if result["applied"] else "would be "
+    print(f"{source_id}: {plan['remote_count'] if plan['remote_count'] is not None else '?'} page(s) in the wiki")
+    print(f"  new:       {len(plan['new']):5}  {verb}added")
+    print(f"  changed:   {len(plan['changed']):5}  {verb}re-imported (same raw document)")
+    print(f"  unchanged: {len(plan['unchanged']):5}")
+    print(f"  deleted:   {len(plan['deleted']):5}  {verb}removed")
+    if plan["deletions_blocked"]:
+        print(f"  NO deletions: {plan['deletions_blocked']}")
+    for gone in plan["deleted"][:20]:
+        print(f"    - {gone['doc_id']} (page {gone['page_id']})")
+    if result["applied"]:
+        print(f"Done: {result['added']} added, {result['updated']} updated, {result['removed']} removed, "
+              f"{len(result['failed'])} failed")
+        for title, error in result["failed"][:20]:
+            print(f"    ! {title}: {error}")
+    else:
+        print("Dry run: re-run with --apply to change the knowledge base.")
+
+
 def cmd_wiki(args):
     """Handle wiki source command."""
     from .mediawiki import MediaWikiSource
@@ -190,7 +230,16 @@ def cmd_wiki(args):
         delay=args.delay,
         skip_existing=args.skip_existing,
         use_kerberos=not args.no_kerberos,
+        auth=getattr(args, "auth", None),
+        namespaces=tuple(int(n) for n in str(getattr(args, "namespaces", "0")).split(",") if n.strip()),
     ) as source:
+        if getattr(args, "sync", False):
+            _print_wiki_sync(source.sync(
+                apply=args.apply, full=args.full, limit=args.limit,
+                max_delete_fraction=args.max_delete_fraction,
+                auto_embed=not args.no_auto_embed, auto_summarize=not args.no_auto_summarize,
+            ), args.source_id)
+            return
         documents = source.process_all(
             query=args.query,
             max_results=args.max_results,
@@ -350,6 +399,27 @@ def main():
         action="store_true",
         help="Disable Kerberos/SPNEGO authentication (for public wikis)",
     )
+    wiki_parser.add_argument(
+        "--auth", choices=["kerberos", "sso", "none"],
+        help="How to log in: kerberos (curl --negotiate, the default), sso (Fermilab SSO with "
+             "MU2E_DOCDB_USERNAME/PASSWORD: the internal wiki) or none (the public wiki)",
+    )
+    wiki_parser.add_argument(
+        "--sync", action="store_true",
+        help="Bring the source in line with the wiki: add new pages, re-import changed ones into "
+             "their existing raw documents, remove deleted ones. Dry run unless --apply. Ignores --query",
+    )
+    wiki_parser.add_argument("--apply", action="store_true", help="With --sync: change the knowledge base")
+    wiki_parser.add_argument("--full", action="store_true",
+                             help="With --sync: re-import every page, changed or not (template edits)")
+    wiki_parser.add_argument("--namespaces", default="0",
+                             help="With --sync: comma-separated namespace ids to list (default 0, main)")
+    wiki_parser.add_argument("--limit", type=int, help="With --sync: at most this many pages added or updated")
+    wiki_parser.add_argument(
+        "--max-delete-fraction", type=float, default=0.1,
+        help="With --sync: delete nothing if more than this fraction of the known pages would go "
+             "(default 0.1): the page list is then more likely broken than the wiki emptied",
+    )
     wiki_parser.set_defaults(func=cmd_wiki)
 
     # DocDB source
@@ -471,6 +541,34 @@ def main():
         help="Leave table documents unchunked in the auto-embed step (text is still embedded)",
     )
     docdb_parser.set_defaults(func=cmd_docdb)
+
+    # ECL source: documents attached to logbook entries
+    ecl_parser = subparsers.add_parser(
+        "ecl",
+        help="Import documents attached to Mu2e logbook (ECL) entries",
+        description=(
+            "Import the document-like attachments (pdf, xlsx, docx, pptx, text) of Mu2e "
+            "electronic logbook entries. Logs in with MU2E_DOCDB_USERNAME / MU2E_DOCDB_PASSWORD."
+        ),
+    )
+    ecl_parser.add_argument("--days", type=int, default=2,
+                            help="Entries of the last N days (default 2; 7300 for the whole logbook)")
+    ecl_parser.add_argument("--ids", help="Only these entry ids, comma-separated (e.g. 6098,6100)")
+    ecl_parser.add_argument("--category", action="append",
+                            help="Only entries of this category (repeatable), e.g. Planning")
+    ecl_parser.add_argument("--include-images", action="store_true",
+                            help="Also import image attachments (off by default)")
+    ecl_parser.add_argument("--url", default="https://dbweb0.fnal.gov/ECL/mu2e",
+                            help="ECL address for the experiment (default: https://dbweb0.fnal.gov/ECL/mu2e)")
+    ecl_parser.add_argument("--source-id", default="mu2e-ecl", help="Source identifier (default: mu2e-ecl)")
+    ecl_parser.add_argument("--max-results", type=int, help="At most this many entries")
+    ecl_parser.add_argument("--output-dir", type=Path, help="Directory for downloaded files")
+    ecl_parser.add_argument("--delay", type=float, default=0.5, help="Delay between entries in seconds (default 0.5)")
+    ecl_parser.add_argument("--skip-existing", action="store_true", help="Skip attachments already imported")
+    ecl_parser.add_argument("--no-auto-embed", action="store_true", help="Do not chunk and embed afterwards")
+    ecl_parser.add_argument("--no-auto-summarize", action="store_true", help="Do not summarize afterwards")
+    ecl_parser.add_argument("--verbose", "-v", action="store_true", help="Enable verbose logging")
+    ecl_parser.set_defaults(func=cmd_ecl)
 
     # Local PDF source
     local_pdf_parser = subparsers.add_parser(

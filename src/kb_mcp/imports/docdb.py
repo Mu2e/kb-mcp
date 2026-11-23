@@ -148,59 +148,10 @@ class DocDBSource(Source):
     # ------------------------------------------------------------------
 
     def _login(self):
-        """Authenticate to DocDB via FNAL SSO (username/password flow)."""
-        session = requests.Session()
+        """Authenticate to DocDB via FNAL SSO (username/password flow; see fnal_sso)."""
+        from .fnal_sso import sso_session
 
-        # Step 1: initial request — redirects to PingFed
-        response = session.get(self.base_url, timeout=self.timeout)
-
-        # Step 2: choose username/password authentication method
-        soup = BeautifulSoup(response.text, "html.parser")
-        form = soup.find("form")
-        auth_url = urljoin("https://pingprod.fnal.gov", form["action"])
-        response = session.get(
-            auth_url,
-            params={"pfidpadapterid": "ad..FormBased", "rememberChoice": "false"},
-            timeout=self.timeout,
-        )
-
-        # Step 3: submit credentials
-        soup = BeautifulSoup(response.text, "html.parser")
-        login_form = soup.find("form")
-        if not login_form:
-            session.close()
-            raise RuntimeError("Could not find login form on DocDB SSO page")
-
-        login_url = urljoin("https://pingprod.fnal.gov", login_form["action"])
-        login_data = {
-            "pf.username": os.getenv("MU2E_DOCDB_USERNAME"),
-            "pf.pass": os.getenv("MU2E_DOCDB_PASSWORD"),
-            "pf.ok": "clicked",
-            "pf.adapterId": "FormBased",
-            "pf.cancel": "",
-        }
-        response = session.post(login_url, data=login_data, timeout=self.timeout)
-
-        # Step 4: forward SAML assertion if present
-        soup = BeautifulSoup(response.text, "html.parser")
-        saml_form = soup.find("form")
-        if saml_form:
-            saml_url = saml_form["action"]
-            saml_response_input = saml_form.find("input", {"name": "SAMLResponse"})
-            relay_state_input = saml_form.find("input", {"name": "RelayState"})
-            if saml_response_input and relay_state_input:
-                session.post(
-                    saml_url,
-                    data={
-                        "RelayState": relay_state_input["value"],
-                        "SAMLResponse": saml_response_input["value"],
-                    },
-                    timeout=self.timeout,
-                )
-        else:
-            logger.warning("No SAML form found — login may have failed")
-
-        self.session = session
+        self.session = sso_session(self.base_url, timeout=self.timeout)
         logger.info("DocDB login successful")
 
     # ------------------------------------------------------------------

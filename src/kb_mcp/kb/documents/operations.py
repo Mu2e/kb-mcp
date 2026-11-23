@@ -1498,6 +1498,25 @@ def _hold_for_privacy_scan(raw_document_id: str, session) -> None:
     )
 
 
+def hold_changed_document(raw_document_id: str, session) -> bool:
+    """Hold a raw document whose content changed in place until it is scanned again.
+
+    Only when its current visibility is automatic (the privacy hold, or the
+    policy's decision on the old content): new, unscanned content must not
+    stay visible on the strength of a scan of something else. A decision a
+    person made is kept -- the rescan's findings go to the review queue as
+    flagged instead. Returns True if the document was put on hold.
+    """
+    from ..tools import _current_visibility, AUTO_VISIBILITY_ORIGINS
+    from ..db_models import DOCUMENT_VISIBILITY_DEFAULT_GROUP
+
+    current = _current_visibility(raw_document_id, DOCUMENT_VISIBILITY_DEFAULT_GROUP)
+    if current is not None and current["origin"] not in AUTO_VISIBILITY_ORIGINS:
+        return False
+    _hold_for_privacy_scan(raw_document_id, session)
+    return True
+
+
 def get_or_create_raw_document(
     source_id: str,
     doc_id: str,
@@ -1739,6 +1758,31 @@ def get_raw_document(
         ).first()
         
         return raw_doc
+
+
+def delete_derived_documents(raw_document_id: str, session: Optional[Any] = None) -> int:
+    """Delete everything parsed from a raw document, keeping the raw document itself.
+
+    For a source whose items change in place (a wiki page): the raw document
+    is the item's lasting identity -- its visibility decisions and redactions
+    hang off it -- while its texts, images, tables, chunks and embeddings are
+    rebuilt from the new content. Same steps as delete_raw_document's
+    delete_linked_documents (chunks and their logs first; embeddings cascade
+    from chunks, parent links are set NULL). Returns the number deleted.
+    """
+    from ..db_models import Document
+    from ..embedding.db_models import Chunk, ChunkEmbeddingLog
+
+    with get_db_session(session) as session:
+        documents = session.query(Document).filter(Document.raw_document_id == raw_document_id).all()
+        for doc in documents:
+            session.query(Chunk).filter(Chunk.document_id == doc.id).delete(synchronize_session=False)
+            session.flush()
+            session.query(ChunkEmbeddingLog).filter(ChunkEmbeddingLog.document_id == doc.id).delete(synchronize_session=False)
+            session.flush()
+            session.delete(doc)
+        session.flush()
+        return len(documents)
 
 
 def delete_raw_document(
